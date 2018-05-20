@@ -857,6 +857,8 @@ class DataSource():
                 "content": content
             }
         }
+        if self.config.second_content_field:
+            doc["fields"][self.config.second_content_field] = content
         if self.config.document_type:
             if self.config.document_type in DOCUMENT_TYPES:
                 doc["fields"]['documentType'] = self.config.document_type
@@ -960,8 +962,10 @@ class SchemaManager(AyfieConnector):
     def add_field_if_not_there(self):
         col_id = self.ayfie.get_collection_id(self.config.col_name)
         field_name = self.config.schema['name']
-        if not self.ayfie.exists_collection_schema_field(col_id, field_name):
-            self.ayfie.add_collection_schema_field_dict(col_id, self.config.schema)
+        schema = self.config.schema
+        if schema["mode"] == 'override' or self.ayfie.exists_collection_schema_field(col_id, field_name):
+            del schema["mode"]
+            self.ayfie.add_collection_schema_field_dict(col_id, schema)
       
 class Feeder(AyfieConnector):
 
@@ -1211,6 +1215,7 @@ class Config():
         if not schema:
             return
         s = {}
+        s['mode']                     = self.__get_item(schema, 'mode', "add_if_not_exists")
         s['name']                     = self.__get_item(schema, 'name', None)
         s['type']                     = self.__get_item(schema, 'type', "TEXT")
         s['list']                     = self.__get_item(schema, 'list', False)
@@ -1233,6 +1238,7 @@ class Config():
         self.preprocess               = self.__get_item(feeding, 'preprocess', None)
         self.ayfie_json_dump_file     = self.__get_item(feeding, 'ayfie_json_dump_file', None)
         self.report_doc_ids           = self.__get_item(feeding, 'report_doc_ids', False)
+        self.second_content_field     = self.__get_item(feeding, 'second_content_field', None)
         
     def __init_processing(self, processing):
         self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
