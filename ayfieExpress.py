@@ -579,7 +579,7 @@ class Ayfie:
 
     def create_job_and_wait(self, job_config):
         self.create_job(job_config)
-        sleep(120)  # temp placholder until state checker implemented
+        sleep(120)  # temp placeholder until state checker implemented
 
     def get_jobs(self):
         return self.__get_all_items_of_an_item_type('jobs:jobinstances')
@@ -873,6 +873,20 @@ class DataSource():
 
     def __get_document(self, file_path, auto_detected_file_type,
                                         is_training_doc=False):
+        retrieve_document = True
+        if self.config.file_picking_list:
+            retrieve_document = False
+            filename = basename(file_path)
+            if filename in self.config.file_picking_list or f"{splitext(filename)[0]}" in self.config.file_picking_list:
+                if self.config.file_destination: 
+                    if not exists(self.config.file_destination):
+                        makedirs(self.config.file_destination)                
+                    copy(file_path, self.config.file_destination)
+                    retrieve_document = True
+                    
+        if not retrieve_document:
+            return None
+            
         data_type = self.config.data_type
         if data_type == AUTO:
             data_type = auto_detected_file_type
@@ -940,11 +954,13 @@ class DataSource():
                         continue
                     for file in self.__get_document(unzipped_file, file_type,
                                                     is_training_doc):
-                      yield file
+                      if file:
+                        yield file
             else:
                 for file in self.__get_document(file_path, file_type,
                                                 is_training_doc):
-                    yield file
+                    if file:
+                        yield file
 
 
 class AyfieConnector():
@@ -1008,18 +1024,22 @@ class Feeder(AyfieConnector):
             log.warning('No data source assigned')
             return
         for document in self.data_source.get_documents():
-            self.batch.append(document)
-            if len(self.batch) >= self.config.batch_size:
-                self.__send_batch()
-                self.doc_count += len(self.batch)
-                self.batch = []
-                if not self.config.silent_mode:
-                    print(f"{self.doc_count} docs uploaded to collection '{self.config.col_name}' so far")
+            if not self.config.no_feeding:
+                self.batch.append(document)
+                if len(self.batch) >= self.config.batch_size:
+                    self.__send_batch()
+                    self.doc_count += len(self.batch)
+                    self.batch = []
+                    if not self.config.silent_mode:
+                        print(f"{self.doc_count} docs uploaded to collection '{self.config.col_name}' so far")
         if len(self.batch):
             self.__send_batch()
             self.doc_count += len(self.batch)
             if not self.config.silent_mode:
                 print(f"A total of {self.doc_count} docs has now been uploaded to collection '{self.config.col_name}'")
+        else:
+            if self.config.no_feeding:
+                print(f"Feeding turn off by no_feeding set to true")
             
     def feed_documents_commit_and_process(self):
         self.feed_documents()
@@ -1028,7 +1048,15 @@ class Feeder(AyfieConnector):
             log.info(f'Fed {self.doc_count} documents. Starting to commit')
             self.ayfie.commit_collection_and_wait(col_id)
             log.info(f'Done committing. Starting to process')
-            self.ayfie.process_collection_and_wait(col_id)
+            if self.config.processing:
+                job_config = {
+                    "collectionId" : col_id,
+                    "type" : "PROCESSING",
+                    "settings" : self.config.processing
+                }
+                self.ayfie.create_job_and_wait(job_config) 
+            else:
+                self.ayfie.process_collection_and_wait(col_id)
             log.info(f'Done processing')
         else:
             log.info(f'Fed no documents')
@@ -1171,6 +1199,8 @@ class Config():
         self.__init_schema(self.schema)
         self.feeding         = self.__get_item(config, 'feeding', False)
         self.__init_feeder(self.feeding)
+        self.processing      = self.__get_item(config, 'processing', False)
+        self.__init_processing(self.processing)
         self.clustering      = self.__get_item(config, 'clustering', False)
         self.__init_clustering(self.clustering)
         self.classification  = self.__get_item(config, 'classification', False)
@@ -1239,6 +1269,9 @@ class Config():
         self.ayfie_json_dump_file     = self.__get_item(feeding, 'ayfie_json_dump_file', None)
         self.report_doc_ids           = self.__get_item(feeding, 'report_doc_ids', False)
         self.second_content_field     = self.__get_item(feeding, 'second_content_field', None)
+        self.file_picking_list        = self.__get_item(feeding, 'file_picking_list', None)
+        self.file_destination         = self.__get_item(feeding, 'file_destination', None)
+        self.no_feeding               = self.__get_item(feeding, 'no_feeding', False)
         
     def __init_processing(self, processing):
         self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
