@@ -262,6 +262,8 @@ class Ayfie:
                         except:
                             log.debug(f"Unable to obtain after-state for collection {col_id}")
                 break
+            except MemoryError:
+                raise
             except Exception as e:
                 if attempts > MAX_ATTEMPTS:
                     raise
@@ -857,8 +859,18 @@ class DataSource():
                 "content": content
             }
         }
+        doc_size = 0
+        if self.config.report_doc_size:
+            doc_size = len(content)
         if self.config.second_content_field:
+            doc_size += doc_size
             doc["fields"][self.config.second_content_field] = content
+        if self.config.report_doc_size and not self.config.silent_mode:
+            print(doc_size)
+        if self.config.max_doc_size and doc_size > self.config.max_doc_size:  
+            if not self.config.silent_mode:
+                print("Document with id {id} dropped due to size: {doc_size}")    
+            return None
         if self.config.document_type:
             if self.config.document_type in DOCUMENT_TYPES:
                 doc["fields"]['documentType'] = self.config.document_type
@@ -908,8 +920,7 @@ class DataSource():
                         if is_training_doc:
                             training_value = row[mappings['training_column']].strip()
                             if training_value:
-                                yield self.__construct_doc(row[mappings['id']],
-                                                           training_value)
+                                yield self.__construct_doc(row[mappings['id']], training_value)
                         else:
                             yield self.__construct_doc(row[mappings['id']],
                                         row[mappings['fields']['content']])
@@ -924,8 +935,7 @@ class DataSource():
                 try:
                     for document in loads(data)[self.config.format['root']]:
                         if data_type == AYFIE_RESULT:
-                            yield self.__construct_doc(document["document"]["id"],
-                                                  document["document"]["content"])
+                            yield self.__construct_doc(document["document"]["id"], document["document"]["content"])
                         else:
                             yield document
                 except JSONDecodeError as e:
@@ -936,10 +946,9 @@ class DataSource():
             elif data_type in [WORD_DOC, XLSX, XML]:
                 log.info(f"Skipping '{file_path}' - conversion of {data_type} still not implemented")
             elif data_type == TXT:
-                yield self.__construct_doc(self.__gen_id_from_file_path(file_path),
-                                          self.__get_file_content(file_path))
+                yield self.__construct_doc(self.__gen_id_from_file_path(file_path), self.__get_file_content(file_path))
             else:
-                log.error(f"Unknown data type '{data_type}'")         
+                log.error(f"Unknown data type '{data_type}'")
 
     def get_documents(self, is_training_doc=False):
         for file_path in getNextFile(self.data_dir):
@@ -952,13 +961,11 @@ class DataSource():
                     if file_type in ZIP_FILE_TYPES:
                         log.info(f"Skipping '{unzipped_file}' - zip files within zip files are not supported")
                         continue
-                    for file in self.__get_document(unzipped_file, file_type,
-                                                    is_training_doc):
-                      if file:
-                        yield file
+                    for file in self.__get_document(unzipped_file, file_type, is_training_doc):
+                        if file:
+                            yield file
             else:
-                for file in self.__get_document(file_path, file_type,
-                                                is_training_doc):
+                for file in self.__get_document(file_path, file_type, is_training_doc):
                     if file:
                         yield file
 
@@ -1008,37 +1015,56 @@ class Feeder(AyfieConnector):
             self.ayfie.create_collection_and_wait(self.config.col_name, col_id)
 
     def __send_batch(self):
-        if self.config.report_doc_ids:
+        if self.config.report_doc_ids and not self.config.silent_mode:
             print([doc['id'] for doc in self.batch])
         if self.config.ayfie_json_dump_file:
             with open(self.config.ayfie_json_dump_file, "wb") as f:
-                f.write(dumps({'documents': self.batch}, indent=4).encode('utf-8'))
+                try:
+                    f.write(dumps({'documents': self.batch}, indent=4).encode('utf-8'))
+                except Exception as e:
+                    log.warning(f'Writing copy of batch to be sent to disk failed with the message: {str(e)}')    
         col_id = self.ayfie.get_collection_id(self.config.col_name)
-        log.info(f'Feeding batch of {len(self.batch)} documents')
+        log.info(f'About to feed batch of {len(self.batch)} documents')
         self.ayfie.feed_collection_documents(col_id, self.batch)
+
+    def process_batch(self, batch_size):
+        batch_failed = False
+        try:
+            self.__send_batch()
+        except MemoryError:
+            batch_failed = True
+            err_message = "Out of memory"
+        except Exception as e:
+            batch_failed = True
+            err_message = str(e)
+        if batch_failed and not self.config.silent_mode:
+            err_message = f"A batch of {batch_size} docs fed to collection '{self.config.col_name}' failed: '{err_message}'"
+            print(err_message)
+            log.error(err_message)
+        else:
+            self.doc_count += batch_size
+            if not self.config.silent_mode:
+                print(f"{self.doc_count} docs uploaded to collection '{self.config.col_name}' so far")
+        self.batch = []
+        batch_size = 0
         
     def feed_documents(self):
         self.batch = []
         self.doc_count = 0
+        batch_size = 0
         if not self.data_source:
             log.warning('No data source assigned')
             return
         for document in self.data_source.get_documents():
             if not self.config.no_feeding:
                 self.batch.append(document)
-                if len(self.batch) >= self.config.batch_size:
-                    self.__send_batch()
-                    self.doc_count += len(self.batch)
-                    self.batch = []
-                    if not self.config.silent_mode:
-                        print(f"{self.doc_count} docs uploaded to collection '{self.config.col_name}' so far")
-        if len(self.batch):
-            self.__send_batch()
-            self.doc_count += len(self.batch)
-            if not self.config.silent_mode:
-                print(f"A total of {self.doc_count} docs has now been uploaded to collection '{self.config.col_name}'")
+                batch_size = len(self.batch)
+                if batch_size >= self.config.batch_size:
+                    self.process_batch(batch_size)
+        if batch_size:
+            self.process_batch(batch_size)
         else:
-            if self.config.no_feeding:
+            if self.config.no_feeding and not self.config.silent_mode:
                 print(f"Feeding turn off by no_feeding set to true")
             
     def feed_documents_commit_and_process(self):
@@ -1272,6 +1298,8 @@ class Config():
         self.file_picking_list        = self.__get_item(feeding, 'file_picking_list', None)
         self.file_destination         = self.__get_item(feeding, 'file_destination', None)
         self.no_feeding               = self.__get_item(feeding, 'no_feeding', False)
+        self.report_doc_size          = self.__get_item(feeding, 'report_doc_size', False)
+        self.max_doc_size             = self.__get_item(feeding, 'max_doc_size', 0)
         
     def __init_processing(self, processing):
         self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
@@ -1472,10 +1500,6 @@ class Admin():
                 raise ConfigError('Cannot feed to non-existing collection')
         if not self.feeder.collection_exists():
             raise ConfigError(f'There is no collection "{self.config.col_name}"')
-        """
-        if self.config.processing:
-            self.processor.create_processing_job_and_wait()    
-        """
         if self.config.clustering:
             self.clusterer.create_clustering_job_and_wait()
         if self.config.classification:
@@ -1491,24 +1515,6 @@ class Admin():
             if result_testing_type is bool or result_testing_type is int:
                 testExecutor = TestExecutor(self.config)
                 testExecutor.process_test_result(result)
-                
-                """
-                if not self.config.config_source:
-                    self.config.config_source = "The test"
-                if type(self.config.search_result) is bool:
-                    if self.config.search_result:
-                        print(f'CORRECT: {self.config.config_source} is hardcoded to be correct')
-                    else:
-                        print(f'FAILURE: {self.config.config_source} is hardcoded to be a failure')
-                elif type(self.config.search_result) is int:
-                    expected_results = int(self.config.search_result)
-                    actual_results = int(result['meta']['totalDocuments'])
-                    if actual_results == expected_results:
-                        print(f'CORRECT: {self.config.config_source} returns {actual_results} results')
-                    else:
-                        print(f'FAILURE: {self.config.config_source} should return {expected_results} results, not {actual_results}')
-                """
-     
             elif self.config.search_result == 'return':
                 return result
             elif self.config.search_result == 'display':
