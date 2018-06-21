@@ -860,16 +860,18 @@ class DataSource():
             }
         }
         doc_size = 0
-        if self.config.report_doc_size:
+        if self.config.report_doc_size or self.config.max_doc_size or self.config.min_doc_size:
             doc_size = len(content)
+            if self.config.second_content_field:
+                doc_size += doc_size
         if self.config.second_content_field:
-            doc_size += doc_size
             doc["fields"][self.config.second_content_field] = content
         if self.config.report_doc_size and not self.config.silent_mode:
-            print(doc_size)
-        if self.config.max_doc_size and doc_size > self.config.max_doc_size:  
+            print(f"Doc size for document with id {id} is {doc_size} characters") 
+        if ((self.config.max_doc_size and (doc_size > self.config.max_doc_size)) 
+                     or (self.config.min_doc_size and (doc_size < self.config.min_doc_size))):  
             if not self.config.silent_mode:
-                print("Document with id {id} dropped due to size: {doc_size}")    
+                print(f"Document with id {id} dropped due to a size of {doc_size} characters")    
             return None
         if self.config.document_type:
             if self.config.document_type in DOCUMENT_TYPES:
@@ -1300,6 +1302,7 @@ class Config():
         self.no_feeding               = self.__get_item(feeding, 'no_feeding', False)
         self.report_doc_size          = self.__get_item(feeding, 'report_doc_size', False)
         self.max_doc_size             = self.__get_item(feeding, 'max_doc_size', 0)
+        self.min_doc_size             = self.__get_item(feeding, 'min_doc_size', 0)
         
     def __init_processing(self, processing):
         self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
