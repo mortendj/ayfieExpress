@@ -1028,7 +1028,7 @@ class Feeder(AyfieConnector):
         log.info(f'About to feed batch of {len(self.batch)} documents')
         self.ayfie.feed_collection_documents(col_id, self.batch)
 
-    def process_batch(self, batch_size, isLastBatch=False):
+    def process_batch(self, batch_size, is_last_batch=False):
         batch_failed = False
         try:
             self.__send_batch()
@@ -1040,7 +1040,7 @@ class Feeder(AyfieConnector):
             err_message = str(e)
         if batch_failed:
             sentence_start = "A"
-            if isLastBatch:
+            if is_last_batch:
                 sentence_start = "A last"
             err_message = f"{sentence_start} batch of {batch_size} docs fed to collection '{self.config.col_name}' failed: '{err_message}'"
             if not self.config.silent_mode:
@@ -1050,7 +1050,7 @@ class Feeder(AyfieConnector):
             self.doc_count += batch_size
             if not self.config.silent_mode:
                 sentence_start = "So far"
-                if isLastBatch:
+                if is_last_batch:
                     sentence_start = "A total of" 
                 print(f"{sentence_start} {self.doc_count} documents has been uploaded to collection '{self.config.col_name}'")
         self.batch = []
