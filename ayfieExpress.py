@@ -885,8 +885,7 @@ class DataSource():
                 raise ConfigError(f"Unknown preprocess type {preprocess}")
         return doc
 
-    def __get_document(self, file_path, auto_detected_file_type,
-                                        is_training_doc=False):
+    def __get_document(self, file_path, auto_detected_file_type, is_training_doc=False):
         retrieve_document = True
         if self.config.file_picking_list:
             retrieve_document = False
@@ -1029,7 +1028,7 @@ class Feeder(AyfieConnector):
         log.info(f'About to feed batch of {len(self.batch)} documents')
         self.ayfie.feed_collection_documents(col_id, self.batch)
 
-    def process_batch(self, batch_size):
+    def process_batch(self, batch_size, isLastBatch=False):
         batch_failed = False
         try:
             self.__send_batch()
@@ -1039,14 +1038,21 @@ class Feeder(AyfieConnector):
         except Exception as e:
             batch_failed = True
             err_message = str(e)
-        if batch_failed and not self.config.silent_mode:
-            err_message = f"A batch of {batch_size} docs fed to collection '{self.config.col_name}' failed: '{err_message}'"
-            print(err_message)
+        if batch_failed:
+            sentence_start = "A"
+            if isLastBatch:
+                sentence_start = "A last"
+            err_message = f"{sentence_start} batch of {batch_size} docs fed to collection '{self.config.col_name}' failed: '{err_message}'"
+            if not self.config.silent_mode:
+                print(err_message)
             log.error(err_message)
         else:
             self.doc_count += batch_size
             if not self.config.silent_mode:
-                print(f"{self.doc_count} docs uploaded to collection '{self.config.col_name}' so far")
+                sentence_start = "So far"
+                if isLastBatch:
+                    sentence_start = "A total of" 
+                print(f"{sentence_start} {self.doc_count} documents has been uploaded to collection '{self.config.col_name}'")
         self.batch = []
         batch_size = 0
         
@@ -1062,9 +1068,9 @@ class Feeder(AyfieConnector):
                 self.batch.append(document)
                 batch_size = len(self.batch)
                 if batch_size >= self.config.batch_size:
-                    self.process_batch(batch_size)
+                    self.process_batch(batch_size, False)
         if batch_size:
-            self.process_batch(batch_size)
+            self.process_batch(batch_size, True)
         else:
             if self.config.no_feeding and not self.config.silent_mode:
                 print(f"Feeding turn off by no_feeding set to true")
