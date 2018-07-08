@@ -3,7 +3,7 @@ from json.decoder import JSONDecodeError
 from time import sleep
 from csv import DictReader, Sniffer
 from os.path import join, basename, exists, isdir, isfile, splitext, split as path_split
-from os import listdir, makedirs, walk, system
+from os import listdir, makedirs, walk, system, stat
 from zipfile import is_zipfile, ZipFile
 from gzip import open as gzip_open
 from tarfile import is_tarfile, open as tarfile_open 
@@ -16,6 +16,7 @@ from re import search, match
 from random import random
 import logging
 import requests
+
 try:
     import PyPDF2
     pdf_is_suported = True
@@ -109,6 +110,11 @@ BOM_MARKS_NAMES = {
 MAX_CONNECTION_RETRIES = 100
 MAX_PAUSE_BEFORE_RETRY = 120
 
+RETURN_RESULT   = 'return'
+DISPLAY_RESULT  = 'display'
+ID_LIST_RESULT  = 'idList'
+SAVE_RESULT     = 'save:'
+
 class HTTPError(IOError):
     pass
 
@@ -128,20 +134,24 @@ def pretty_print(json):
         json = loads(json)
     print(dumps(json, indent=4))
     
-def getNextFile(root, dir_filter=None):
+def getNextFile(root, dir_filter=None, extension_filter=None):
     items = listdir(root)
     files = [item for item in items if isfile(join(root, item))]
     dirs = [item for item in items if isdir(join(root, item))]
     for f in files:
-        yield join(root, f)
+        path_without_extension, extension = splitext(f)
+        if extension_filter:
+            if extension in extension_filter:
+                yield join(root, f)
+        else:
+            yield join(root, f)
     for dir in dirs:
         if dir_filter:
             if dir in dir_filter:
                 continue
-        for f in getNextFile(join(root, dir), dir_filter):
+        for f in getNextFile(join(root, dir), dir_filter, extension_filter):
             yield f
-
-
+            
 class Ayfie:
 
     def __init__(self, server='127.0.0.1', port='80', version='v1'):
@@ -682,8 +692,7 @@ class Ayfie:
 
 class DataSource():
 
-    def __init__(self, source_path, config, data_dir=None,
-                                            unzip_dir=UNZIP_DIR):
+    def __init__(self, source_path, config, data_dir=None, unzip_dir=UNZIP_DIR):
         self.created_data_dir = False
         if not exists(source_path):
             raise ValueError(f"The path '{source_path}' does not exists")
@@ -703,6 +712,8 @@ class DataSource():
             raise ValueError(msg)
         self.config = config
         self.unzip_dir = unzip_dir
+        self.total_retrieved_file_count = 0
+        self.total_retrieved_file_size = 0
 
     def __del__(self):
         if self.created_data_dir:
@@ -860,18 +871,17 @@ class DataSource():
             }
         }
         doc_size = 0
-        if self.config.report_doc_size or self.config.max_doc_size or self.config.min_doc_size:
+        if self.config.report_fed_doc_size or self.config.max_doc_characters or self.config.min_doc_characters:
             doc_size = len(content)
             if self.config.second_content_field:
                 doc_size += doc_size
         if self.config.second_content_field:
             doc["fields"][self.config.second_content_field] = content
-        if self.config.report_doc_size and not self.config.silent_mode:
+        if self.config.report_fed_doc_size and not self.config.silent_mode:
             print(f"Doc size for document with id {id} is {doc_size} characters") 
-        if ((self.config.max_doc_size and (doc_size > self.config.max_doc_size)) 
-                     or (self.config.min_doc_size and (doc_size < self.config.min_doc_size))):  
-            if not self.config.silent_mode:
-                print(f"Document with id {id} dropped due to a size of {doc_size} characters")    
+        if ((self.config.max_doc_characters and (doc_size > self.config.max_doc_characters)) 
+                     or (self.config.min_doc_characters and (doc_size < self.config.min_doc_characters))):   
+            log.info(f"Document with id {id} dropped due to a size of {doc_size} characters")    
             return None
         if self.config.document_type:
             if self.config.document_type in DOCUMENT_TYPES:
@@ -891,12 +901,7 @@ class DataSource():
             retrieve_document = False
             filename = basename(file_path)
             if filename in self.config.file_picking_list or f"{splitext(filename)[0]}" in self.config.file_picking_list:
-                if self.config.file_destination: 
-                    if not exists(self.config.file_destination):
-                        makedirs(self.config.file_destination)                
-                    copy(file_path, self.config.file_destination)
-                    retrieve_document = True
-                    
+                retrieve_document = True                 
         if not retrieve_document:
             return None
             
@@ -952,23 +957,46 @@ class DataSource():
                 log.error(f"Unknown data type '{data_type}'")
 
     def get_documents(self, is_training_doc=False):
-        for file_path in getNextFile(self.data_dir):
+        self.file_paths = []
+        for file_path in getNextFile(self.data_dir, extension_filter=self.config.file_extension_filter):
             file_type = self.__get_file_type(file_path)
-            log.debug(f"'{file_path}' type auto detected to '{file_type}'")
+            if self.config.file_type_filter and not file_type in self.config.file_type_filter:
+                log.debug(f"'{file_path}' auto detected (1) as '{file_type}' and not excluded due to file type filter: {self.config.file_type_filter}")
+                continue
+            log.debug(f"'{file_path}' auto detected (1) as '{file_type}'")
             if file_type in ZIP_FILE_TYPES:
                 self.__unzip(file_type, file_path)
                 for unzipped_file in getNextFile(self.unzip_dir):
                     file_type = self.__get_file_type(unzipped_file)
+                    if self.config.file_type_filter and not file_type in self.config.file_type_filter:
+                        log.debug(f"'{file_path}' auto detected (2) as '{file_type} and not excluded due to file type filter: {self.config.file_type_filter}")
+                        continue
                     if file_type in ZIP_FILE_TYPES:
                         log.info(f"Skipping '{unzipped_file}' - zip files within zip files are not supported")
                         continue
+                    log.debug(f"'{file_path}' auto detected (2) as '{file_type}'")
                     for file in self.__get_document(unzipped_file, file_type, is_training_doc):
                         if file:
+                            self.updateFileStatistics(unzipped_file)
                             yield file
             else:
                 for file in self.__get_document(file_path, file_type, is_training_doc):
                     if file:
+                        self.file_paths.append(file_path)
+                        self.updateFileStatistics(file_path)
                         yield file
+                        
+    def pop_file_paths(self):
+        for path in self.file_paths:
+            yield path
+        self.file_paths = []
+        
+    def updateFileStatistics(self, file_path):
+        self.total_retrieved_file_count += 1
+        self.total_retrieved_file_size += stat(file_path).st_size
+        
+    def get_file_statistics(self):
+        return self.total_retrieved_file_count, self.total_retrieved_file_size
 
 
 class AyfieConnector():
@@ -1028,55 +1056,86 @@ class Feeder(AyfieConnector):
         log.info(f'About to feed batch of {len(self.batch)} documents')
         self.ayfie.feed_collection_documents(col_id, self.batch)
 
-    def process_batch(self, batch_size, is_last_batch=False):
-        batch_failed = False
-        try:
-            self.__send_batch()
-        except MemoryError:
-            batch_failed = True
-            err_message = "Out of memory"
-        except Exception as e:
-            batch_failed = True
-            err_message = str(e)
-        if batch_failed:
-            sentence_start = "A"
-            if is_last_batch:
-                sentence_start = "A last"
-            err_message = f"{sentence_start} batch of {batch_size} docs fed to collection '{self.config.col_name}' failed: '{err_message}'"
-            if not self.config.silent_mode:
-                print(err_message)
-            log.error(err_message)
+    def process_batch(self, is_last_batch=False):
+        if self.config.file_copy_destination: 
+            if not exists(self.config.file_copy_destination):
+                makedirs(self.config.file_copy_destination) 
+            for from_file_path in self.data_source.pop_file_paths():
+                if self.config.file_copy_destination:
+                    copy(from_file_path, self.config.file_copy_destination)
+                elif False:  # Salted version of the line above
+                    dummy, filename = path_split(from_file_path)
+                    to_file_path = join(self.config.file_copy_destination, str(int(random() * 10000000)) + '_' + filename)
+                    copy(from_file_path, to_file_path) 
+        self.files_to_copy = []
+        if self.config.feeding_disabled:
+            self.doc_count += self.batch_size
+            print(f"Feeding disabled, {self.doc_count} documents not uploaded to collection '{self.config.col_name}'")
         else:
-            self.doc_count += batch_size
-            if not self.config.silent_mode:
-                sentence_start = "So far"
+            batch_failed = False
+            try:
+                self.__send_batch()
+            except MemoryError:
+                batch_failed = True
+                err_message = "Out of memory"
+            except Exception as e:
+                batch_failed = True
+                err_message = str(e)
+            if batch_failed:
+                sentence_start = "A"
                 if is_last_batch:
-                    sentence_start = "A total of" 
-                print(f"{sentence_start} {self.doc_count} documents has been uploaded to collection '{self.config.col_name}'")
+                    sentence_start = "A last"
+                err_message = f"{sentence_start} batch of {self.batch_size} docs fed to collection '{self.config.col_name}' failed: '{err_message}'"
+                if not self.config.silent_mode:
+                    print(err_message)
+                log.error(err_message)
+            else:
+                self.doc_count += self.batch_size
+                if not self.config.silent_mode:
+                    sentence_start = "So far"
+                    if is_last_batch:
+                        sentence_start = "A total of" 
+                    print(f"{sentence_start} {self.doc_count} documents has been uploaded to collection '{self.config.col_name}'")
         self.batch = []
-        batch_size = 0
+        self.batch_size = 0
         
     def feed_documents(self):
         self.batch = []
         self.doc_count = 0
-        batch_size = 0
+        self.batch_size = 0
+        self.files_to_copy = []
         if not self.data_source:
             log.warning('No data source assigned')
             return
-        for document in self.data_source.get_documents():
-            if not self.config.no_feeding:
+        failure = None
+        log_message = ""
+        try:
+            for document in self.data_source.get_documents():
                 self.batch.append(document)
-                batch_size = len(self.batch)
-                if batch_size >= self.config.batch_size:
-                    self.process_batch(batch_size, False)
-        if batch_size:
-            self.process_batch(batch_size, True)
-        else:
-            if self.config.no_feeding and not self.config.silent_mode:
-                print(f"Feeding turn off by no_feeding set to true")
-            
+                self.batch_size = len(self.batch)
+                if self.batch_size >= self.config.batch_size:
+                    self.process_batch()
+            if self.batch_size:
+                self.process_batch(is_last_batch=True)
+            else:
+                if self.config.feeding_disabled and not self.config.silent_mode:
+                    print(f"Feeding has been turned off")
+                    self.total_retrieved_file_count = 0
+        except Exception as e:
+            log_message = " before script crashed"
+            raise
+        finally:
+            file_count, total_file_size = self.data_source.get_file_statistics()
+            log_message = f"A total of {file_count} files and {total_file_size} bytes were retrieved from disk" + log_message
+            log.info(log_message)
+            if not self.config.silent_mode:
+                print(log_message)
+
     def feed_documents_commit_and_process(self):
         self.feed_documents()
+        if self.config.feeding_disabled:
+            log.info(f'No commit or processing as feeding is disabled')
+            return
         if self.doc_count > 0:
             col_id = self.ayfie.get_collection_id(self.config.col_name)
             log.info(f'Fed {self.doc_count} documents. Starting to commit')
@@ -1304,11 +1363,16 @@ class Config():
         self.report_doc_ids           = self.__get_item(feeding, 'report_doc_ids', False)
         self.second_content_field     = self.__get_item(feeding, 'second_content_field', None)
         self.file_picking_list        = self.__get_item(feeding, 'file_picking_list', None)
-        self.file_destination         = self.__get_item(feeding, 'file_destination', None)
-        self.no_feeding               = self.__get_item(feeding, 'no_feeding', False)
-        self.report_doc_size          = self.__get_item(feeding, 'report_doc_size', False)
+        self.file_copy_destination    = self.__get_item(feeding, 'file_copy_destination', None)
+        self.feeding_disabled         = self.__get_item(feeding, 'feeding_disabled', False)
+        self.report_fed_doc_size      = self.__get_item(feeding, 'report_fed_doc_size', False)       
+        self.max_doc_characters       = self.__get_item(feeding, 'max_doc_characters', 0)
+        self.min_doc_characters       = self.__get_item(feeding, 'min_doc_characters', 0)       
         self.max_doc_size             = self.__get_item(feeding, 'max_doc_size', 0)
         self.min_doc_size             = self.__get_item(feeding, 'min_doc_size', 0)
+        self.file_type_filter         = self.__get_item(feeding, 'file_type_filter', None)
+        self.file_extension_filter    = self.__get_item(feeding, 'file_extension_filter', None)
+        self.rep_total_size_and_numb  = self.__get_item(feeding, 'rep_total_size_and_numb', None)
         
     def __init_processing(self, processing):
         self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
@@ -1524,15 +1588,17 @@ class Admin():
             if result_testing_type is bool or result_testing_type is int:
                 testExecutor = TestExecutor(self.config)
                 testExecutor.process_test_result(result)
-            elif self.config.search_result == 'return':
+            elif self.config.search_result == RETURN_RESULT:   
                 return result
-            elif self.config.search_result == 'display':
+            elif self.config.search_result == DISPLAY_RESULT:
                 pretty_print(result)
+            elif self.config.search_result == ID_LIST_RESULT: 
+                pretty_print([doc["document"]["id"] for doc in result["result"]])
             elif self.config.search_result.startswith('save:'):
-                with open(self.config.search_result[len('save:'):], 'wb') as f:
+                with open(self.config.search_result[len(SAVE_RESULT):], 'wb') as f:
                     f.write(dumps(result, indent=4).encode('utf-8'))
             else:    
-                msg = '"search_result" must be "display", "return", "save:<file path>" or int'
+                msg = '"search_result" must be "{DISPLAY_RESULT}", "{RETURN_RESULT}", "{ID_LIST_RESULT}", "{SAVE_RESULT}<file path>" or int'
                 raise ValueError(msg)  
                 
          
