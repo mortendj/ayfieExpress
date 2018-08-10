@@ -1,6 +1,6 @@
 from json import loads, dumps
 from json.decoder import JSONDecodeError
-from time import sleep
+from time import sleep, time
 from csv import DictReader, Sniffer
 from os.path import join, basename, exists, isdir, isfile, splitext, split as path_split
 from os import listdir, makedirs, walk, system, stat
@@ -11,11 +11,11 @@ from bz2 import decompress
 from codecs import BOM_UTF8, BOM_UTF16_LE, BOM_UTF16_BE, BOM_UTF32_LE, BOM_UTF32_BE
 from shutil import copy, rmtree as delete_dir_tree
 from typing import Union, List, Optional, Tuple, Set, Dict, DefaultDict, Any
-from sys import argv
-from re import search, match
-from random import random
+from re import search, match, sub
+from random import random, shuffle
 import logging
 import requests
+import sys
 
 try:
     import PyPDF2
@@ -56,7 +56,6 @@ _COL_EVENTS    = [_COL_APPEAR, _COL_DISAPPEAR]
 _ITEM_TYPES    = ['collections', 'classifiers', 'jobs:jobinstances']
 
 MAX_BATCH_SIZE = 1000
-MAX_ATTEMPTS   = 1
 
 DEL_ALL_COL        = "delete_all_collections"
 DEL_COL            = "delete_collection"
@@ -114,6 +113,13 @@ RETURN_RESULT   = 'return'
 DISPLAY_RESULT  = 'display'
 ID_LIST_RESULT  = 'idList'
 SAVE_RESULT     = 'save:'
+
+PROGRESS_BAR_INTERVAL = 3
+
+CLEAR_VALUES       = "clear"
+REPLACE_VALUES     = "replace"
+ADD_VALUES         = "add"
+DOC_UPDATE_ACTIONS = [CLEAR_VALUES, REPLACE_VALUES, ADD_VALUES]
 
 class HTTPError(IOError):
     pass
@@ -250,41 +256,20 @@ class Ayfie:
             if m:
                 return m.group(2)
         return None
-
-    def __execute(self, path, verb, data={}):
-        collection_state_reporting = False
-        attempts = 0
-        while True:
-            attempts += 1
-            try:
-                if collection_state_reporting:
-                    m = match(r"^collections/([^/]+)($|/)", path)   
-                    if m:
-                        col_id = m.group(1)
-                        state = self.__interact(f'collections/{col_id}', 'GET')["collectionState"]
-                        log.debug(f"Collection {col_id} now (before) in state {state}")
-                result = self.__interact(path, verb, data)
-                if collection_state_reporting:
-                    if m:
-                        try:
-                            state = self.__interact(f'collections/{col_id}', 'GET')["collectionState"]
-                            log.debug(f"Collection {col_id} now (after) in state {state}")
-                        except:
-                            log.debug(f"Unable to obtain after-state for collection {col_id}")
-                break
-            except MemoryError:
-                raise
-            except Exception as e:
-                if attempts > MAX_ATTEMPTS:
-                    raise
-                log.error(f"Connection error: {str(e)}")
-                sleep_period = attempts * 10
-                if sleep_period > 60:
-                    sleep_period = 60
-                sleep(sleep_period)
-        return result
+        
+    def __log_attempt_and_go_to_sleep(self, tries, error_msg, go_to_sleep): 
+        sleep_msg = ""
+        if go_to_sleep:
+            sleep_interval = tries * 5
+            if sleep_interval > MAX_PAUSE_BEFORE_RETRY:
+                sleep_interval = MAX_PAUSE_BEFORE_RETRY 
+            sleep(sleep_interval)
+            sleep_msg = ". Trying again in {sleep_interval} seconds"
+        msg = f"Connection issue: {error_msg}{sleep_msg}"
+        log.debug(msg)
+        print(msg)
             
-    def __interact(self, path, verb, data={}):
+    def __execute(self, path, verb, data={}):
         self.__validateInputValue(verb, HTTP_VERBS)
         request_function = getattr(requests, verb.lower())
         endpoint = self.__get_endpoint(path)
@@ -292,6 +277,7 @@ class Ayfie:
         if data and verb == "POST" and "batches" in endpoint:
             with open("data.json", 'wb') as f:
                 f.write(dumps(data).encode('utf-8'))
+
         tries = 0
         while True:
             if tries > MAX_CONNECTION_RETRIES:
@@ -301,14 +287,14 @@ class Ayfie:
                 response = request_function(endpoint, json=data, headers=self.headers)
                 break
             except requests.exceptions.ConnectionError as e:
-                sleep_interval = tries * 5
-                if sleep_interval > MAX_PAUSE_BEFORE_RETRY:
-                    sleep_interval = MAX_PAUSE_BEFORE_RETRY 
-                log.debug(f"Connection issue: {str(e)}. Trying again in {sleep_interval} seconds")
-                sleep(sleep_interval)
-            except Exception as e:
-                print(f"Previous unknown Connection issue that has to be handled in the future: {str(e)}")  
+                self.__log_attempt_and_go_to_sleep(tries, str(e), go_to_sleep=True)
+            except MemoryError:
+                self.__log_attempt_and_go_to_sleep(tries, "Out of memory - giving up!", go_to_sleep=False)
                 raise
+            except Exception as e:
+                self.__log_attempt_and_go_to_sleep(tries, "Unknown/unhandled error reason", go_to_sleep=False) 
+                raise
+                
         id_from_headers = self.__get_id_from_header(response.headers)
         log.debug(f'HTTP response status: {response.status_code}')
         if response.status_code in self.statusCodes.keys():
@@ -401,21 +387,6 @@ class Ayfie:
             if resultField in result['_embedded']:
                 return result['_embedded'][resultField]
         return []
-        
-    def __wait_for_job_state(self, job_id, state, timeout):
-        self.__validateInputValue(state, JOB_STATES)
-        count_down = timeout
-        while (True):
-            current_state = self.get_job_state(job_id)
-            if current_state == state:
-                return
-            if count_down < 0:
-                err_msg = f'Jobv {job_id} still in state '
-                err_msg += f'{current_state} and not in {state} after '
-                err_msg += f'{timeout} seconds'
-                raise TimeoutError(err_msg)
-            sleep(30)
-            count_down -= 1
 
     ######### Collection Management #########
 
@@ -519,7 +490,7 @@ class Ayfie:
 
     def __get_collections_item(self, item, col_name=None):
         return [collection[item] for collection in self.get_collections()
-                if not col_name or collection['name'] == col_name]
+            if not col_name or collection['name'] == col_name]
         
     def get_collection_names(self):
         return self.__get_collections_item('name')
@@ -562,7 +533,7 @@ class Ayfie:
         return self.json_based_meta_search(col_id, json_query)['result']
 
     def search_collection(self, col_id, query, size=10, offset=0,
-                          filters=[], exclude=[]):
+                          filters=[], exclude=[], scroll=False, meta_data=False):
         json_query = {
             "highlight" : False,
             "sort": {
@@ -574,28 +545,30 @@ class Ayfie:
             "aggregations": ["_cluster"],
             "filters": [],
             "query": query,
-            "scroll": False,
+            "scroll": scroll,
             "size": size,
             "offset": 0
         }
-        return self.json_based_doc_search(col_id, json_query)
-
-    def get_search_result_doc_ids(self, col_id, query, size=1000):
-        result = self.search_collection(col_id, query, size)
-        return [doc['document']['id'] for doc in result]
-
+        if meta_data:
+            return self.json_based_meta_search(col_id, json_query)
+        else:
+            return self.json_based_doc_search(col_id, json_query)
+        
+    def next_scroll_page(self, link):
+        return self.__execute("/".join(link.replace('//', "").split('/')[3:]), 'GET')
+ 
     ######### Jobs #########
 
     def create_job(self, job_config):
-        self.__execute('jobs', 'POST', job_config)
+        return self.__execute('jobs', 'POST', job_config)
 
     def create_job_and_wait(self, job_config):
-        self.create_job(job_config)
-        sleep(120)  # temp placeholder until state checker implemented
+        job_id = self.create_job(job_config)
+        jobsStatus = JobsStatus(self.server, self.port, self.version)
+        return jobsStatus.wait_for_job_to_finish(job_id)
 
     def get_jobs(self):
-        return self.__get_all_items_of_an_item_type('jobs:jobinstances')
-
+        return self.__execute('jobs', 'GET')
 
     ######### Clustering #########
 
@@ -628,7 +601,7 @@ class Ayfie:
         
     def create_clustering_job_and_wait(self, col_id, **kwargs):
         config = self.__get_clustering_config(col_id, **kwargs)
-        self.create_job_and_wait(config)
+        return self.create_job_and_wait(config)
         
 
     ######### Classification #########
@@ -663,15 +636,32 @@ class Ayfie:
     def delete_classifier(self, classifier_name):
         return self.__execute(f'classifiers/{classifier_name}', 'DELETE')
 
-    def tag_document(self, col_id, doc_id, tag_field, tag_values):
-        data = {tag_field: tag_values}
+    def update_document(self, col_id, doc_id, field, values):
+        data = {field: values}
         endpoint = f'collections/{col_id}/documents/{doc_id}'
         self.__execute(endpoint, 'PATCH', data)
 
-    def tag_documents(self, col_id, doc_ids, tag_field, tag_values):
+    def update_documents(self, col_id, doc_ids, field, values):
         for doc_id in doc_ids:
-            self.tag_document(col_id, doc_id, tag_field, tag_values)  
-
+            self.update_document(col_id, doc_id, field, values)  
+            
+    def update_documents_by_query(self, col_id, query, filters, update_action, field, values=None):
+        if not update_action in DOC_UPDATE_ACTIONS:
+            raise ValueError(f"Parameter update_action cannot be {update_action}, but must be in {DOC_UPDATE_ACTIONS}")
+        data = {field : values}
+        if update_action == CLEAR_VALUES:
+            data = [field]
+        data = {"query" : {"query" : query}, update_action : data}
+        if filters:
+            data['query']['filters'] = filters  
+        endpoint = f'collections/{col_id}/documents'
+        return self.__execute(endpoint, 'PATCH', data)
+        
+    def update_documents_by_query_and_wait(self, col_id, query, filters, action, field, values):
+        job_id = self.update_documents_by_query(col_id, query, filters, action, field, values)
+        jobsStatus = JobsStatus(self.server, self.port, self.version)
+        return jobsStatus.wait_for_job_to_finish(job_id)
+ 
     def create_classifier_job_and_wait(self, classifier_name, col_id, min_score,
                                        num_results, filters, output_field):
         job_config = {
@@ -687,7 +677,8 @@ class Ayfie:
             "filters" : filters,
             "outputField" : output_field
         }
-        self.create_job_and_wait(job_config)
+      
+        elapsed_time = self.create_job_and_wait(job_config)
         
 
 class DataSource():
@@ -1109,6 +1100,7 @@ class Feeder(AyfieConnector):
             return
         failure = None
         log_message = ""
+        start_time = time()
         try:
             for document in self.data_source.get_documents():
                 self.batch.append(document)
@@ -1125,34 +1117,70 @@ class Feeder(AyfieConnector):
             log_message = " before script crashed"
             raise
         finally:
+            elapsed_time = int(time() - start_time)
             file_count, total_file_size = self.data_source.get_file_statistics()
             log_message = f"A total of {file_count} files and {total_file_size} bytes were retrieved from disk" + log_message
             log.info(log_message)
             if not self.config.silent_mode:
                 print(log_message)
+        return elapsed_time
+                
+    def job_reporting_output_line(self, job, prefix, end="\n"):
+        print(f'{prefix}: {job["state"].ljust(10)} {job["id"].ljust(10)} {job["type"].ljust(22)} {job["clock_time"].ljust(8)}', end=end)
+             
+    def process(self):
+        elapsed_time = -1
+        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        job_config = {
+            "collectionId" : col_id,
+            "type" : "PROCESSING"
+        }
+        if self.config.processing:
+            job_config["settings"] = self.config.processing
+        if self.config.progress_bar:
+            job_id = self.ayfie.create_job(job_config)
+            jobsStatus = JobsStatus(self.config.server, self.config.port, self.config.api_version)
+            completed_sub_job_ids = []
+            start_time = None
+            while True:
+                all_job_statuses = jobsStatus.get_job_and_sub_job_status_obj(job_id, completed_sub_job_ids)
+                if start_time == None and all_job_statuses["job"]['state'] in ['RUNNING','SUCCEEDED','FAILURE']:
+                    start_time = time()
+                elapsed_time = int(time() - start_time)
+                for sub_job in all_job_statuses["sub_jobs"]:
+                    end = "\r"
+                    if not sub_job["state"] in ["SCHEDULED", "RUNNING"]:
+                        completed_sub_job_ids += [sub_job["id"] for sub_job in all_job_statuses["sub_jobs"]]
+                        end = "\n"
+                    if not sub_job["state"] in ["SCHEDULED"]:
+                        self.job_reporting_output_line(sub_job, 'sub-job', end)
+                job = all_job_statuses["job"]
+                if job['state'] in ["SUCCEEDED", "FAILURE"]:
+                    self.job_reporting_output_line(job, '    JOB', "\n")
+                    break
+                sleep(PROGRESS_BAR_INTERVAL)
+        else:
+            elapsed_time = self.ayfie.create_job_and_wait(job_config)
+        return elapsed_time
 
     def feed_documents_commit_and_process(self):
-        self.feed_documents()
+        feeding_time = self.feed_documents()
+        if self.config.feeding_report_time:
+            print(f"The feeding operation took {str(feeding_time)} seconds")
         if self.config.feeding_disabled:
             log.info(f'No commit or processing as feeding is disabled')
             return
-        if self.doc_count > 0:
-            col_id = self.ayfie.get_collection_id(self.config.col_name)
-            log.info(f'Fed {self.doc_count} documents. Starting to commit')
-            self.ayfie.commit_collection_and_wait(col_id)
-            log.info(f'Done committing. Starting to process')
-            if self.config.processing:
-                job_config = {
-                    "collectionId" : col_id,
-                    "type" : "PROCESSING",
-                    "settings" : self.config.processing
-                }
-                self.ayfie.create_job_and_wait(job_config) 
-            else:
-                self.ayfie.process_collection_and_wait(col_id)
-            log.info(f'Done processing')
-        else:
-            log.info(f'Fed no documents')
+        if self.doc_count <= 0:
+            log.info(f'No documents to feed')
+            return
+        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        log.info(f'Fed {self.doc_count} documents. Starting to commit')
+        self.ayfie.commit_collection_and_wait(col_id)
+        log.info(f'Done committing. Starting to process')
+        processing_time = self.process()
+        if self.config.feeding_report_time:
+            print(f"The processing operation took {str(processing_time)} seconds")
+        log.info(f'Done processing')
 
 
 class Classifier(AyfieConnector):
@@ -1168,14 +1196,14 @@ class Classifier(AyfieConnector):
 
     def __tag_documents_and_train_collection_and_wait(self):
         if self.config.training_set:  
-            self.ayfie.tag_documents(self.col_id,
+            self.ayfie.update_documents(self.col_id,
                                      self.config.training_set,
                                      self.config.training_field,
                                      ['tagged'])
         else:
             batch = []
             for document in self.training_source.get_documents(True):
-                self.ayfie.tag_document(self.col_id,
+                self.ayfie.update_document(self.col_id,
                                         document['id'],
                                         self.config.training_field,
                                         [document['training']])
@@ -1247,12 +1275,13 @@ class Clusterer(AyfieConnector):
                 "settings":{
                     "clustering": self.config.clustering
                 },
-                "filters" : self.config.filters,
+                "filters" : self.config.clustering_filters,
                 "outputField" : self.config.clustering_output_field
             }
             log.info('Starting clustering job')  # TEMP Solution
-            pretty_print(cluster_config)
-            self.ayfie.create_job_and_wait(cluster_config)
+            elapsed_time = self.ayfie.create_job_and_wait(cluster_config)
+            if self.config.clustering_report_time:
+                print(f"The clustering operation took {str(elapsed_time)} seconds")
         else:
             log.info('No clustering job')
 
@@ -1276,29 +1305,199 @@ class Querier(AyfieConnector):
     def get_collection_schema(self):
         col_id = self.ayfie.get_collection_id(self.config.col_name)
         return self.ayfie.get_collection_schema(col_id)
- 
- 
+
+class DocumentUpdater(AyfieConnector):
+
+    def __update_documents_by_query(self, query, filters, update_action, field, values=None):
+        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        return self.ayfie.update_documents_by_query_and_wait(col_id, query, filters, update_action, field, values)
+            
+    def __get_all_doc_ids(self, limit=None, random_order=False):
+        docs_per_request = 10000
+        if limit and limit != "ALL" and limit < docs_per_request:
+            docs_per_request = limit
+        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        result = self.ayfie.search_collection(col_id, "*", docs_per_request, 
+                 exclude=["content", "term", "location", "organization", "person", "email"], 
+                 scroll=True, meta_data=True)
+        all_ids = [doc['document']['id'] for doc in result["result"]]
+        while True:
+            try:
+                link = result["_links"]["next"]["href"]
+            except:
+                break
+            result = self.ayfie.next_scroll_page(link)
+            ids = [doc['document']['id'] for doc in result["result"]]
+            if len(ids) == 0:
+                break
+            all_ids += ids
+            if limit != "ALL" and len(all_ids) >= int(limit):
+                break
+        if limit != "ALL" and limit < len(all_ids):
+            all_ids = all_ids[:limit]
+        if random_order:
+            shuffle(all_ids)
+        return all_ids
+        
+    def do_updates(self):
+        filters = []
+        if self.config.doc_update_filters:
+            filters = self.config.doc_update_filters
+            if self.config.doc_update_filters == "DOC_IDS":
+                filters = [{"field":"_id", "value": self.__get_all_doc_ids(self.config.numb_of_docs_to_update)}]
+        elapsed_time = self.__update_documents_by_query(self.config.doc_update_query, filters, 
+                                       self.config.doc_update_action, self.config.doc_update_field, 
+                                       self.config.doc_update_values)
+        if self.config.doc_update_report_time:
+            print(f"The documents update operation took {str(elapsed_time)} seconds")
+            
+class JobsStatus():
+
+    def __init__(self, server='127.0.0.1', port='80', version='v1'):
+        self.ayfie = Ayfie(server, port, version)
+
+    def __extract_job_info(self, job):
+        item = {}
+        item["collectionId"] = job["definition"]["collectionId"]
+        item["type"] = job["definition"]["type"]
+        item["id"] = job["id"]
+        item["state"] = job["state"]
+        item['sub_jobs'] = []
+        try:
+            item['clock_time'] = job["details"]['telemetry']['TIME_TOTAL']
+        except:
+            item['clock_time'] = "N/A"
+        item['time_stamp'] = job["details"]["timestamp"]
+        if "_links" in job:
+            for key in job["_links"].keys(): 
+                sub_jobs = []
+                if key == key.upper():
+                    links = job["_links"][key]
+                    if type(links) is dict:
+                        sub_jobs = [links['href'].split('/')[-1]]
+                    elif type(links) is list:
+                        sub_jobs = [link['href'].split('/')[-1] for link in links]
+                    else:
+                        raise Exception("Unknown links value type")
+                if key == "previous" or key == "next":
+                    item[key] = job["_links"][key]['href'].split('/')[-1]
+                if sub_jobs:
+                    for sub_job in sub_jobs:
+                        item['sub_jobs'].append(sub_job)
+        return item
+
+    def __get_ordered_sub_job_list(self, job):
+        if len(job['sub_jobs']):
+            sub_job_id = job['sub_jobs'][0]
+            while True:
+                sub_job = self.__get_job(sub_job_id)
+                if "previous" in sub_job:
+                    sub_job_id = sub_job["previous"]
+                else:
+                    break
+            ordered_sub_job_list = [sub_job_id]      
+            while True:
+                sub_job = self.__get_job(sub_job_id)
+                if "next" in sub_job:
+                    sub_job_id = sub_job["next"]
+                    ordered_sub_job_list.append(sub_job_id)
+                else:
+                    break
+            return ordered_sub_job_list
+        return []
+
+    def __gen_auxilary_data_structure(self, json_job_list):
+        # Creates the following lookup table and data structures for later use
+        # self.job_or_sub_job_by_id
+        # self.job_and_sub_jobs_structure
+        
+        self.job_or_sub_job_by_id = {}
+        job_by_collection_id = {}
+        for job in loads(json_job_list)["_embedded"]["jobinstances"]:
+            job_info = self.__extract_job_info(job)
+            if job_info["type"] == "PROCESSING":
+                collection_id = job_info["collectionId"]   
+                if not collection_id in job_by_collection_id:
+                    job_by_collection_id[collection_id] = []
+                job_by_collection_id[collection_id].append(job_info)
+            self.job_or_sub_job_by_id[job_info["id"]] = job_info
+        for collection_id in job_by_collection_id.keys():
+            job_by_collection_id[collection_id] = sorted(job_by_collection_id[collection_id], key=lambda job_info: job_info["time_stamp"])
+        self.job_and_sub_jobs_structure = {}
+        for collection_id in job_by_collection_id.keys():
+            self.job_and_sub_jobs_structure[collection_id] = {}
+            for job in job_by_collection_id[collection_id]:
+                self.job_and_sub_jobs_structure[collection_id][job["id"]] = []
+                for sub_job_id in job["sub_jobs"]:
+                    self.job_and_sub_jobs_structure[collection_id][job["id"]].append(sub_job_id)
+        for collection_id in job_by_collection_id.keys():
+            for job in job_by_collection_id[collection_id]:
+                job['sub_jobs'] = self.__get_ordered_sub_job_list(job)
+        
+    def __get_job(self, id):
+        return self.job_or_sub_job_by_id[id]
+           
+    def __get_list_of_sub_jobs(self, json_job_list, job_id, sub_jobs_to_ignore):
+        sub_jobs_list = []
+        for collection_id in self.job_and_sub_jobs_structure.keys():
+            for id in self.job_and_sub_jobs_structure[collection_id]:
+                if job_id and job_id != id:
+                    continue
+                job_info = self.__get_job(id)
+                for sub_job_id in job_info['sub_jobs']:
+                    if not sub_jobs_to_ignore or not sub_job_id in sub_jobs_to_ignore:
+                        sub_jobs_list.append(self.__get_job(sub_job_id))
+        return sub_jobs_list
+                          
+    def get_job_and_sub_job_status_obj(self, job_id, completed_sub_jobs):
+        json_job_list = dumps(self.ayfie.get_jobs())
+        self.__gen_auxilary_data_structure(json_job_list)
+        sub_jobs = self.__get_list_of_sub_jobs(json_job_list, job_id, completed_sub_jobs)
+        return {"job": self.__get_job(job_id), "sub_jobs": sub_jobs}
+        
+    def get_job_status(self, job_id):
+        json_job_list = dumps(self.ayfie.get_jobs())
+        self.__gen_auxilary_data_structure(json_job_list)
+        return(self.__get_job(job_id)['state']) 
+
+    def wait_for_job_to_finish(self, job_id, timeout=None):
+        start_time = None
+        while True:
+            job_status = self.get_job_status(job_id)
+            if start_time == None and job_status in ['RUNNING','SUCCEEDED','FAILURE']:
+                start_time = time()
+            elapsed_time = int(time() - start_time)
+            if job_status in ['SUCCEEDED', 'FAILURE']:
+                break
+            if timeout and elapsed_time > timeout:
+                raise TimeoutError(f"Waited for more than {timeout} seconds for job to finish")
+            sleep(1)
+        return elapsed_time
+        
 class Config():
 
     def __init__(self, config):
-        self.silent_mode     = self.__get_item(config, 'silent_mode', True)
-        self.config_source   = self.__get_item(config, 'config_source', None)
-        self.server          = self.__get_item(config, 'server', '127.0.0.1')
-        self.port            = self.__get_item(config, 'port', '80')
-        self.api_version     = self.__get_item(config, 'api_version', 'v1')
-        self.col_name        = self.__get_item(config, 'col_name', None)
-        self.csv_mappings    = self.__get_item(config, 'csv_mappings', None)
-        self.schema          = self.__get_item(config, 'schema', False)
+        self.silent_mode      = self.__get_item(config, 'silent_mode', True)
+        self.config_source    = self.__get_item(config, 'config_source', None)
+        self.server           = self.__get_item(config, 'server', '127.0.0.1')
+        self.port             = self.__get_item(config, 'port', '80')
+        self.api_version      = self.__get_item(config, 'api_version', 'v1')
+        self.col_name         = self.__get_item(config, 'col_name', None)
+        self.csv_mappings     = self.__get_item(config, 'csv_mappings', None)
+        self.progress_bar     = self.__get_item(config, 'progress_bar', True)
+        self.document_update  = self.__get_item(config, 'document_update', False)
+        self.processing       = self.__get_item(config, 'processing', False)
+        self.schema           = self.__get_item(config, 'schema', False)
         self.__init_schema(self.schema)
-        self.feeding         = self.__get_item(config, 'feeding', False)
+        self.feeding          = self.__get_item(config, 'feeding', False)
         self.__init_feeder(self.feeding)
-        self.processing      = self.__get_item(config, 'processing', False)
-        self.__init_processing(self.processing)
-        self.clustering      = self.__get_item(config, 'clustering', False)
+        self.clustering       = self.__get_item(config, 'clustering', False)
         self.__init_clustering(self.clustering)
-        self.classification  = self.__get_item(config, 'classification', False)
+        self.classification   = self.__get_item(config, 'classification', False)
         self.__init_classification(self.classification)
-        self.search          = self.__get_item(config, 'search', False)
+        self.documents_update = self.__get_item(config, 'documents_update', False)
+        self.__init_documents_update(self.documents_update)
+        self.search           = self.__get_item(config, 'search', False)
         self.__init_search(self.search)
         self.regression_testing = self.__get_item(config, 'regression_testing', False)
         self.__init_regression_testing(self.regression_testing)
@@ -1322,7 +1521,7 @@ class Config():
 
     def __get_item(self, config, item, default):
         if config:
-            if item in config and (config[item] or type(config[item]) is bool):
+            if item in config and (config[item] or type(config[item]) in [bool, int]):
                 return config[item]
         return default
 
@@ -1373,10 +1572,12 @@ class Config():
         self.file_type_filter         = self.__get_item(feeding, 'file_type_filter', None)
         self.file_extension_filter    = self.__get_item(feeding, 'file_extension_filter', None)
         self.rep_total_size_and_numb  = self.__get_item(feeding, 'rep_total_size_and_numb', None)
+        self.feeding_report_time      = self.__get_item(feeding, 'report_time', False)
         
-    def __init_processing(self, processing):
+    def __init_processing(self, processing): 
         self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
         self.near_duplicate_evaluation= self.__get_item(processing, 'near_duplicate_evaluation', None)
+        self.processing_report_time   = self.__get_item(processing, 'report_time', False)
 
     def __init_clustering(self, clustering):
         if not clustering:
@@ -1390,8 +1591,9 @@ class Config():
         c['maxDfFraction']            = self.__get_item(clustering, 'maxDfFraction', 0.25)
         c['gramianThreshold']         = self.__get_item(clustering, 'gramianThreshold', 0.14)
         self.clustering               = c
-        self.filters                  = self.__get_item(clustering, 'filters', [])
+        self.clustering_filters       = self.__get_item(clustering, 'filters', [])
         self.clustering_output_field  = self.__get_item(clustering, 'outputField', '_cluster')
+        self.clustering_report_time   = self.__get_item(clustering, 'report_time', False)
 
     def __init_classification(self, classification):
         self.csv_mappings             = self.__get_item(classification, 'csv_mappings', self.csv_mappings)
@@ -1404,7 +1606,16 @@ class Config():
         self.num_results              = self.__get_item(classification, 'num_results', 1)
         self.classifier_filters       = self.__get_item(classification, 'filters', [])
         self.classifier_output_field  = self.__get_item(classification, 'classifier_output_field', 'pathclassification')
-
+        
+    def __init_documents_update(self, documents_update):       
+        self.doc_update_query         = self.__get_item(documents_update, 'query', "*")
+        self.doc_update_action        = self.__get_item(documents_update, 'update_action', ADD_VALUES)
+        self.doc_update_field         = self.__get_item(documents_update, 'field', 'trainingClass')
+        self.doc_update_values        = self.__get_item(documents_update, 'values', [])
+        self.doc_update_filters       = self.__get_item(documents_update, 'filters', [])
+        self.numb_of_docs_to_update   = self.__get_item(documents_update, 'numb_of_docs', "ALL")
+        self.doc_update_report_time   = self.__get_item(documents_update, 'report_time', False)
+        
     def __init_search(self, search):
         self.search_query_file        = self.__get_item(search, 'search_query_file', None)
         self.search_result            = self.__get_item(search, 'result', "display")
@@ -1540,6 +1751,7 @@ class Admin():
             test_source = None
         self.classifier = Classifier(self.config, training_source, test_source)
         self.querier = Querier(self.config)
+        self.document_updater = DocumentUpdater(self.config)
         
     def run_config(self):
         if self.config.regression_testing:
@@ -1571,12 +1783,19 @@ class Admin():
                 self.feeder.feed_documents_commit_and_process()
             else:
                 raise ConfigError('Cannot feed to non-existing collection')
-        if not self.feeder.collection_exists():
-            raise ConfigError(f'There is no collection "{self.config.col_name}"')
+        else:
+            if not self.feeder.collection_exists():
+                raise ConfigError(f'There is no collection "{self.config.col_name}"')
+            if self.config.processing:
+                self.feeder.process()
+
+        if self.config.documents_update:
+            self.document_updater.do_updates()
         if self.config.clustering:
             self.clusterer.create_clustering_job_and_wait()
         if self.config.classification:
             self.classifier.do_classification()
+   
         if self.config.search:
             try:
                 result = self.querier.search_collection()
@@ -1637,9 +1856,13 @@ def run_cmd_line(cmd_line_args):
             admin = Admin(Config(config))
             return admin.run_config()
 
-
 run_from_cmd_line = False
 if __name__ == '__main__':
     run_from_cmd_line = True
-    run_cmd_line(argv)
+    run_cmd_line(sys.argv)
+    
+
+ 
+    
+
 
