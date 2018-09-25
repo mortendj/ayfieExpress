@@ -728,7 +728,7 @@ class DataSource():
             raise ValueError(f"The path '{self.config.data_source}' does not exists")
         if isdir(self.config.data_source):
             self.data_dir = self.config.data_source
-        elif isfile(data_source):
+        elif isfile(self.config.data_source):
             self.data_dir = DATA_DIR + '_' +  str(int(random() * 10000000))
             self.created_temp_data_dir = True
             self.__recreate_directory(self.data_dir)
@@ -1928,7 +1928,9 @@ class Admin():
     def __init__(self, config):
         log.info('######### Starting a new session #########')
         self.config = config
-        data_source = DataSource(self.config)
+        data_source = None
+        if self.config.feeding:
+            data_source = DataSource(self.config)
         self.schema_manager = SchemaManager(self.config)
         self.feeder = Feeder(self.config, data_source)
         self.clusterer  = Clusterer(self.config)
