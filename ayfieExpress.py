@@ -2,14 +2,14 @@ from json import loads, dumps
 from json.decoder import JSONDecodeError
 from time import sleep, time
 from csv import DictReader, Sniffer
-from os.path import join, basename, exists, isdir, isfile, splitext, split as path_split
+from os.path import join, basename, dirname, exists, isdir, isfile, splitext, split as path_split, getsize, isabs
 from os import listdir, makedirs, walk, system, stat, getcwd, chdir
 from zipfile import is_zipfile, ZipFile
 from gzip import open as gzip_open
 from tarfile import is_tarfile, open as tarfile_open 
 from bz2 import decompress
 from codecs import BOM_UTF8, BOM_UTF16_LE, BOM_UTF16_BE, BOM_UTF32_LE, BOM_UTF32_BE
-from shutil import copy, rmtree as delete_dir_tree
+from shutil import copy, copytree as copy_dir_tree, rmtree as delete_dir_tree
 from typing import Union, List, Optional, Tuple, Set, Dict, DefaultDict, Any
 from re import search, match, sub
 from random import random, shuffle
@@ -31,6 +31,9 @@ DATA_DIR       = 'dataDir'
 LOG_DIR        = 'log'
 
 OFF_LINE       = "off-line"
+OVERRIDE_CONFIG= "override_config"
+RESPECT_CONFIG = "respect_config"
+
 HTTP_VERBS     = ['POST', 'GET', 'PUT', 'PATCH', 'DELETE']
 JOB_TYPES      = ['PROCESSING', 'CLUSTERING', 'SAMPLING', 'CLASSIFICATION']
 JOB_STATES     = ['RUNNING', 'SUCCEEDED']
@@ -141,24 +144,6 @@ def pretty_print(json):
             raise ValueError('json string cannot be empty string')
         json = loads(json)
     print(dumps(json, indent=4))
-    
-def getNextFile(root, dir_filter=None, extension_filter=None):
-    items = listdir(root)
-    files = [item for item in items if isfile(join(root, item))]
-    dirs = [item for item in items if isdir(join(root, item))]
-    for f in files:
-        path_without_extension, extension = splitext(f)
-        if extension_filter:
-            if extension in extension_filter:
-                yield join(root, f)
-        else:
-            yield join(root, f)
-    for dir in dirs:
-        if dir_filter:
-            if dir in dir_filter:
-                continue
-        for f in getNextFile(join(root, dir), dir_filter, extension_filter):
-            yield f
             
 class Ayfie:
 
@@ -456,8 +441,8 @@ class Ayfie:
     def commit_collection(self, col_id):
         self.__change_collection_state(col_id, "COMMIT")
 
-    def process_collection(self, col_id, config=None):
-        self.__change_collection_state(col_id, "PROCESS")
+    def process_collection(self, col_id, config={}):
+        self.create_job(config)
 
     def train_collection(self, classifier_name):
         # Need to be merge with collection transitions
@@ -468,9 +453,8 @@ class Ayfie:
         self.commit_collection(col_id)
         self.__wait_for_collection_to_be_committed(col_id, timeout)
 
-    def process_collection_and_wait(self, col_id, config=None, timeout=300):
-        self.process_collection(col_id, config)
-        self.__wait_for_collection_to_be_processed(col_id, timeout)
+    def process_collection_and_wait(self, col_id, config={}, timeout=300):
+        self.create_job_and_wait(config)
 
     def train_collection_and_wait(self, col_id, timeout=300):
         self.train_collection(col_id)
@@ -571,6 +555,12 @@ class Ayfie:
 
     def get_jobs(self):
         return self.__execute('jobs', 'GET')
+        
+    def get_job(self, job_id, verbose=None):
+        endpoint = f'jobs/{job_id}'
+        if verbose:
+            endpoint += "?verbose=true"
+        return self.__execute(endpoint, 'GET')
 
     ######### Clustering #########
 
@@ -716,37 +706,68 @@ class ExpressTools():
             shuffle(all_ids)
         return all_ids
         
+        
+class WebContent():
 
-class DataSource():
+    def __is_downloadable(self, url):
+        content_type = requests.head(url, allow_redirects=True).headers.get('content-type')
+        for type in ['text', 'html']: 
+            if type in content_type.lower():
+                return False
+        return True
+        
+    def download(self, url, directory):
+        if not self.__is_downloadable(url):
+            raise ValueError(f"No file can be downloaded from url '{url}'")
+        response = requests.get(url, allow_redirects=True)
+        filename = self.__get_filename_from_response(response)
+        if not filename:
+            filename = url.split('/')[-1]
+        path = join(directory, filename)
+        with open(path, 'wb') as f:
+            f.write(response.content)
+        return path
+                
+    def __get_filename_from_response(self, response):
+        content_disposition = response.headers.get('content-disposition')
+        if content_disposition:
+            filenames = re.findall('filename=(.+)', content_disposition)
+            if len(filenames) > 0:
+                return filenames[0]
+        return None
 
-    def __init__(self, config, unzip_dir=UNZIP_DIR):
-        self.config = config
-        self.created_temp_data_dir = False
-        if self.config.data_source == None:
-            raise ValueError(f"The feeding parameter 'data_source' is mandatory")
-        if not exists(self.config.data_source):
-            raise ValueError(f"The path '{self.config.data_source}' does not exists")
-        if isdir(self.config.data_source):
-            self.data_dir = self.config.data_source
-        elif isfile(self.config.data_source):
-            self.data_dir = DATA_DIR + '_' +  str(int(random() * 10000000))
-            self.created_temp_data_dir = True
-            self.__recreate_directory(self.data_dir)
-            copy(self.config.data_source, self.data_dir)
-        else:
-            msg = f'Source path "{self.config.data_source}" is neither a directory, '
-            msg += 'a regular file nor a supported zip file type.'
-            raise ValueError(msg)
-        self.unzip_dir = unzip_dir
-        self.total_retrieved_file_count = 0
-        self.total_retrieved_file_size = 0
 
-    def __del__(self):
-        if self.created_temp_data_dir:
-            delete_dir_tree(self.data_dir)
-
+class FileHandlingTools():
+ 
+    def get_file_type(self, file_path):
+        detected_encoding = None
+        if isfile(file_path):
+            extension = splitext(file_path)[-1].lower()
+            if is_zipfile(file_path):
+                if extension == ".docx":
+                    return WORD_DOC, detected_encoding
+                elif extension == ".xlsx":
+                    return XLSX, detected_encoding
+                return ZIP_FILE
+            elif is_tarfile(file_path):
+                return TAR_FILE, detected_encoding
+            else:
+                with open(file_path, 'rb') as f:
+                    start_byte_sequence = f.read(100)
+                for pattern in FILE_SIGNATURES.keys():
+                    if start_byte_sequence.startswith(pattern):
+                        if pattern in TEXT_ENCODINGS:
+                            self.detected_encoding = BOM_MARKS_NAMES[pattern]
+                            log.debug(f"'{file_path}' encoding auto detected to '{self.detected_encoding}'")
+                            start_byte_sequence = start_byte_sequence[len(pattern):]
+                            return self.__get_text_format_type(start_byte_sequence, extension), detected_encoding
+                        return FILE_SIGNATURES[pattern], detected_encoding
+                return self.__get_text_format_type(start_byte_sequence, extension), detected_encoding
+        return None, detected_encoding
+        
     def __get_text_format_type(self, start_byte_sequence, extension):
         start_char_sequence = start_byte_sequence.decode('iso-8859-1')
+        org_start_char_sequence = start_char_sequence
         for char in [' ', '\n', '\r', '\t']:
             start_char_sequence = start_char_sequence.replace(char, '')
         char_patterns = {
@@ -762,61 +783,138 @@ class DataSource():
         elif extension == '.txt':
             return TXT
         elif extension == '.csv' or extension == '.tsv':
-            with open(file_path, 'r') as f:
-                try:
-                    dialect = Sniffer().sniff(f.read(1024))
-                    return CSV
-                except:
-                    return None
-            
-    def __get_file_type(self, file_path):
-        self.detected_encoding = None
-        extension = splitext(file_path)[-1].lower()
-        if is_zipfile(file_path):
-            if extension == ".docx":
-                return WORD_DOC
-            elif extension == ".xlsx":
-                return XLSX
-            return ZIP_FILE
-        elif is_tarfile(file_path):
-            return TAR_FILE
-        else:
-            with open(file_path, 'rb') as f:
-                start_byte_sequence = f.read(100)
-            for pattern in FILE_SIGNATURES.keys():
-                if start_byte_sequence.startswith(pattern):
-                    if pattern in TEXT_ENCODINGS:
-                        self.detected_encoding = BOM_MARKS_NAMES[pattern]
-                        log.debug(f"'{file_path}' encoding auto detected to '{self.detected_encoding}'")
-                        start_byte_sequence = start_byte_sequence[len(pattern):]
-                        return self.__get_text_format_type(start_byte_sequence, extension)
-                    return FILE_SIGNATURES[pattern]
-            return self.__get_text_format_type(start_byte_sequence, extension)
+            try:
+                dialect = Sniffer().sniff(org_start_char_sequence)
+                return CSV
+            except:
+                return None
         return None
 
-    def __unzip(self, file_type, file_path):
+    def unzip(self, file_type, file_path, unzip_dir):
         if file_type not in ZIP_FILE_TYPES:
             return False
-        self.__recreate_directory(self.unzip_dir)
+        if not unzip_dir:
+            raise ValueError("No unzip directory is given")
+        self.recreate_directory(unzip_dir)
         if file_type == ZIP_FILE:
             with ZipFile(file_path, 'r') as z:
-                z.extractall(self.unzip_dir)
+                z.extractall(unzip_dir)
         elif file_type == TAR_FILE:
             with tarfile_open(file_path) as tar:
-                tar.extractall(self.unzip_dir)
+                tar.extractall(unzip_dir)
         elif file_type == GZ_FILE:
-            with open(output_path, 'wb') as f, gzip_open(file_path, 'rb') as z:
+            with open(unzip_dir, 'wb') as f, gzip_open(file_path, 'rb') as z:
                 f.write(z.read())
         elif file_type == BZ2_FILE:
-            with open(output_path, 'wb') as f, open(file_path,'rb') as z:
+            with open(unzip_dir, 'wb') as f, open(file_path,'rb') as z:
                 f.write(decompress(z.read()))
         elif file_type == _7Z_FILE:
             log.info(f"Skipping '{file_path}' - 7z decompression still not implemented")
         elif file_type == RAR_FILE:
             log.info(f"Skipping '{file_path}' - rar decompression still not implemented")
         else:
-            raise ValueError('Unknown zip file type "{zip_file_type}"')
+            raise ValueError(f'Unknown zip file type "{zip_file_type}"')
         return True
+        
+        
+    def delete_directory(self, dir_path): 
+        tries = 0
+        while exists(dir_path):
+            if tries > 5:
+                raise IOError(f"Failed to delete directory '{dir_path}'")    
+            delete_dir_tree(dir_path)
+            tries += 1
+            sleep(5 * tries)
+
+    def recreate_directory(self, dir_path):
+        self.delete_directory(dir_path)
+        makedirs(dir_path)
+        if not exists(dir_path):
+            raise IOError("Failed to create directory '{dir_path}'") 
+
+    def get_next_file(self, root, dir_filter=None, extension_filter=None):
+        items = listdir(root)
+        files = [item for item in items if isfile(join(root, item))]
+        dirs = [item for item in items if isdir(join(root, item))]
+        for f in files:
+            path_without_extension, extension = splitext(f)
+            if extension_filter:
+                if extension in extension_filter:
+                    yield join(root, f)
+            else:
+                yield join(root, f)
+        for dir in dirs:
+            if dir_filter:
+                if dir in dir_filter:
+                    continue
+            for f in self.get_next_file(join(root, dir), dir_filter, extension_filter):
+                yield f
+
+    def __write_fragment_to_file(self, dir_name, fragment_name, fragment_count, fragment_lines):
+        with open(join(dir_name, f"{fragment_name}_{fragment_count}"), "wb") as f:
+            f.write(''.join(fragment_lines).encode('utf-8')) 
+            
+    def split_files(self, dir_path, lines_per_fragment=0, max_fragments=0):
+        for log_file in self.get_next_file(dir_path):
+            self.split_file(log_file, lines_per_fragment, max_fragments)            
+                
+    def split_file(self, file_path, lines_per_fragment=0, max_fragments=0):
+        lines_per_fragment = int(lines_per_fragment)
+        max_fragments = int(max_fragments)
+        line_count = 0
+        fragment_count = 0
+        fragment_name = basename(file_path)
+        dir_name = dirname(file_path)
+        fragment_lines = []
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                fragment_lines.append(line)
+                if lines_per_fragment and line_count >= lines_per_fragment - 1:
+                    self.__write_fragment_to_file(dir_name, fragment_name, fragment_count, fragment_lines)                    
+                    line_count = 0
+                    fragment_lines = []
+                    fragment_count += 1
+                    if max_fragments and fragment_count >= max_fragments:
+                        return
+                else:
+                    line_count += 1
+        if line_count > 0: 
+            self.__write_fragment_to_file(dir_name, fragment_name, fragment_count, fragment_lines)
+         
+
+class DataSource():
+
+    def __init__(self, config, unzip_dir=UNZIP_DIR):
+        self.config = config
+        self.created_temp_data_dir = False
+        if self.config.data_source == None:
+            raise ValueError(f"The new parameter 'data_source' is mandatory and used instead of both 'data_dir' and 'data_file'. Replace any of these with 'data_source' if you are still using those in your configuration.")
+        if not exists(self.config.data_source):
+            raise ValueError(f"'{self.config.data_source}' is not a file or a directory")
+        if isdir(self.config.data_source):
+            self.data_dir = self.config.data_source
+        elif isfile(self.config.data_source):
+            self.data_dir = DATA_DIR + '_' +  str(int(random() * 10000000))
+            self.created_temp_data_dir = True
+            FileHandlingTools().recreate_directory(self.data_dir)
+            copy(self.config.data_source, self.data_dir)
+        else:
+            msg = f'Source path "{self.config.data_source}" is neither a directory, '
+            msg += 'a regular file nor a supported zip file type.'
+            raise ValueError(msg)
+        self.unzip_dir = unzip_dir
+        self.total_retrieved_file_count = 0
+        self.total_retrieved_file_size = 0
+
+    def __del__(self):
+        if self.created_temp_data_dir:
+            delete_dir_tree(self.data_dir)
+            
+    def __get_file_type(self, file_path):
+        return FileHandlingTools().get_file_type(file_path)
+
+    def __unzip(self, file_type, file_path, unzip_dir):
+        return FileHandlingTools().unzip(file_type, file_path, unzip_dir)
 
     def __convert_pdf_to_text(self, file_path):
         if not pdf_is_suported:
@@ -862,18 +960,6 @@ class DataSource():
         else:
             return content.decode(self.config.encoding)
         raise Exception(f"Unable to resolve encoding for '{file_path}'")
-            
-    def __recreate_directory(self, dir_path):
-        tries = 0
-        while exists(dir_path):
-            if tries > 5:
-                raise IOError(f"Failed to delete directory '{dir_path}'")    
-            delete_dir_tree(dir_path)
-            tries += 1
-            sleep(5 * tries)
-        makedirs(dir_path)
-        if not exists(dir_path):
-            raise IOError("Failed to create directory '{dir_path}'")
         
     def __skip_file_byte_order_mark(self, f):
         bytes_to_skip = 0
@@ -936,7 +1022,7 @@ class DataSource():
             data_type = auto_detected_file_type
             if not data_type:
                 log.error(f'File type detetection failed for "{file_path}"')
-                return
+                return None
         args = { 'mode': 'rb' }
         if data_type == CSV:       
             args = {
@@ -971,7 +1057,8 @@ class DataSource():
                         else:
                             yield document
                 except JSONDecodeError as e:
-                    raise DataFormatError(f"{file_path}: {str(e)}")  
+                    log.error(f"JSON decoding error for {file_path}: {str(e)}")
+                    return None
             elif data_type == PDF:
                 yield self.__construct_doc(self.__gen_id_from_file_path(file_path),
                                              self.__convert_pdf_to_text(file_path))
@@ -983,17 +1070,18 @@ class DataSource():
                 log.error(f"Unknown data type '{data_type}'")
 
     def get_documents(self, is_training_doc=False):
+        self.file_size = {}
         self.file_paths = []
-        for file_path in getNextFile(self.data_dir, extension_filter=self.config.file_extension_filter):
-            file_type = self.__get_file_type(file_path)
+        for file_path in FileHandlingTools().get_next_file(self.data_dir, extension_filter=self.config.file_extension_filter):
+            file_type, self.detected_encoding = self.__get_file_type(file_path)
             if self.config.file_type_filter and not file_type in self.config.file_type_filter:
                 log.debug(f"'{file_path}' auto detected (1) as '{file_type}' and not excluded due to file type filter: {self.config.file_type_filter}")
                 continue
             log.debug(f"'{file_path}' auto detected (1) as '{file_type}'")
             if file_type in ZIP_FILE_TYPES:
-                self.__unzip(file_type, file_path)
-                for unzipped_file in getNextFile(self.unzip_dir):
-                    file_type = self.__get_file_type(unzipped_file)
+                self.__unzip(file_type, file_path, self.unzip_dir)
+                for unzipped_file in FileHandlingTools().get_next_file(self.unzip_dir):
+                    file_type, self.detected_encoding = self.__get_file_type(unzipped_file)
                     if self.config.file_type_filter and not file_type in self.config.file_type_filter:
                         log.debug(f"'{file_path}' auto detected (2) as '{file_type} and not excluded due to file type filter: {self.config.file_type_filter}")
                         continue
@@ -1001,16 +1089,16 @@ class DataSource():
                         log.info(f"Skipping '{unzipped_file}' - zip files within zip files are not supported")
                         continue
                     log.debug(f"'{file_path}' auto detected (2) as '{file_type}'")
-                    for file in self.__get_document(unzipped_file, file_type, is_training_doc):
-                        if file:
+                    for document in self.__get_document(unzipped_file, file_type, is_training_doc):
+                        if document:
                             self.updateFileStatistics(unzipped_file)
-                            yield file
+                            yield document
             else:
-                for file in self.__get_document(file_path, file_type, is_training_doc):
-                    if file:
+                for document in self.__get_document(file_path, file_type, is_training_doc):
+                    if document:
                         self.file_paths.append(file_path)
                         self.updateFileStatistics(file_path)
-                        yield file
+                        yield document
                         
     def pop_file_paths(self):
         for path in self.file_paths:
@@ -1018,11 +1106,14 @@ class DataSource():
         self.file_paths = []
         
     def updateFileStatistics(self, file_path):
-        self.total_retrieved_file_count += 1
-        self.total_retrieved_file_size += stat(file_path).st_size
+        if not file_path in self.file_size:
+            self.file_size[file_path] = stat(file_path).st_size
         
     def get_file_statistics(self):
-        return self.total_retrieved_file_count, self.total_retrieved_file_size
+        total_size = 0
+        for file_path in self.file_size:
+            total_size += self.file_size[file_path]
+        return len(self.file_size), total_size
 
 
 class AyfieConnector():
@@ -1140,8 +1231,12 @@ class Feeder(AyfieConnector):
         failure = None
         log_message = ""
         start_time = time()
+        id_picking_list = [str(id) for id in self.config.id_picking_list]
         try:
             for document in self.data_source.get_documents():
+                if id_picking_list:
+                    if not (str(document["id"]) in id_picking_list):
+                        continue
                 self.batch.append(document)
                 self.batch_size = len(self.batch)
                 if self.batch_size >= self.config.batch_size:
@@ -1346,56 +1441,60 @@ class Querier(AyfieConnector):
         
 class Reporter(AyfieConnector):
 
-    def __get_jobs_status(self):        
+    def __get_jobs_status(self):     
         jobsStatus = JobsStatus(self.config.server, self.config.port)
         col_id = None
         job_id = None
         latest_job_only = False
-        if self.config.jobs in ["collection", "collection_latest"]:
+        if self.config.report_jobs in ["collection", "collection_latest"]:
             col_id = self.ayfie.get_collection_id(self.config.col_name)
-            if self.config.jobs == "collection_latest":
+            if self.config.report_jobs == "collection_latest":
                 latest_job_only = True
-        elif type(self.config.jobs) is int:
-            job_id = self.config.jobs
-        elif self.config.jobs != "all":
-            raise ValueError(f"Unknown jobs value '{self.config.jobs}'")
-        jobsStatus.print_jobs_overview(None, col_id, job_id, latest_job_only)
-          
+        elif type(self.config.report_jobs) is int:
+            job_id = self.config.report_jobs
+        elif self.config.report_jobs != "all":
+            raise ValueError(f"Unknown jobs value '{self.config.report_jobs}'")
+        main_job_only = True
+        jobsStatus.print_jobs_overview(None, col_id, job_id, latest_job_only, self.config.report_verbose)
+                 
     def __get_logs_status(self):
-        if not self.config.logs:
-            return
-        if type(self.config.logs) is str:
-            log_file_path = self.config.logs
-        else:
-            log_file = "logs.txt"
+        if self.config.report_logs_source and self.config.report_retrieve_logs:
+            raise ValueError("Reporting options 'logs_source' and 'retrieve_logs' cannot both be set")
+        if self.config.report_logs_source:
+            if self.config.report_logs_source.startswith('http'):
+                download_dir = "temp-x"
+                FileHandlingTools().recreate_directory(download_dir)
+                log_file_path = WebContent().download(self.config.report_logs_source, download_dir)
+            else:
+                log_file_path = self.config.report_logs_source
+        elif self.config.report_retrieve_logs:
             old_path = getcwd()
-            log_file_path = join(old_path, log_file)
-            if not (exists(self.config.logs) and isdir(self.config.logs)):
-                self._print(f'Directory "{self.config.logs}" not found')
-                return
-            chdir(self.config.logs)
+            chdir(self.config.report_retrieve_logs)
+            log_file = "_x_logs_x_.txt"
+            log_file_path = join(self.config.report_retrieve_logs, log_file)
             try:
-                with open("../output.log", "a") as output:
-                    call(f"docker-compose logs -t > {log_file_path}", shell=True, stdout=output, stderr=output)
+                with open(log_file, "a") as f:
+                    call(f"docker-compose logs -t > {log_file}", shell=True, stdout=f, stderr=f)
             except:
                 raise
             finally:
-                chdir(old_path)   
-        log_analyzer = LogAnalyzer(log_file_path)
-        log_analyzer.analyze()
+                chdir(old_path)
+        else:
+            return
+
+        if not exists(log_file_path):
+            raise ValueError(f"'{log_file_path}' does not exist")
+        LogAnalyzer(log_file_path, self.config.report_output_destination, "temp_log_unpacking").analyze()
+
         
     def __get_memory_config(self):
         print ("got here")
 
     def do_reporting(self):
-        if self.config.jobs:
+        if self.config.report_jobs:
             self.__get_jobs_status()
-        if self.config.logs:
+        if self.config.report_logs_source or self.config.report_retrieve_logs:
             self.__get_logs_status()
-        """
-        if self.config.memory_config:
-            self.__get_memory_config()
-        """
       
 class DocumentUpdater(AyfieConnector):
 
@@ -1421,23 +1520,54 @@ class DocumentUpdater(AyfieConnector):
                        
 class LogAnalyzer():
 
-    def __init__(self, log_file_path):
+    def __init__(self, log_file_path, output_destination, log_unpacking_dir):
+        self.output_destination = output_destination
+        self.log_file = log_file_path
+        self.log_unpacking_dir = log_unpacking_dir
         if not exists(log_file_path):
             raise ConfigError(f"There is no {log_file_path}")
-        if isfile(log_file_path):
-            self.log_files = [log_file_path]
-        elif isdir(log_file_path):
-            self.log_files = [join(log_file_path, f) for f in listdir(log_file_path) if isfile(join(log_file_path, f))]
-        else:
-            raise ConfigError(f"'{log_file_path}' is neither a file nor a directory")
+        self.info = [
+            {
+                "pattern" : r"^.*m[a-z]*_[0-9]*\s.*Container is mem limited to .*G \(of (.*G) of the host\).*$",
+                "extraction": [("Total RAM on host", 1)]
+            },
+            {
+                "pattern" : r"^.*m([a-z]*_[0-9]*)\s.*Container is mem limited to (.*G) \(of .*G of the host\).*$",
+                "extraction": [("Container", 1), ("Assigned RAM", 2)]
+            },
+            {
+                "pattern" : r"^.*assigning (.* MB) to spark, driver receives (.*M), worker and executor receive (.*M).*$",
+                "extraction": [("Spark memory", 1), ("Driver memory", 2), ("Worker & Executor memory", 3)]
+            },
+            {
+                "pattern" : r"^.*export SPARK_WORKER_CORES=([0-9]+).*$",
+                "extraction": [("Spark worker cores", 1)]
+            },
+            {
+                "pattern" : r"^.*export SPARK_WORKER_INSTANCES=([0-9]+).*$",
+                "extraction": [("Spark worker instances", 1)]
+            },
+            {
+                "pattern" : r"^.*SPARK_EXECUTOR_INSTANCES=([0-9]+).*$",
+                "extraction": [("Spark executor instances", 1)]
+            }
+        ]
         self.symptoms = [
+            {
+                "pattern" : r"^.*Ignoring unknown properties with keys.*$",
+                "indication": "one has used an API parameter that does not exist or is mispelled."
+            },
+            {
+                "pattern" : r"^.*All masters are unresponsive.*$",
+                "indication": "there was a unsufficient process clean up after a failure. Corrective action would be to bounce the api container."
+            },
             {
                 "pattern" : r"^.*Missing an output location for shuffle.*$",
                 "indication": "the system has run out of memory"
             },
             {
                 "pattern" : r"^.*None of the configured nodes are available.*$",
-                "indication": "the host is probably low on disk and/or memory."
+                "indication": "the host is low on disk and/or memory."
             },
             {
                 "pattern" : r"^.*java\.lang\.OutOfMemoryError.*$",
@@ -1453,7 +1583,7 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*all shards failed.*$",
-                "indication": "???????????????????????"
+                "indication": "something is off with the Elasticsearch index partitions. Using httpie to investigate further, replace 'server' and 'port' and then run 'http -a ayfie:maintenance:oD server:port/elasticsearch/_cat/indices'"
             },
             {
                 "pattern" : r"^.*index read-only / allow delete \(api\).*$",
@@ -1465,17 +1595,23 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*ltlocate extraction result parsing failed.*$",
-                "indication": "the json ltlocate extraction result parsing probably timed out, or somewhat less likely, it contained incorrect escape characters."
+                "indication": "the json ltlocate extraction result parsing timed out, or somewhat less likely, it contained incorrect escape characters."
             },
             {
                 "pattern" : r"^.*IndexNotFoundException\[no such index\].*$",
                 "indication": 'the referenced collection was only partly deleted (meta data doc still exists). Do complete deletion with: docker exec -it <elasticsearch container name> curl -XDELETE -H Content-Type:application/json 127.0.0.1:9200/.ayfie-collection-metadata-v1/collection/<collection_id>'
-            },           
+            }, 
+            {
+                "pattern" : r"^.*Ignoring unknown properties with keys.*$",
+                "indication": "a possible wrong API parameter has been applied with the likely result that the intended operation never got carried out."
+            },            
             {
                 "pattern" : r"^.*INFO: Exception.*at (org|scala|java)\..*\(.*:[0-9]+\).*.\)      at java.lang.Thread.run\(Thread.java:748\)$",
-                "indication": "just testing 2"
+                "indication": "this is just a test for exceptions in general"
             }
-        ]
+        ] 
+        
+    def clear_counters(self):
         for symptom in self.symptoms:
             symptom["occurences"] = 0
             symptom["last_occurence_line"] = None
@@ -1483,40 +1619,103 @@ class LogAnalyzer():
         self.errors_detected = False
         self.exceptions = {}
         
-    def __process_log_file(self, log_file):
-        with open(log_file) as f:
-            line_count = 0
-            for line in f:
-                line_count += 1
-                for symptom in self.symptoms:
-                    m = match(symptom["pattern"], line)
-                    if m:
-                        self.errors_detected = True
-                        symptom["occurences"] += 1
-                        symptom["last_occurence_line"] = line_count
-                        symptom["last_occurence_sample"] = m.group(0)
-                m = match(r"Exception", line)
-                if m:
-                    if not m.group(0) in self.exceptions:
-                        self.exceptions[m.group(0)] = 0
-                    self.exceptions[m.group(0)] += 1
-                    
-    def analyze(self):
-        for log_file in self.log_files:
-            self.__process_log_file(log_file)
+    def __prepare_temp_log_directory(self, log_file, log_dir):
+        fht = FileHandlingTools()
+        file_type = fht.get_file_type(log_file)
+        unzip_dir = "temp_unzip"
+        if fht.unzip(file_type, log_file, unzip_dir):
+            fht.delete_directory(log_dir)
+            copy_dir_tree(unzip_dir, log_dir)
+        else:
+            fht.recreate_directory(log_dir)
+            copy(log_file, log_dir)
         
-        for exception in self.exceptions:
-            print(exception, self.exceptions[exception])        
-        if self.errors_detected:
-            print("====== DETECTED FAILURE INDICATORS ======")
-            for symptom in self.symptoms:
-                if symptom["occurences"] > 0:
-                    print("\n====== Failure Indicator ======")
-                    print(f'There are {symptom["occurences"]} occurrences (last one on line {symptom["last_occurence_line"]}) of this message:\n')
-                    print(f'{symptom["last_occurence_sample"]}\n')
-                    print(f'The message indicates that {symptom["indication"]}')
+    def __process_log_file(self, log_file):
+        if not exists(log_file):
+            raise ValueError(f"Path '{log_file}' does not exists")
+        if isdir(log_file):
+            raise ValueError(f"'{log_file}' is not a file, but a directory")
+        with open(log_file, "r", encoding="utf-8") as f:
+            self.line_count = 0
+            self.info_pieces = {}
+            try:
+                for line in f:
+                    if self.line_count == 0:
+                        if not line.startswith("Attaching to"):
+                            raise DataFormatError(f"File '{log_file}' is not recognized as a ayfie Inspector log file")
+                    self.line_count += 1
+                    for info in self.info:
+                        m = match(info["pattern"], line)
+                        if m:
+                            output_line = []
+                            for item in info["extraction"]:
+                                output_line.append(f"{item[0]}: {m.group(item[1])}")
+                            self.info_pieces[", ".join(output_line)] = True
+                    for symptom in self.symptoms:
+                        m = match(symptom["pattern"], line)
+                        if m:
+                            self.errors_detected = True
+                            symptom["occurences"] += 1
+                            symptom["last_occurence_line"] = self.line_count
+                            symptom["last_occurence_sample"] = m.group(0)
+                    m = match(r"Exception", line)
+                    if m:
+                        if not m.group(0) in self.exceptions:
+                            self.exceptions[m.group(0)] = 0
+                        self.exceptions[m.group(0)] += 1
+            except UnicodeDecodeError as e:
+                raise DataFormatError(f"'File {log_file}' is most likley a binary file (or at a mininimum of wrong encoding)")
+            except Exception:
+                raise
+                        
+    def analyze(self):
+        if isfile(self.log_file):
+            self.__prepare_temp_log_directory(self.log_file, self.log_unpacking_dir)
+        elif isdir(self.log_file):
+            self.log_unpacking_dir = self.log_file
+        else:
+            ValueError(f"'{self.log_file}' is neither a file nor a directory")
+        for log_file in FileHandlingTools().get_next_file(self.log_unpacking_dir):
+            self.clear_counters()
+            analyses_output = ""
+            is_log_file = True
+            line_info = ""
+            try:
+                self.__process_log_file(log_file)
+                line_info = f'({self.line_count} LINES) '
+            except DataFormatError:
+                is_log_file = False
+            analyses_output += f'\n\n====== FILE "{log_file}" {line_info}======\n'
+            if is_log_file:
+                """
+                for exception in self.exceptions:
+                    print(exception, self.exceptions[exception]) 
+                """ 
+                if len(self.info_pieces) > 0:
+                    analyses_output += "\n====== System Information ======\n"
+                    for info_piece in self.info_pieces.keys():
+                        analyses_output += f"{info_piece}\n"
+                    
+                if self.errors_detected:
+                    for symptom in self.symptoms:
+                        if symptom["occurences"] > 0:
+                            analyses_output += "\n====== Failure Indicator ======\n"
+                            analyses_output += f'There are {symptom["occurences"]} occurrences (last one on line {symptom["last_occurence_line"]}) of this message:\n\n'
+                            analyses_output += f'{symptom["last_occurence_sample"]}\n\n'
+                            analyses_output += f'The message could possibly indicate that {symptom["indication"]}\n'
+                else:
+                    analyses_output += "\n  NO KNOWN ERRORS DETECTED"
+            else:
+                analyses_output += "\n  DOES NOT SEEM TO BE AN AYFIE INSPECTOR LOG FILE"
+                
+            if self.output_destination == "terminal":
+                print(analyses_output)
+            else:
+                with open(self.output_destination, 'wb') as f:
+                    f.write(analyses_output.encode('utf-8'))
+                    
+            
                       
- 
 class JobsStatus():
 
     def __init__(self, server='127.0.0.1', port='80', version='v1'):
@@ -1626,11 +1825,17 @@ class JobsStatus():
         self.__gen_auxilary_data_structure(json_job_list)
         return(self.__get_job(job_id)['state']) 
         
-    def _print_job_and_sub_jobs(self, job_info):
-        print(f'   -job: {job_info["state"]} {id} {job_info["type"]} {job_info["time_stamp"].replace("T", " ").split(".")[0]}')
+    def _print_job_and_sub_jobs(self, job_info, verbose=False):
+        if verbose:
+            print(dumps(self.ayfie.get_job(job_info["id"]), indent=3))
+        else:
+            print(f'   -job: {job_info["state"]} {job_info["id"]} {job_info["type"]} {job_info["time_stamp"].replace("T", " ").split(".")[0]}')
         for sub_job_id in job_info['sub_jobs']:
-            sub_job_info = self.__get_job(sub_job_id)
-            print(f'       -sub-job: {sub_job_info["state"].ljust(10)} {sub_job_id.ljust(10)} {sub_job_info["type"].ljust(22)}  {sub_job_info["clock_time"].ljust(8)}')
+            if verbose:
+                print(dumps(self.ayfie.get_job(sub_job_id), indent=3))
+            else:
+                sub_job_info = self.__get_job(sub_job_id)
+                print(f'       -sub-job: {sub_job_info["state"].ljust(10)} {sub_job_id.ljust(10)} {sub_job_info["type"].ljust(22)}  {sub_job_info["clock_time"].ljust(8)}')
 
     def wait_for_job_to_finish(self, job_id, timeout=None):
         start_time = None
@@ -1646,7 +1851,7 @@ class JobsStatus():
             sleep(1)
         return elapsed_time
         
-    def print_jobs_overview(self, json_job_list=None, col_id=None, job_id=None, latest_job_only=False):
+    def print_jobs_overview(self, json_job_list=None, col_id=None, job_id=None, latest_job_only=False, verbose=False):
         if not json_job_list:
             json_job_list = dumps(self.ayfie.get_jobs()) 
         self.__gen_auxilary_data_structure(json_job_list)
@@ -1663,11 +1868,10 @@ class JobsStatus():
                 elif job_info["time_stamp"] > self.__get_job(latest_job_id)["time_stamp"]:
                     latest_job_id = id
                 if not latest_job_only:
-                    self._print_job_and_sub_jobs(job_info)
+                    self._print_job_and_sub_jobs(job_info, verbose)
             if latest_job_only:
-                self._print_job_and_sub_jobs(self.__get_job(latest_job_id))
+                self._print_job_and_sub_jobs(self.__get_job(latest_job_id), verbose)
                
-        
 class Config():
 
     def __init__(self, config):
@@ -1745,12 +1949,14 @@ class Config():
             raise ConfigError('Field schema configurarion requires field name to be set')
  
     def __init_feeder(self, feeding):
+        self.data_source              = self.__get_item(feeding, 'data_source', None)
+        if self.data_source and not isabs(self.data_source):
+            self.data_source = join(path_split(self.config_source)[0], self.data_source)
         self.csv_mappings             = self.__get_item(feeding, 'csv_mappings', self.csv_mappings)
         self.data_type                = self.__get_item(feeding, 'data_type', AUTO)
         self.prefeeding_action        = self.__get_item(feeding, 'prefeeding_action', NO_ACTION)
         self.format                   = self.__get_item(feeding, 'format', {})
         self.encoding                 = self.__get_item(feeding, 'encoding', AUTO)
-        self.data_source              = self.__get_item(feeding, 'data_source', None)
         self.batch_size               = self.__get_item(feeding, 'batch_size', MAX_BATCH_SIZE)
         self.document_type            = self.__get_item(feeding, 'document_type', None)
         self.preprocess               = self.__get_item(feeding, 'preprocess', None)
@@ -1758,6 +1964,7 @@ class Config():
         self.report_doc_ids           = self.__get_item(feeding, 'report_doc_ids', False)
         self.second_content_field     = self.__get_item(feeding, 'second_content_field', None)
         self.file_picking_list        = self.__get_item(feeding, 'file_picking_list', None)
+        self.id_picking_list          = self.__get_item(feeding, 'id_picking_list', [])
         self.file_copy_destination    = self.__get_item(feeding, 'file_copy_destination', None)
         self.feeding_disabled         = self.__get_item(feeding, 'feeding_disabled', False)
         self.report_fed_doc_size      = self.__get_item(feeding, 'report_fed_doc_size', False)       
@@ -1831,19 +2038,23 @@ class Config():
         self.search_example           = self.__get_item(search, 'search_example', {})
         
     def __init_report(self, report):
-        self.output                   = self.__get_item(report, 'output', None)
-        self.jobs                     = self.__get_item(report, 'jobs', False)
-        self.logs                     = self.__get_item(report, 'logs', False)        
+        self.report_output_destination= self.__get_item(report, 'output_destination', "terminal")
+        self.report_verbose           = self.__get_item(report, 'verbose', False)
+        self.report_jobs              = self.__get_item(report, 'jobs', False)
+        self.report_logs_source       = self.__get_item(report, 'logs_source', False)
+        self.report_retrieve_logs     = self.__get_item(report, 'retrieve_logs', False)
         
     def __init_regression_testing(self, regression_testing):
         self.upload_config_dir        = self.__get_item(regression_testing, 'upload_config_dir', None)
         self.query_config_dir         = self.__get_item(regression_testing, 'query_config_dir', None)
-        self.server_settings          = self.__get_item(regression_testing, 'server_settings', "always_override")
+        self.server_settings          = self.__get_item(regression_testing, 'server_settings', "override_config")
 
     def __inputDataValidation(self):
-        if not self.regression_testing and self.server != OFF_LINE:
+        if self.server != OFF_LINE and (not self.regression_testing):
             if not self.col_name:
-                raise ConfigError('Mandatory input parameter collection name (col_name) has not been given')    
+                raise ConfigError('Mandatory input parameter collection name (col_name) has not been given') 
+        if self.report_logs_source and self.report_retrieve_logs: 
+            raise ConfigError('Either analyze existing file or produce new ones, both is not possible')  
             
 class TestExecutor():
 
@@ -1852,6 +2063,8 @@ class TestExecutor():
         self.use_master_config_settings = use_master_config_settings
         
     def __execute_config(self, config_file_path):
+        if getsize(config_file_path) > 99999:
+            return
         with open(config_file_path, 'rb') as f:
             try:
                 config = loads(f.read().decode('utf-8'))
@@ -1864,18 +2077,15 @@ class TestExecutor():
         if 'port' not in config or self.use_master_config_settings:
             config['port'] = self.config.port
 
-        if "feeding" in config:
-            if "data_dir" in config["feeding"]:
-                config["feeding"]['data_dir'] = self.__getFilePath(
-                              config_file_path, config["feeding"]['data_dir'])
-            if "data_file" in config:
-                config["feeding"]['data_file'] = self.__getFilePath(
-                              config_file_path, config["feeding"]['data_file'])
-
         if "search" in config:
             if "search_query_file" in config["search"]:
-                config["search"]['search_query_file'] = self.__getFilePath(
+                config["search"]['search_query_file'] = self.__get_file_path(
                         config_file_path, config["search"]['search_query_file'])
+                        
+        if "reporting" in config:
+            if "logs_source" in config["reporting"]:
+                config["reporting"]['logs_source'] = self.__get_file_path(
+                        config_file_path, config["reporting"]['logs_source'])
 
         temp_config_file = 'tmp.cfg'
         with open(temp_config_file, 'wb') as f:
@@ -1885,25 +2095,22 @@ class TestExecutor():
         except Exception as e:
             print(f'TEST ERROR: "{config_file_path}": {str(e)}')
             raise
-
+        
     def __retrieve_configs_and_execute(self, root_dir):
-        for config_file_path in getNextFile(root_dir, ["data", "query", "disabled"]):
+        for config_file_path in FileHandlingTools().get_next_file(root_dir, ["data", "query", "disabled", "logs"]):
             self.__execute_config(config_file_path)
 
-    def __getFilePath(self, root_path, leaf_path):
-        if leaf_path.startswith('$/'):   
-            return join(path_split(root_path)[0], leaf_path[2:])
-        else:
+    def __get_file_path(self, root_path, leaf_path):
+        if isabs(leaf_path):
             return leaf_path
+        return join(path_split(root_path)[0], leaf_path)
 
     def run_tests(self):
         if self.config.upload_config_dir:
-            config_dir = self.__getFilePath(self.config.config_source,
-                                            self.upload_config_dir)
+            config_dir = self.__get_file_path(self.config.config_source, self.upload_config_dir)
             self.__retrieve_configs_and_execute(config_dir)
         if self.config.query_config_dir:
-            config_dir = self.__getFilePath(self.config.config_source,
-                                            self.config.query_config_dir)
+            config_dir = self.__get_file_path(self.config.config_source, self.config.query_config_dir)
             self.__retrieve_configs_and_execute(config_dir)
 
     def process_test_result(self, result):
@@ -1949,10 +2156,12 @@ class Admin():
         
     def run_config(self):
         if self.config.regression_testing:
-            if self.config.server_settings == "always_override":
+            if self.config.server_settings == OVERRIDE_CONFIG:
                 use_master_settings = True
-            else:
+            elif self.config.server_settings == RESPECT_CONFIG:
                 use_master_settings = False
+            else:
+                raise ValueError(f"'{self.config.server_settings}' is not a valid value for regression-testing.server_settings")
             testExecutor = TestExecutor(self.config, use_master_settings)
             testExecutor.run_tests()
             return
@@ -2000,7 +2209,7 @@ class Admin():
 
                 result_testing_type = type(self.config.search_result)
                 if result_testing_type is bool or result_testing_type is int:
-                    testExecutor = TestExecutor(self.config)
+                    testExecutor = TestExecutor(self.config, self.config.server_settings)
                     testExecutor.process_test_result(result)
                 elif self.config.search_result == RETURN_RESULT:   
                     return result
@@ -2018,8 +2227,7 @@ class Admin():
         if self.config.reporting:
             self.reporter.do_reporting()
             
-                
-         
+                  
 def run_cmd_line(cmd_line_args):
     script_path = cmd_line_args[0]
     script_name_with_ext = basename(script_path)
@@ -2035,7 +2243,6 @@ def run_cmd_line(cmd_line_args):
             level = logging.DEBUG)
     
     if len(cmd_line_args) != 2:
-        print(f'\nVersion: {script_name}')
         print(f'Usage:   python {script_name_with_ext} <config-file-path>')
     else:
         config_file_path = cmd_line_args[1]
@@ -2060,4 +2267,6 @@ run_from_cmd_line = False
 if __name__ == '__main__':
     run_from_cmd_line = True
     run_cmd_line(sys.argv)
+    
+    
     
