@@ -1583,7 +1583,7 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*all shards failed.*$",
-                "indication": "something is off with the Elasticsearch index partitions. Using httpie to investigate further, replace 'server' and 'port' and then run 'http -a ayfie:maintenance:oD server:port/elasticsearch/_cat/indices'"
+                "indication": "something is off with the Elasticsearch index partitions."
             },
             {
                 "pattern" : r"^.*index read-only / allow delete \(api\).*$",
@@ -1713,8 +1713,7 @@ class LogAnalyzer():
             else:
                 with open(self.output_destination, 'wb') as f:
                     f.write(analyses_output.encode('utf-8'))
-                    
-            
+
                       
 class JobsStatus():
 
