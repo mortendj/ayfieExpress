@@ -2191,7 +2191,6 @@ class Admin():
                         self.feeder.feed_documents_and_commit()
                     else:
                         self.feeder.feed_documents_commit_and_process()
-                    print('got here y')
                 else:
                     raise ConfigError('Cannot feed to non-existing collection')
             else:
