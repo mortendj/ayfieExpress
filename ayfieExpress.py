@@ -26,39 +26,42 @@ except:
 
 log = logging.getLogger(__name__)
 
-UNZIP_DIR      = 'unzipDir'
-DATA_DIR       = 'dataDir'
-LOG_DIR        = 'log'
+ROOT_SUB_DIR       = 'ayfieExpress_output'
+UNZIP_DIR          = join(ROOT_SUB_DIR, 'unzipDir')
+DATA_DIR           = join(ROOT_SUB_DIR, 'dataDir')
+LOG_DIR            = join(ROOT_SUB_DIR, 'log')
+INSPECTOR_LOG_DIR  = join(ROOT_SUB_DIR, 'inspector_download')
+TMP_LOG_UNPACK_DIR = join(ROOT_SUB_DIR, 'temp_log_unpacking')
 
-OFF_LINE       = "off-line"
-OVERRIDE_CONFIG= "override_config"
-RESPECT_CONFIG = "respect_config"
+OFF_LINE           = "off-line"
+OVERRIDE_CONFIG    = "override_config"
+RESPECT_CONFIG     = "respect_config"
 
-HTTP_VERBS     = ['POST', 'GET', 'PUT', 'PATCH', 'DELETE']
-JOB_TYPES      = ['PROCESSING', 'CLUSTERING', 'SAMPLING', 'CLASSIFICATION']
-JOB_STATES     = ['RUNNING', 'SUCCEEDED']
-FIELD_TYPES    = ['TEXT_EN', 'KEYWORD', 'ENTITY', 'EMAIL_ADDRESS', 'INTEGER',
-                  'DOUBLE', 'BOOLEAN', 'DATE', 'PATH']
-FIELD_ROLES    = ['EMAIL_SUBJECT', 'EMAIL_BODY', 'EMAIL_SENT_DATE',
-                  'EMAIL_SENDER', 'EMAIL_TO', 'EMAIL_CC', 'EMAIL_BCC',
-                  'EMAIL_ATTACHMENT', 'EMAIL_CONVERSATION_INDEX',
-                  'EMAIL_HEADEREXTRACTION', 'DEDUPLICATION', 'CLUSTERING',
-                  'HIGHLIGHTING', 'FAST_HIGHLIGHTING']
-COL_TRANS      = ['DELETE', 'RECOVER', 'COMMIT', 'PROCESS']
-COL_STATES     = ['EMPTY', 'IMPORTING', 'COMMITTING', 'COMMITTED', 'PROCESSING',
-                  'PROCESSED', 'ABORTED', 'DELETING']
-CLA_TRANS      = ['TRAIN']
-CLA_STATES     = ['INITIALIZED', 'TRAINING', 'TRAINED', 'INVALID']
+HTTP_VERBS         = ['POST', 'GET', 'PUT', 'PATCH', 'DELETE']
+JOB_TYPES          = ['PROCESSING', 'CLUSTERING', 'SAMPLING', 'CLASSIFICATION']
+JOB_STATES         = ['RUNNING', 'SUCCEEDED']
+FIELD_TYPES        = ['TEXT_EN', 'KEYWORD', 'ENTITY', 'EMAIL_ADDRESS', 'INTEGER',
+                      'DOUBLE', 'BOOLEAN', 'DATE', 'PATH']
+FIELD_ROLES        = ['EMAIL_SUBJECT', 'EMAIL_BODY', 'EMAIL_SENT_DATE',
+                      'EMAIL_SENDER', 'EMAIL_TO', 'EMAIL_CC', 'EMAIL_BCC',
+                      'EMAIL_ATTACHMENT', 'EMAIL_CONVERSATION_INDEX',
+                      'EMAIL_HEADEREXTRACTION', 'DEDUPLICATION', 'CLUSTERING',
+                      'HIGHLIGHTING', 'FAST_HIGHLIGHTING']
+COL_TRANS          = ['DELETE', 'RECOVER', 'COMMIT', 'PROCESS']
+COL_STATES         = ['EMPTY', 'IMPORTING', 'COMMITTING', 'COMMITTED', 'PROCESSING',
+                      'PROCESSED', 'ABORTED', 'DELETING']
+CLA_TRANS          = ['TRAIN']
+CLA_STATES         = ['INITIALIZED', 'TRAINING', 'TRAINED', 'INVALID']
 
-DOCUMENT_TYPES   = ['email', 'default', 'autodetect']
-PREPROCESS_TYPES = ['rfc822', 'NUIX', 'IPRO']
+DOCUMENT_TYPES     = ['email', 'default', 'autodetect']
+PREPROCESS_TYPES   = ['rfc822', 'NUIX', 'IPRO']
 
-_COL_APPEAR    = 'appear'
-_COL_DISAPPEAR = 'disappear'
-_COL_EVENTS    = [_COL_APPEAR, _COL_DISAPPEAR]
-_ITEM_TYPES    = ['collections', 'classifiers', 'jobs:jobinstances']
+_COL_APPEAR        = 'appear'
+_COL_DISAPPEAR     = 'disappear'
+_COL_EVENTS        = [_COL_APPEAR, _COL_DISAPPEAR]
+_ITEM_TYPES        = ['collections', 'classifiers', 'jobs:jobinstances']
 
-MAX_BATCH_SIZE = 1000
+MAX_BATCH_SIZE     = 1000
 
 DEL_ALL_COL        = "delete_all_collections"
 DEL_COL            = "delete_collection"
@@ -67,26 +70,26 @@ RECREATE_COL       = "recreate_collection"
 NO_ACTION          = "no_action"
 PRE_ACTIONS        = [NO_ACTION, DEL_ALL_COL, DEL_COL, RECREATE_COL, CREATE_MISSING_COL]
 
-AUTO           = "auto"
-AYFIE          = "ayfie"
-AYFIE_RESULT   = "ayfie_result"
-CSV            = "csv"
-JSON           = "json"
-PDF            = "pdf"
-WORD_DOC       = "docx"
-XLSX           = "xlsx"
-TXT            = "txt"
-XML            = 'xml'
-DATA_TYPES     = [AYFIE, AYFIE_RESULT, JSON, CSV, PDF, TXT]
-JSON_TYPES     = [AYFIE, AYFIE_RESULT, JSON]
-ZIP_FILE       = 'zip'
-TAR_FILE       = 'tar'
-GZ_FILE        = 'gz'
-BZ2_FILE       = 'bz2'
-_7Z_FILE       = '7z'
-RAR_FILE       = 'rar'
-ZIP_FILE_TYPES = [ZIP_FILE, TAR_FILE, GZ_FILE, BZ2_FILE, _7Z_FILE, RAR_FILE]
-TEXT_ENCODINGS = [BOM_UTF8, BOM_UTF16_LE, BOM_UTF16_BE, BOM_UTF32_LE, BOM_UTF32_BE]
+AUTO               = "auto"
+AYFIE              = "ayfie"
+AYFIE_RESULT       = "ayfie_result"
+CSV                = "csv"
+JSON               = "json"
+PDF                = "pdf"
+WORD_DOC           = "docx"
+XLSX               = "xlsx"
+TXT                = "txt"
+XML                = 'xml'
+DATA_TYPES         = [AYFIE, AYFIE_RESULT, JSON, CSV, PDF, TXT]
+JSON_TYPES         = [AYFIE, AYFIE_RESULT, JSON]
+ZIP_FILE           = 'zip'
+TAR_FILE           = 'tar'
+GZ_FILE            = 'gz'
+BZ2_FILE           = 'bz2'
+_7Z_FILE           = '7z'
+RAR_FILE           = 'rar'
+ZIP_FILE_TYPES     = [ZIP_FILE, TAR_FILE, GZ_FILE, BZ2_FILE, _7Z_FILE, RAR_FILE]
+TEXT_ENCODINGS     = [BOM_UTF8, BOM_UTF16_LE, BOM_UTF16_BE, BOM_UTF32_LE, BOM_UTF32_BE]
 
 FILE_SIGNATURES = {
     b'\x1f\x8b': GZ_FILE,
@@ -112,10 +115,10 @@ BOM_MARKS_NAMES = {
 MAX_CONNECTION_RETRIES = 100
 MAX_PAUSE_BEFORE_RETRY = 120
 
-RETURN_RESULT   = 'return'
-DISPLAY_RESULT  = 'display'
-ID_LIST_RESULT  = 'idList'
-SAVE_RESULT     = 'save:'
+RETURN_RESULT      = 'return'
+DISPLAY_RESULT     = 'display'
+ID_LIST_RESULT     = 'idList'
+SAVE_RESULT        = 'save:'
 
 PROGRESS_BAR_INTERVAL = 3
 
@@ -261,6 +264,7 @@ class Ayfie:
         request_function = getattr(requests, verb.lower())
         endpoint = self.__get_endpoint(path)
         log.debug(self.__gen_req_log_msg(verb, endpoint, data, self.headers))
+        
         if data and verb == "POST" and "batches" in endpoint:
             with open("data.json", 'wb') as f:
                 f.write(dumps(data).encode('utf-8'))
@@ -708,17 +712,8 @@ class ExpressTools():
         
         
 class WebContent():
-
-    def __is_downloadable(self, url):
-        content_type = requests.head(url, allow_redirects=True).headers.get('content-type')
-        for type in ['text', 'html']: 
-            if type in content_type.lower():
-                return False
-        return True
         
     def download(self, url, directory):
-        if not self.__is_downloadable(url):
-            raise ValueError(f"No file can be downloaded from url '{url}'")
         response = requests.get(url, allow_redirects=True)
         filename = self.__get_filename_from_response(response)
         if not filename:
@@ -748,7 +743,7 @@ class FileHandlingTools():
                     return WORD_DOC, detected_encoding
                 elif extension == ".xlsx":
                     return XLSX, detected_encoding
-                return ZIP_FILE
+                return ZIP_FILE, detected_encoding
             elif is_tarfile(file_path):
                 return TAR_FILE, detected_encoding
             else:
@@ -890,7 +885,7 @@ class DataSource():
         if self.config.data_source == None:
             raise ValueError(f"The new parameter 'data_source' is mandatory and used instead of both 'data_dir' and 'data_file'. Replace any of these with 'data_source' if you are still using those in your configuration.")
         if not exists(self.config.data_source):
-            raise ValueError(f"'{self.config.data_source}' is not a file or a directory")
+            raise ValueError(f"There is no file or directory called '{self.config.data_source}'")
         if isdir(self.config.data_source):
             self.data_dir = self.config.data_source
         elif isfile(self.config.data_source):
@@ -1295,8 +1290,8 @@ class Feeder(AyfieConnector):
         else:
             elapsed_time = self.ayfie.create_job_and_wait(job_config)
         return elapsed_time
-
-    def feed_documents_commit_and_process(self):
+        
+    def feed_documents_and_commit(self):
         feeding_time = self.feed_documents()
         if self.config.feeding_report_time:
             self._print(f"The feeding operation took {str(feeding_time)} seconds")
@@ -1309,7 +1304,11 @@ class Feeder(AyfieConnector):
         col_id = self.ayfie.get_collection_id(self.config.col_name)
         log.info(f'Fed {self.doc_count} documents. Starting to commit')
         self.ayfie.commit_collection_and_wait(col_id)
-        log.info(f'Done committing. Starting to process')
+        log.info(f'Done committing')
+
+    def feed_documents_commit_and_process(self):
+        self.feed_documents_and_commit()
+        log.info(f'Starting to process')
         processing_time = self.process()
         if self.config.feeding_report_time:
             self._print(f"The processing operation took {str(processing_time)} seconds")
@@ -1462,15 +1461,14 @@ class Reporter(AyfieConnector):
             raise ValueError("Reporting options 'logs_source' and 'retrieve_logs' cannot both be set")
         if self.config.report_logs_source:
             if self.config.report_logs_source.startswith('http'):
-                download_dir = "temp-x"
-                FileHandlingTools().recreate_directory(download_dir)
-                log_file_path = WebContent().download(self.config.report_logs_source, download_dir)
+                FileHandlingTools().recreate_directory(INSPECTOR_LOG_DIR)
+                log_file_path = WebContent().download(self.config.report_logs_source, INSPECTOR_LOG_DIR)
             else:
                 log_file_path = self.config.report_logs_source
         elif self.config.report_retrieve_logs:
             old_path = getcwd()
             chdir(self.config.report_retrieve_logs)
-            log_file = "_x_logs_x_.txt"
+            log_file = "inspector-logs.txt"
             log_file_path = join(self.config.report_retrieve_logs, log_file)
             try:
                 with open(log_file, "a") as f:
@@ -1484,7 +1482,7 @@ class Reporter(AyfieConnector):
 
         if not exists(log_file_path):
             raise ValueError(f"'{log_file_path}' does not exist")
-        LogAnalyzer(log_file_path, self.config.report_output_destination, "temp_log_unpacking").analyze()
+        LogAnalyzer(log_file_path, self.config.report_output_destination, TMP_LOG_UNPACK_DIR).analyze()
 
         
     def __get_memory_config(self):
@@ -1524,6 +1522,7 @@ class LogAnalyzer():
         self.output_destination = output_destination
         self.log_file = log_file_path
         self.log_unpacking_dir = log_unpacking_dir
+        self.unzip_dir = UNZIP_DIR
         if not exists(log_file_path):
             raise ConfigError(f"There is no {log_file_path}")
         self.info = [
@@ -1532,7 +1531,7 @@ class LogAnalyzer():
                 "extraction": [("Total RAM on host", 1)]
             },
             {
-                "pattern" : r"^.*m([a-z]*_[0-9]*)\s.*Container is mem limited to (.*G) \(of .*G of the host\).*$",
+                "pattern" : r"^.*m([a-z]*_[0-9]*)\s.*Container is mem limited to (.*[GM][B]?) \(of .*[GM][B]? of the host\).*$",
                 "extraction": [("Container", 1), ("Assigned RAM", 2)]
             },
             {
@@ -1540,16 +1539,8 @@ class LogAnalyzer():
                 "extraction": [("Spark memory", 1), ("Driver memory", 2), ("Worker & Executor memory", 3)]
             },
             {
-                "pattern" : r"^.*export SPARK_WORKER_CORES=([0-9]+).*$",
-                "extraction": [("Spark worker cores", 1)]
-            },
-            {
-                "pattern" : r"^.*export SPARK_WORKER_INSTANCES=([0-9]+).*$",
-                "extraction": [("Spark worker instances", 1)]
-            },
-            {
-                "pattern" : r"^.*SPARK_EXECUTOR_INSTANCES=([0-9]+).*$",
-                "extraction": [("Spark executor instances", 1)]
+                "pattern" : r"^.*export ([A-Z]+(?:_[A-Z]+)*)=([0-9]+[kKMGT]?)$",
+                "extraction": [(1, 2)]
             }
         ]
         self.symptoms = [
@@ -1622,10 +1613,9 @@ class LogAnalyzer():
     def __prepare_temp_log_directory(self, log_file, log_dir):
         fht = FileHandlingTools()
         file_type = fht.get_file_type(log_file)
-        unzip_dir = "temp_unzip"
-        if fht.unzip(file_type, log_file, unzip_dir):
+        if fht.unzip(file_type, log_file, self.unzip_dir):
             fht.delete_directory(log_dir)
-            copy_dir_tree(unzip_dir, log_dir)
+            copy_dir_tree(self.unzip_dir, log_dir)
         else:
             fht.recreate_directory(log_dir)
             copy(log_file, log_dir)
@@ -1649,7 +1639,10 @@ class LogAnalyzer():
                         if m:
                             output_line = []
                             for item in info["extraction"]:
-                                output_line.append(f"{item[0]}: {m.group(item[1])}")
+                                item_name = item[0]
+                                if type(item_name) is int:
+                                    item_name = m.group(item[0])
+                                output_line.append(f"{item_name}: {m.group(item[1])}")
                             self.info_pieces[", ".join(output_line)] = True
                     for symptom in self.symptoms:
                         m = match(symptom["pattern"], line)
@@ -1722,7 +1715,8 @@ class JobsStatus():
 
     def __extract_job_info(self, job):
         item = {}
-        item["collectionId"] = job["definition"]["collectionId"]
+        if "collectionId" in job["definition"]:
+            item["collectionId"] = job["definition"]["collectionId"]
         item["type"] = job["definition"]["type"]
         item["id"] = job["id"]
         item["state"] = job["state"]
@@ -1776,10 +1770,18 @@ class JobsStatus():
         # self.job_and_sub_jobs_structure
         
         self.job_or_sub_job_by_id = {}
+        self.job_and_sub_jobs_structure = {}
         job_by_collection_id = {}
-        for job in loads(json_job_list)["_embedded"]["jobinstances"]:
+        job_list = loads(json_job_list)
+        if not "_embedded" in job_list:
+            return
+        if not "jobinstances" in job_list["_embedded"]:
+            return
+        for job in job_list["_embedded"]["jobinstances"]:
             job_info = self.__extract_job_info(job)
             if job_info["type"] == "PROCESSING":
+                if not "collectionId" in job_info:
+                    continue
                 collection_id = job_info["collectionId"]   
                 if not collection_id in job_by_collection_id:
                     job_by_collection_id[collection_id] = []
@@ -1787,7 +1789,6 @@ class JobsStatus():
             self.job_or_sub_job_by_id[job_info["id"]] = job_info
         for collection_id in job_by_collection_id.keys():
             job_by_collection_id[collection_id] = sorted(job_by_collection_id[collection_id], key=lambda job_info: job_info["time_stamp"])
-        self.job_and_sub_jobs_structure = {}
         for collection_id in job_by_collection_id.keys():
             self.job_and_sub_jobs_structure[collection_id] = {}
             for job in job_by_collection_id[collection_id]:
@@ -1975,7 +1976,8 @@ class Config():
         self.file_extension_filter    = self.__get_item(feeding, 'file_extension_filter', None)
         self.rep_total_size_and_numb  = self.__get_item(feeding, 'rep_total_size_and_numb', None)
         self.feeding_report_time      = self.__get_item(feeding, 'report_time', False)
-        self.report_doc_error         = self.__get_item(feeding, 'report_doc_error', False)   
+        self.report_doc_error         = self.__get_item(feeding, 'report_doc_error', False)
+        self.no_processing            = self.__get_item(feeding, 'no_processing', False)
         
     def __init_processing(self, processing): 
         self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
@@ -2054,6 +2056,8 @@ class Config():
                 raise ConfigError('Mandatory input parameter collection name (col_name) has not been given') 
         if self.report_logs_source and self.report_retrieve_logs: 
             raise ConfigError('Either analyze existing file or produce new ones, both is not possible')  
+        if self.no_processing and self.processing:
+            raise ConfigError('Feeding option no_processing cannot be combined with a processing confiuration')  
             
 class TestExecutor():
 
@@ -2183,7 +2187,11 @@ class Admin():
                 if self.feeder.collection_exists():
                     if self.config.schema:
                         self.schema_manager.add_field_if_not_there()
-                    self.feeder.feed_documents_commit_and_process()
+                    if self.config.no_processing:
+                        self.feeder.feed_documents_and_commit()
+                    else:
+                        self.feeder.feed_documents_commit_and_process()
+                    print('got here y')
                 else:
                     raise ConfigError('Cannot feed to non-existing collection')
             else:
