@@ -1616,7 +1616,7 @@ class LogAnalyzer():
         
     def __prepare_temp_log_directory(self, log_file, log_dir):
         fht = FileHandlingTools()
-        file_type = fht.get_file_type(log_file)
+        file_type, detected_encoding = fht.get_file_type(log_file)
         if fht.unzip(file_type, log_file, self.unzip_dir):
             fht.delete_directory(log_dir)
             copy_dir_tree(self.unzip_dir, log_dir)
