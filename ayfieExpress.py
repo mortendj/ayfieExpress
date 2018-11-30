@@ -1595,6 +1595,10 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*Ignoring unknown properties with keys.*$",
                 "indication": "a possible wrong API parameter has been applied with the likely result that the intended operation never got carried out."
+            },
+            {
+                "pattern" : r"^.*Could not validate license. License details.*$",
+                "indication": "the Chinese tokenizer has an expired license"
             },            
             {
                 "pattern" : r"^.*INFO: Exception.*at (org|scala|java)\..*\(.*:[0-9]+\).*.\)      at java.lang.Thread.run\(Thread.java:748\)$",
