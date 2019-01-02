@@ -995,7 +995,6 @@ class DataSource():
     def __skip_file_byte_order_mark(self, f):
         bytes_to_skip = 0
         start_byte_sequence = f.read(4)
-        print(start_byte_sequence)
         for bom in TEXT_ENCODINGS:
             if start_byte_sequence[:len(bom)] == bom:
                 bytes_to_skip = len(bom)
@@ -1083,7 +1082,7 @@ class DataSource():
                 for document in self.__gen_doc_from_csv(f, self.config.csv_mappings, self.config.format):
                     yield document
             elif data_type in [AYFIE, AYFIE_RESULT]:
-                data = self.__get_file_content(f, file_path)
+                data = self.__get_file_content(f)
                 if data_type == AYFIE:
                     self.config.format['root'] = 'documents'
                 elif data_type == AYFIE_RESULT:
