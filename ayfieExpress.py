@@ -121,9 +121,10 @@ MAX_PAUSE_BEFORE_RETRY = 120
 RETURN_RESULT          = 'return'
 DISPLAY_RESULT         = 'display'
 QUERY_AND_HITS_RESULT  = "query_and_numb_of_hits"
-ID_LIST_RESULT         = 'idList'
+ID_LIST_RESULT         = 'id_list'
+ID_AND_CLASSIFER_RESULT= 'id_and_classifier_score_list'
 SAVE_RESULT            = 'save:'
-RESULT_TYPES           = [RETURN_RESULT, DISPLAY_RESULT, QUERY_AND_HITS_RESULT, ID_LIST_RESULT]
+RESULT_TYPES           = [RETURN_RESULT, DISPLAY_RESULT, QUERY_AND_HITS_RESULT, ID_LIST_RESULT, ID_AND_CLASSIFER_RESULT]
 
 JOB_POLLING_INTERVAL   = 10
 
@@ -147,6 +148,9 @@ class AutoDetectionError(Exception):
     pass
 
 class DataFormatError(Exception):
+    pass
+    
+class BadStateError(Exception):
     pass
 
 def pretty_print(json):
@@ -326,19 +330,19 @@ class Ayfie:
             return id_from_headers
         return response_obj
 
-    def __wait_for(self, wait_type, id, value, timeout=None):
+    def __wait_for(self, wait_type, id, good_value, bad_value=None, timeout=None):
         if not wait_type in WAIT_TYPES:
             raise ValueError(f"'{wait_type}' is not in {WAIT_TYPES}")
         if wait_type == COL_EVENT:
-            self.__validateInputValue(value, COL_EVENTS)
-            negation = " not" if value == COL_APPEAR else " "
+            self.__validateInputValue(good_value, COL_EVENTS)
+            negation = " not" if good_value == COL_APPEAR else " "
             err_msg  = f'Collection "{id}" still{negation} there after {timeout} seconds'
         elif wait_type == COL_STATE:
-            self.__validateInputValue(value, COL_STATES)
-            err_msg  = f'Collection "{id}" still not in state {value} after {timeout} seconds'
+            self.__validateInputValue(good_value, COL_STATES)
+            err_msg  = f'Collection "{id}" still not in state {good_value} after {timeout} seconds'
         elif wait_type == CLASSIFIER_STATE:
-            self.__validateInputValue(value, CLASSIFIER_STATES)
-            err_msg  = f'Classifier "{id}" still not in state {value} after {timeout} seconds'
+            self.__validateInputValue(good_value, CLASSIFIER_STATES)
+            err_msg  = f'Classifier "{id}" still not in state {good_value} after {timeout} seconds'
         else:
             ValueError(f"Incident type {wait_type} does not exists")
            
@@ -348,19 +352,21 @@ class Ayfie:
         while (True):
             if wait_type == COL_EVENT:
                 if self.exists_collection_with_id(id):
-                    if value == COL_APPEAR:
+                    if good_value == COL_APPEAR:
                         return
                 else:
-                    if value == COL_DISAPPEAR:
+                    if good_value == COL_DISAPPEAR:
                         return
             elif wait_type == COL_STATE: 
                 current_state = self.get_collection_state(id)
-                if value == current_state:
+                if good_value == current_state:
                     return
             elif wait_type == CLASSIFIER_STATE:
                 current_state = self.get_classifier_state(id)
-                if value == current_state:
+                if good_value == current_state:
                     return
+                if bad_value and bad_value == current_state:
+                    raise BadStateError(f"Classifier entered state '{current_state}'")
             
             if timeout and count_down < 0:
                 raise TimeoutError(err_msg)
@@ -368,16 +374,16 @@ class Ayfie:
             count_down -= 1
             
     def __wait_for_collection_event(self, col_id, event, timeout=None):
-        self.__wait_for(COL_EVENT, col_id, event, timeout)
+        self.__wait_for(COL_EVENT, col_id, event, None, timeout)
         
     def __wait_for_collection_state(self, col_id, state, timeout):
-        self.__wait_for(COL_STATE, col_id, state, timeout)
+        self.__wait_for(COL_STATE, col_id, state, None, timeout)
 
     def __wait_for_collection_to_appear(self, col_id, timeout=120):
-        self.__wait_for(COL_EVENT, col_id, COL_APPEAR, timeout)
+        self.__wait_for(COL_EVENT, col_id, COL_APPEAR, None, timeout)
 
     def __wait_for_collection_to_disappear(self, col_id, timeout=120):
-        self.__wait_for(COL_EVENT, col_id, COL_DISAPPEAR, timeout)
+        self.__wait_for(COL_EVENT, col_id, COL_DISAPPEAR, None, timeout)
 
     def __change_collection_state(self, col_id, transition):
         self.__validateInputValue(transition, COL_TRANSITION)
@@ -385,7 +391,7 @@ class Ayfie:
         return self.__execute(f'collections/{col_id}', 'PATCH', data)
  
     def __wait_for_collection_to_be_committed(self, col_id, timeout):
-        self.__wait_for(COL_STATE, col_id, 'COMMITTED', timeout)
+        self.__wait_for(COL_STATE, col_id, 'COMMITTED', None, timeout)
         
     def __get_all_items_of_an_item_type(self, item_type):
         self.__validateInputValue(item_type, ITEM_TYPES)
@@ -712,7 +718,7 @@ class Ayfie:
         return self.__execute(f'classifiers/{classifier_name}', 'PATCH', data)
  
     def wait_for_classifier_to_be_trained(self, classifier_name):
-        self.__wait_for("classifier_state", classifier_name, "TRAINED")
+        self.__wait_for("classifier_state", classifier_name, "TRAINED", "INVALID")
         
         
 class ExpressTools():
@@ -724,8 +730,10 @@ class ExpressTools():
         if not limit:
             limit = "ALL"
         docs_per_request = 10000
-        if limit and limit != "ALL" and limit < docs_per_request:
-            docs_per_request = limit
+        if limit and limit != "ALL":
+            limit = int(limit)
+            if limit < docs_per_request:
+                docs_per_request = limit
         result = self.ayfie.search_collection(col_id, query, docs_per_request, 
                  exclude=["content", "term", "location", "organization", "person", "email"], 
                  scroll=True, meta_data=True)
@@ -963,9 +971,10 @@ class DataSource():
         if type(file_path_or_handle) is str:
             with open(file_path_or_handle, 'rb') as f:
                 f = self.__skip_file_byte_order_mark(f)
+                content = f.read()
         else:
             f = self.__skip_file_byte_order_mark(file_path_or_handle)
-        content = f.read()
+            content = f.read()
         if self.config.encoding == AUTO:
             if self.detected_encoding:
                 try:
@@ -1097,8 +1106,10 @@ class DataSource():
                     log.error(f"JSON decoding error for {file_path}: {str(e)}")
                     return None
             elif data_type == PDF:
-                yield self.__construct_doc(self.__gen_id_from_file_path(file_path),
-                                             self.__convert_pdf_to_text(file_path))
+                if self.config.ignore_pdfs: 
+                    log.info("Dropping file as not configured to process pdf files")
+                else:
+                    yield self.__construct_doc(self.__gen_id_from_file_path(file_path), self.__convert_pdf_to_text(file_path))
             elif data_type in [WORD_DOC, XLSX, XML]:
                 log.info(f"Skipping '{file_path}' - conversion of {data_type} still not implemented")
             elif data_type == TXT:
@@ -1335,9 +1346,12 @@ class Classifier(AyfieConnector):
         col_id = self.ayfie.get_collection_id(self.config.col_name) 
         self.ayfie.create_classifier(self.config.classifier_name, col_id, self.config.classifier_training_field,
                                      self.config.classifier_min_score, self.config.classifier_num_results, 
-                                     self.config.classifier_filters) 
+                                     self.config.classif_training_filters) 
         self.ayfie.train_classifier(self.config.classifier_name)
         self.ayfie.wait_for_classifier_to_be_trained(self.config.classifier_name)
+        
+        
+       
         
     def create_classifier_job_and_wait(self, classifier_name, **kwargs):
         config = self.__get_classifier_config(classifier_name, **kwargs)
@@ -1356,7 +1370,7 @@ class Classifier(AyfieConnector):
                 } 
             }
             more_params = {
-                "filters" : self.config.classifier_filters,
+                "filters" : self.config.classif_execution_filters,
                 "outputField" : self.config.classifier_output_field
             }
             if self.config.progress_bar:
@@ -1378,7 +1392,7 @@ class Classifier(AyfieConnector):
                     self.config.col_name,
                     self.config.classifier_min_score,
                     self.config.classifier_num_results,
-                    self.config.classifier_filters,
+                    self.config.classif_execution_filters,
                     self.config.classifier_output_field
                  )
                  
@@ -1407,10 +1421,23 @@ class Clusterer(AyfieConnector):
             
 class Querier(AyfieConnector):
 
-    def search_collection(self, search):
+    def search(self, search):
         col_id = self.ayfie.get_collection_id(self.config.col_name)
         return self.ayfie.meta_search(col_id, search)
-
+ 
+    def get_search_result_pages(self, search):
+        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        size = 1000
+        search["size"] = size
+        offset = 0
+        while True: 
+            docs = self.ayfie.doc_search(col_id, search)
+            if len(docs):
+                yield docs
+            if len(docs) < size:
+                break
+            search["offset"] += size
+       
     def get_collection_schema(self):
         col_id = self.ayfie.get_collection_id(self.config.col_name)
         return self.ayfie.get_collection_schema(col_id)
@@ -2070,6 +2097,7 @@ class Config():
         self.report_doc_error         = self.__get_item(feeding, 'report_doc_error', False)
         self.no_processing            = self.__get_item(feeding, 'no_processing', False)
         self.email_address_separator  = self.__get_item(feeding, 'email_address_separator', None)
+        self.ignore_pdfs              = self.__get_item(feeding, 'ignore_pdfs', True)
         
     def __init_processing(self, processing): 
         self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
@@ -2097,7 +2125,8 @@ class Config():
         self.classifier_training_field= self.__get_item(classification, 'trainingClassesField', 'trainingClass')
         self.classifier_min_score     = self.__get_item(classification, 'minScore', 0.6)
         self.classifier_num_results   = self.__get_item(classification, 'numResults', 1)
-        self.classifier_filters       = self.__get_item(classification, 'filters', [])
+        self.classif_training_filters = self.__get_item(classification, 'training_filters', [])
+        self.classif_execution_filters= self.__get_item(classification, 'execution_filters', [])
         self.classifier_output_field  = self.__get_item(classification, 'outputField', 'pathclassification')
         
     def __init_documents_updates(self, documents_updates):
@@ -2117,6 +2146,9 @@ class Config():
             })
         
     def __init_search(self, searches):
+        if not searches:
+            self.search = None
+            return  
         self.searches = []
         if not type(searches) is list:
             searches = [searches]
@@ -2124,6 +2156,7 @@ class Config():
             self.searches.append({
                 "query_file"         : self.__get_item(search, 'query_file', None),
                 "result"             : self.__get_item(search, 'result', "display"),
+                "classifier_field"   : self.__get_item(search, 'classifier_field', None),
                 "highlight"          : self.__get_item(search, 'highlight', True),
                 "sort_criterion"     : self.__get_item(search, 'sort_criterion', "_score"),
                 "sort_order"         : self.__get_item(search, 'sort_order', "desc"),
@@ -2219,16 +2252,16 @@ class TestExecutor():
             config_dir = self.__get_file_path(self.config.config_source, self.config.query_config_dir)
             self.__retrieve_configs_and_execute(config_dir)
 
-    def process_test_result(self, result):
+    def process_test_result(self, search, result):
         if not self.config.config_source:
             self.config.config_source = "The test"
-        if type(self.config.search_result) is bool:
-            if self.config.search_result:
+        if type(search["result"]) is bool:
+            if search["result"]:
                 print(f'CORRECT: {self.config.config_source} is hardcoded to be correct')
             else:
                 print(f'FAILURE: {self.config.config_source} is hardcoded to be a failure')
-        elif type(self.config.search_result) is int:
-            expected_results = int(self.config.search_result)
+        elif type(search["result"]) is int:
+            expected_results = int(search["result"])
             actual_results = int(result['meta']['totalDocuments'])
             if actual_results == expected_results:
                 print(f'CORRECT: {self.config.config_source} returns {actual_results} results')
@@ -2309,7 +2342,7 @@ class Admin():
                 self.classifier.do_classification()
             for search in self.config.searches:
                 try:
-                    result = self.querier.search_collection(search)
+                    result = self.querier.search(search)
                 except FileNotFoundError as e:
                     print(f'ERROR: {str(e)}')
                     return
@@ -2317,7 +2350,7 @@ class Admin():
                 result_type = type(search["result"])
                 if result_type is bool or result_type is int:
                     testExecutor = TestExecutor(self.config, self.config.server_settings)
-                    testExecutor.process_test_result(result) 
+                    testExecutor.process_test_result(search, result) 
                 elif search["result"] == RETURN_RESULT:   
                     return result
                 elif search["result"] == DISPLAY_RESULT:
@@ -2326,11 +2359,19 @@ class Admin():
                     print(f'{str(result["meta"]["totalDocuments"]).rjust(8)} <== {result["query"]["query"]}')
                 elif search["result"] == ID_LIST_RESULT: 
                     pretty_print([doc["document"]["id"] for doc in result["result"]])
+                elif search["result"] == ID_AND_CLASSIFER_RESULT:
+                    for page in self.querier.get_search_result_pages(search):
+                        for doc in page:
+                            fields = doc["document"]
+                            output_line = str(fields["id"])
+                            if search["classifier_field"] in fields:
+                                output_line += "\t" + str(fields[search["classifier_field"]])   
+                            print(output_line)
                 elif search["result"].startswith('save:'):
                     with open(search["result"][len(SAVE_RESULT):], 'wb') as f:
                         f.write(dumps(result, indent=4).encode('utf-8'))
                 else:    
-                    msg = '"result" must be {', '.join(RESULT_TYPES)}, "{SAVE_RESULT}<file path>" or an int'
+                    msg = f'"result" must be {", ".join(RESULT_TYPES)}, "{SAVE_RESULT}<file path>" or an int'
                     raise ValueError(msg)
         if self.config.reporting:
             self.reporter.do_reporting()
