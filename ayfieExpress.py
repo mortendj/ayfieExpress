@@ -952,6 +952,9 @@ class DataSource():
             
     def __get_file_type(self, file_path):
         file_type, encoding = FileHandlingTools().get_file_type(file_path)
+        if file_type == CSV:
+            if self.config.treat_csv_as_text:
+                file_type = TXT
         return file_type, encoding
 
     def __unzip(self, file_type, file_path, unzip_dir):
@@ -1565,7 +1568,15 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*AyfieVersion: Version: ([1-9].*), Buildinfo: (.*)$",
                 "extraction": [("ayfie Inspector version", 1), ("Buildinfo", 2)]
-            } 
+            },
+            {
+                "pattern" : r"^.*initializing general extractor with name _gdpr.*$",
+                "extraction": [("GDPR", "Enabled")]
+            },
+            {
+                "pattern" : r"^.*skipExtractors=\[_gdpr\].*$",
+                "extraction": [("GDPR", "Disabled")]
+            }
         ]
         self.symptoms = [
             {
@@ -1685,9 +1696,12 @@ class LogAnalyzer():
                             output_line = []
                             for item in info["extraction"]:
                                 item_name = item[0]
+                                item_value = item[1]
                                 if type(item_name) is int:
-                                    item_name = m.group(item[0])
-                                output_line.append(f"{item_name}: {m.group(item[1])}")
+                                    item_name = m.group(item_name)
+                                if type(item_value) is int:
+                                    item_value = m.group(item_value)
+                                output_line.append(f"{item_name}: {item_value}")
                             self.info_pieces[", ".join(output_line)] = True
                     for symptom in self.symptoms:
                         m = match(symptom["pattern"], line)
@@ -2011,8 +2025,8 @@ class Config():
         self.__init_classification(self.classification)
         self.documents_updates= self.__get_item(config, 'documents_update', False)
         self.__init_documents_updates(self.documents_updates)
-        self.search           = self.__get_item(config, 'search', False)
-        self.__init_search(self.search)
+        self.searches         = self.__get_item(config, 'search', False)
+        self.__init_search(self.searches)
         self.regression_testing = self.__get_item(config, 'regression_testing', False)
         self.__init_report(self.reporting)
         self.reporting        = self.__get_item(config, 'reporting', False)
@@ -2098,6 +2112,7 @@ class Config():
         self.no_processing            = self.__get_item(feeding, 'no_processing', False)
         self.email_address_separator  = self.__get_item(feeding, 'email_address_separator', None)
         self.ignore_pdfs              = self.__get_item(feeding, 'ignore_pdfs', True)
+        self.treat_csv_as_text        = self.__get_item(feeding, 'treat_csv_as_text', False)
         
     def __init_processing(self, processing): 
         self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
@@ -2147,7 +2162,7 @@ class Config():
         
     def __init_search(self, searches):
         if not searches:
-            self.search = None
+            self.searches = []
             return  
         self.searches = []
         if not type(searches) is list:
@@ -2190,9 +2205,7 @@ class Config():
             if not self.col_name:
                 raise ConfigError('Mandatory input parameter collection name (col_name) has not been given') 
         if self.report_logs_source and self.report_retrieve_logs: 
-            raise ConfigError('Either analyze existing file or produce new ones, both is not possible')  
-        if self.no_processing and self.processing:
-            raise ConfigError('Feeding option no_processing cannot be combined with a processing confiuration')  
+            raise ConfigError('Either analyze existing file or produce new ones, both is not possible')   
 
             
 class TestExecutor():
@@ -2328,12 +2341,11 @@ class Admin():
             else:
                 if not self.feeder.collection_exists():
                     raise ConfigError(f'There is no collection "{self.config.col_name}"')
-                if self.config.processing:
-                    self.feeder.process()
                     
+            if self.config.processing:
+                self.feeder.process()
             if self.config.schema_changes:
                 self.schema_manager.add_field_if_absent()
-
             if self.config.documents_updates:
                 self.document_updater.do_updates()
             if self.config.clustering:
