@@ -230,6 +230,8 @@ class Ayfie:
     def __gen_req_log_msg(self, verb, endpoint, data, headers):
         if len(str(data)) > 1000:
             data = {"too much":"data to log"}
+        else:
+            data = dumps(data)
         return f"Request: {verb} {endpoint} json={data} headers={headers}"
 
     def __gen_response_err_msg(self, response_obj, ayfieStatus):
@@ -696,12 +698,16 @@ class Ayfie:
     def __get_document_update_by_query_config(self, query, filters, action, field, values=None):
         if not action in DOC_UPDATE_ACTIONS:
             raise ValueError(f"Parameter action cannot be {action}, but must be in {DOC_UPDATE_ACTIONS}")
-        config = {field : values}
-        if action == CLEAR_VALUES:
-            config = [field]
-        config = {"query" : {"query" : query}, action : config}
+        config = {"query" : {"query" : query}}
         if filters:
             config['query']['filters'] = filters
+        if action == CLEAR_VALUES:
+            config[action] = [field]
+        else:
+            if values:
+                config[action] = {field: values}
+            else:
+                raise ValueError(f"The action {action} requires a list of values, not '{values}'")
         return config             
             
     def update_documents_by_query(self, col_id, query, filters, action, field, values=None):
@@ -1131,7 +1137,7 @@ class DataSource():
             log.debug(f"'{file_path}' auto detected (1) as '{file_type}'")
             if file_type in ZIP_FILE_TYPES:
                 self.__unzip(file_type, file_path, self.unzip_dir)
-                for unzipped_file in FileHandlingTools().get_next_file(self.unzip_dir):
+                for unzipped_file in FileHandlingTools().get_next_file(self.unzip_dir, extension_filter=self.config.file_extension_filter):
                     file_type, self.detected_encoding = self.__get_file_type(unzipped_file)
                     if self.config.file_type_filter and not file_type in self.config.file_type_filter:
                         log.debug(f"'{file_path}' auto detected (2) as '{file_type} and not excluded due to file type filter: {self.config.file_type_filter}")
@@ -1286,13 +1292,19 @@ class Feeder(AyfieConnector):
         id_picking_list = [str(id) for id in self.config.id_picking_list]
         try:
             for document in self.data_source.get_documents():
+                if self.config.id_mappings:
+                    if str(document["id"]) in self.config.id_mappings:
+                        document["id"] = self.config.id_mappings[document["id"]]
                 if id_picking_list:
                     if not (str(document["id"]) in id_picking_list):
                         continue
                 self.batch.append(document)
                 self.batch_size = len(self.batch)
-                if self.batch_size >= self.config.batch_size:
+                if (self.batch_size >= self.config.batch_size) or (
+                              self.config.max_docs_to_feed and (self.batch_size >= self.config.max_docs_to_feed)):
                     self.process_batch()
+                if self.config.max_docs_to_feed and (self.doc_count >= self.config.max_docs_to_feed):
+                    break
             if self.batch_size:
                 self.process_batch(is_last_batch=True)
             else:
@@ -2113,6 +2125,20 @@ class Config():
         self.email_address_separator  = self.__get_item(feeding, 'email_address_separator', None)
         self.ignore_pdfs              = self.__get_item(feeding, 'ignore_pdfs', True)
         self.treat_csv_as_text        = self.__get_item(feeding, 'treat_csv_as_text', False)
+        self.max_docs_to_feed         = self.__get_item(feeding, 'max_docs_to_feed', None)
+        #self.id_from_filename_regex   = self.__get_item(feeding, 'id_from_filename_regex', None)
+        id_conv_table_file            = self.__get_item(feeding, 'id_conversion_table_file', None)
+        id_conv_table_delimiter       = self.__get_item(feeding, 'id_conversion_table_delimiter', ",")
+        id_conv_table_id_column       = self.__get_item(feeding, 'id_conv_table_id_column', None)
+        id_conv_table_filename_column = self.__get_item(feeding, 'id_conv_table_filename_column', None)             
+        self.id_mappings = {}
+        if id_conv_table_file:
+            minimum_columns = max(id_conv_table_id_column, id_conv_table_filename_column) + 1 
+            with open(id_conv_table_file) as f:
+                for line in f.read().split('\n'):
+                    id_mapping = line.split(id_conv_table_delimiter)
+                    if len(id_mapping) >= minimum_columns:
+                        self.id_mappings[id_mapping[id_conv_table_filename_column]] = id_mapping[id_conv_table_id_column]
         
     def __init_processing(self, processing): 
         self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
