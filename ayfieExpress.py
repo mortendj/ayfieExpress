@@ -64,6 +64,7 @@ COL_EVENTS            = [COL_APPEAR, COL_DISAPPEAR]
 ITEM_TYPES            = ['collections', 'classifiers', 'jobs:jobinstances']
 
 MAX_BATCH_SIZE        = 1000
+MAX_PAGE_SIZE         = 10000
 
 DEL_ALL_COL           = "delete_all_collections"
 DEL_COL               = "delete_collection"
@@ -523,8 +524,7 @@ class Ayfie:
     def doc_search(self, col_id, json_query):
         return self.meta_search(col_id, json_query)['result']
 
-    def search_collection(self, col_id, query, size=10, offset=0,
-                          filters=[], exclude=[], scroll=False, meta_data=False):
+    def search_collection(self, col_id, query, size=10, offset=0, filters=[], exclude=[], aggregations=[], scroll=False, meta_data=False):
         json_query = {
             "highlight" : False,
             "sort": {
@@ -533,8 +533,8 @@ class Ayfie:
             },
             "minScore": 0.0,
             "exclude": exclude,
-            "aggregations": ["_cluster"],
-            "filters": [],
+            "aggregations": aggregations,
+            "filters": filters,
             "query": query,
             "scroll": scroll,
             "size": size,
@@ -631,7 +631,7 @@ class Ayfie:
         
     def create_clustering_job_and_wait(self, col_id, **kwargs):
         config = self.__get_clustering_config(col_id, **kwargs)
-        return self.create_job_and_wait(config, timeout)
+        return self.create_job_and_wait(config, timeout)  ############################### timeout not defined, causes a crash
 
     ######### Classification #########
  
@@ -1355,61 +1355,51 @@ class Feeder(AyfieConnector):
 
 class Classifier(AyfieConnector):
 
-    def __create_and_train_classifier(self):
-        if self.config.classifier_name in self.ayfie.get_classifier_names():
-            self.ayfie.delete_classifier(self.config.classifier_name)
+    def __create_and_train_classifiers(self, classification):
+        if classification['name'] in self.ayfie.get_classifier_names():
+            self.ayfie.delete_classifier(classification['name'])
         col_id = self.ayfie.get_collection_id(self.config.col_name) 
-        self.ayfie.create_classifier(self.config.classifier_name, col_id, self.config.classifier_training_field,
-                                     self.config.classifier_min_score, self.config.classifier_num_results, 
-                                     self.config.classif_training_filters) 
-        self.ayfie.train_classifier(self.config.classifier_name)
-        self.ayfie.wait_for_classifier_to_be_trained(self.config.classifier_name)
-        
-        
-       
-        
-    def create_classifier_job_and_wait(self, classifier_name, **kwargs):
-        config = self.__get_classifier_config(classifier_name, **kwargs)
-        return self.create_job_and_wait(config)
+        self.ayfie.create_classifier(classification['name'], col_id, classification['training_field'],
+                                     classification['min_score'], classification['num_results'], 
+                                     classification['training_filters']) 
+        self.ayfie.train_classifier(classification['name'])
+        self.ayfie.wait_for_classifier_to_be_trained(classification['name'])
 
-    def create_classifier_job_and_wait(self):
-        if self.config.classification:
-            col_id = self.ayfie.get_collection_id(self.config.col_name)
-            if "dummy" in self.config.classification:
-                del self.config.classification["dummy"]
-            settings = {
-                "classification": {
-                    "classifierId": self.config.classifier_name,
-                    "minScore" : self.config.classifier_min_score,
-                    "numResults": self.config.classifier_num_results
-                } 
-            }
-            more_params = {
-                "filters" : self.config.classif_execution_filters,
-                "outputField" : self.config.classifier_output_field
-            }
-            if self.config.progress_bar:
-                return JobsHandler(self.config).job_processesing("CLASSIFICATION", settings, more_params)
-            else:
-                self.ayfie.classify_and_wait(col_id)
-        else:
-            log.info('No classifier job')  
-            
-
-    def do_classification(self):
-        self.__create_and_train_classifier()
+    def create_classifier_job_and_wait(self, classification):
+        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        if "dummy" in classification:
+            del classification["dummy"]
+        settings = {
+            "classification": {
+                "classifierId": classification["name"],
+                "minScore" : classification["min_score"],
+                "numResults": classification["num_results"]
+            } 
+        }
+        more_params = {
+            "filters" : classification['execution_filters'],
+            "outputField" : classification['output_field']
+        }
         if self.config.progress_bar:
-            self.create_classifier_job_and_wait()
+            return JobsHandler(self.config).job_processesing("CLASSIFICATION", settings, more_params)
         else:
-            col_id = self.ayfie.get_collection_id(self.config.col_name)
-            self.ayfie.create_classifier_job_and_wait(col_id,
-                    self.config.classifier_name,
-                    self.config.col_name,
-                    self.config.classifier_min_score,
-                    self.config.classifier_num_results,
-                    self.config.classif_execution_filters,
-                    self.config.classifier_output_field
-                 )
+            self.ayfie.classify_and_wait(col_id)  
+            
+    def do_classification(self):
+        for classification in self.config.classifications:
+            self.__create_and_train_classifiers(classification)
+            if self.config.progress_bar:
+                self.create_classifier_job_and_wait(classification)
+            else:
+                col_id = self.ayfie.get_collection_id(self.config.col_name)
+                self.ayfie.create_classifier_job_and_wait(col_id,
+                        classification['name'],
+                        self.config.col_name,
+                        classification['min_score'],
+                        classification['num_results'],
+                        classification['execution_filters'],
+                        classification['output_field']
+                     )
                  
 class Clusterer(AyfieConnector):
 
@@ -1442,23 +1432,26 @@ class Querier(AyfieConnector):
  
     def get_search_result_pages(self, search):
         col_id = self.ayfie.get_collection_id(self.config.col_name)
-        size = 1000
-        search["size"] = size
-        offset = 0
-        while True: 
-            docs = self.ayfie.doc_search(col_id, search)
+        result = self.ayfie.search_collection(col_id, search["query"], MAX_PAGE_SIZE, 0, search["filters"], search["exclude"], search["aggregations"], scroll=True, meta_data=True)
+        docs = result["result"]
+        while True:
             if len(docs):
                 yield docs
-            if len(docs) < size:
+            if len(docs) < MAX_PAGE_SIZE:
                 break
-            search["offset"] += size
+            try:
+                link = result["_links"]["next"]["href"]
+            except:
+                break
+            result = self.ayfie.next_scroll_page(link)
+            docs = result["result"]
        
     def get_collection_schema(self):
         col_id = self.ayfie.get_collection_id(self.config.col_name)
         return self.ayfie.get_collection_schema(col_id)
         
         
-class Reporter(AyfieConnector):
+class Reporter(AyfieConnector):  
 
     def __get_jobs_status(self):
         jobs_handler = JobsHandler(self.config)
@@ -1534,13 +1527,15 @@ class DocumentUpdater(AyfieConnector):
         col_id = self.ayfie.get_collection_id(self.config.col_name)
         return ExpressTools(self.ayfie).get_doc_ids(col_id, query, limit, random_order)
         
-    def do_updates(self):
-        for docs_update in self.config.docs_updates:
+    def do_updates(self, docs_updates=None):
+        if not docs_updates:
+            docs_updates = self.config.docs_updates
+        for docs_update in docs_updates:
             filters = []
-            query = docs_update["id_extraction_query"]
             if docs_update["filters"]:
                 filters = docs_update["filters"]
                 if docs_update["filters"] == "DOC_IDS":
+                    query = docs_update["id_extraction_query"]
                     limit = docs_update["numb_of_docs_to_update"]
                     filters = [{"field":"_id", "value": self.__get_doc_ids(query, limit)}]
             docs_update["filters"] = filters
@@ -2033,8 +2028,8 @@ class Config():
         self.__init_feeder(self.feeding)
         self.clustering       = self.__get_item(config, 'clustering', False)
         self.__init_clustering(self.clustering)
-        self.classification   = self.__get_item(config, 'classification', False)
-        self.__init_classification(self.classification)
+        self.classifications  = self.__get_item(config, 'classifications', False)
+        self.__init_classification(self.classifications)
         self.documents_updates= self.__get_item(config, 'documents_update', False)
         self.__init_documents_updates(self.documents_updates)
         self.searches         = self.__get_item(config, 'search', False)
@@ -2118,7 +2113,6 @@ class Config():
         self.min_doc_size             = self.__get_item(feeding, 'min_doc_size', 0)
         self.file_type_filter         = self.__get_item(feeding, 'file_type_filter', None)
         self.file_extension_filter    = self.__get_item(feeding, 'file_extension_filter', None)
-        self.rep_total_size_and_numb  = self.__get_item(feeding, 'rep_total_size_and_numb', None)
         self.feeding_report_time      = self.__get_item(feeding, 'report_time', False)
         self.report_doc_error         = self.__get_item(feeding, 'report_doc_error', False)
         self.no_processing            = self.__get_item(feeding, 'no_processing', False)
@@ -2161,14 +2155,20 @@ class Config():
         self.clustering_output_field  = self.__get_item(clustering, 'outputField', '_cluster')
         self.clustering_report_time   = self.__get_item(clustering, 'report_time', False)
         
-    def __init_classification(self, classification):
-        self.classifier_name          = self.__get_item(classification, 'name', None)
-        self.classifier_training_field= self.__get_item(classification, 'trainingClassesField', 'trainingClass')
-        self.classifier_min_score     = self.__get_item(classification, 'minScore', 0.6)
-        self.classifier_num_results   = self.__get_item(classification, 'numResults', 1)
-        self.classif_training_filters = self.__get_item(classification, 'training_filters', [])
-        self.classif_execution_filters= self.__get_item(classification, 'execution_filters', [])
-        self.classifier_output_field  = self.__get_item(classification, 'outputField', 'pathclassification')
+    def __init_classification(self, classifications):
+        self.classifications = []
+        if not type(classifications) is list:
+            classifications = [classifications]
+        for classification in classifications:
+            self.classifications.append({
+                "name"              : self.__get_item(classification, 'name', None),
+                "training_field"    : self.__get_item(classification, 'trainingClassesField', 'trainingClass'),
+                "min_score"         : self.__get_item(classification, 'minScore', 0.6),
+                "num_results"       : self.__get_item(classification, 'numResults', 1),
+                "training_filters"  : self.__get_item(classification, 'training_filters', []),
+                "execution_filters" : self.__get_item(classification, 'execution_filters', []),
+                "output_field"      : self.__get_item(classification, 'outputField', 'pathclassification')
+            })
         
     def __init_documents_updates(self, documents_updates):
         self.docs_updates = []
@@ -2185,7 +2185,18 @@ class Config():
                 "numb_of_docs_to_update" : self.__get_item(documents_update, 'numb_of_docs', "ALL"),
                 "report_time"            : self.__get_item(documents_update, 'report_time', False)
             })
-        
+        for docs_update in self.docs_updates:
+            if docs_update['filters'] != "DOC_IDS":
+                for filter in docs_update['filters']:
+                    if filter['field'] == "_id" and type(filter['value']) == str:
+                        filename = filter['value']
+                        try:
+                            filter['value'] = loads(open(filename, "r").read())
+                        except JSONDecodeError:
+                            raise  DataFormatError(f"Bad JSON in file '{filename}' holder doc id list")
+                        except FileNotFoundError:
+                            raise ValueError(f"File '{filename}' with doc id list does not exists")
+
     def __init_search(self, searches):
         if not searches:
             self.searches = []
@@ -2376,7 +2387,7 @@ class Admin():
                 self.document_updater.do_updates()
             if self.config.clustering:
                 self.clusterer.create_clustering_job_and_wait()
-            if self.config.classification:
+            if self.config.classifications:
                 self.classifier.do_classification()
             for search in self.config.searches:
                 try:
@@ -2389,21 +2400,22 @@ class Admin():
                 if result_type is bool or result_type is int:
                     testExecutor = TestExecutor(self.config, self.config.server_settings)
                     testExecutor.process_test_result(search, result) 
-                elif search["result"] == RETURN_RESULT:   
+                elif search["result"] == RETURN_RESULT:
                     return result
                 elif search["result"] == DISPLAY_RESULT:
                     pretty_print(result)
                 elif search["result"] == QUERY_AND_HITS_RESULT:
                     print(f'{str(result["meta"]["totalDocuments"]).rjust(8)} <== {result["query"]["query"]}')
-                elif search["result"] == ID_LIST_RESULT: 
+                elif search["result"] == ID_LIST_RESULT:
                     pretty_print([doc["document"]["id"] for doc in result["result"]])
                 elif search["result"] == ID_AND_CLASSIFER_RESULT:
-                    for page in self.querier.get_search_result_pages(search):
+                    search["exclude"] = ["content", "term", "location", "organization", "person", "email"]
+                    for page in self.querier.get_search_result_pages(search):  
                         for doc in page:
                             fields = doc["document"]
                             output_line = str(fields["id"])
                             if search["classifier_field"] in fields:
-                                output_line += "\t" + str(fields[search["classifier_field"]])   
+                                output_line += "\t" + str(fields[search["classifier_field"]])
                             print(output_line)
                 elif search["result"].startswith('save:'):
                     with open(search["result"][len(SAVE_RESULT):], 'wb') as f:
