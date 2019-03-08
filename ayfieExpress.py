@@ -2028,7 +2028,7 @@ class Config():
         self.__init_feeder(self.feeding)
         self.clustering       = self.__get_item(config, 'clustering', False)
         self.__init_clustering(self.clustering)
-        self.classifications  = self.__get_item(config, 'classifications', False)
+        self.classifications  = self.__get_item(config, 'classification', False)
         self.__init_classification(self.classifications)
         self.documents_updates= self.__get_item(config, 'documents_update', False)
         self.__init_documents_updates(self.documents_updates)
@@ -2156,6 +2156,8 @@ class Config():
         self.clustering_report_time   = self.__get_item(clustering, 'report_time', False)
         
     def __init_classification(self, classifications):
+        if not classifications:
+            return 
         self.classifications = []
         if not type(classifications) is list:
             classifications = [classifications]
