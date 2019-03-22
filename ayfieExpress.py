@@ -26,6 +26,8 @@ except:
 
 log = logging.getLogger(__name__)
 
+MAX_LOG_ENTRY_SIZE    = 1000
+
 ROOT_SUB_DIR          = 'ayfieExpress_output'
 UNZIP_DIR             = join(ROOT_SUB_DIR, 'unzipDir')
 DATA_DIR              = join(ROOT_SUB_DIR, 'dataDir')
@@ -53,7 +55,6 @@ COL_STATES            = ['EMPTY', 'IMPORTING', 'COMMITTING', 'COMMITTED', 'PROCE
                          'PROCESSED', 'ABORTED', 'DELETING']
 CLASSIFIER_TRANSITION = ['TRAIN']
 CLASSIFIER_STATES     = ['INITIALIZED', 'TRAINING', 'TRAINED', 'INVALID']
-
 
 DOCUMENT_TYPES        = ['email', 'default', 'autodetect']
 PREPROCESS_TYPES      = ['rfc822', 'NUIX', 'IPRO']
@@ -133,11 +134,13 @@ CLEAR_VALUES           = "clear"
 REPLACE_VALUES         = "replace"
 ADD_VALUES             = "add"
 DOC_UPDATE_ACTIONS     = [CLEAR_VALUES, REPLACE_VALUES, ADD_VALUES]
+K_FOLD_FIELD           = "k_fold_data_set"
 
 COL_EVENT              = 'col_event'
 COL_STATE              = 'col_state'
 CLASSIFIER_STATE       = 'classifier_state'
 WAIT_TYPES             = [COL_EVENT, COL_STATE, CLASSIFIER_STATE]
+
 
 class HTTPError(IOError):
     pass
@@ -229,7 +232,7 @@ class Ayfie:
         return f'http://{self.server}:{self.port}/{self.product}/{self.version}/{path}'
 
     def __gen_req_log_msg(self, verb, endpoint, data, headers):
-        if len(str(data)) > 1000:
+        if len(str(data)) > MAX_LOG_ENTRY_SIZE:
             data = {"too much":"data to log"}
         else:
             data = dumps(data)
@@ -269,7 +272,7 @@ class Ayfie:
             if sleep_interval > MAX_PAUSE_BEFORE_RETRY:
                 sleep_interval = MAX_PAUSE_BEFORE_RETRY 
             sleep(sleep_interval)
-            sleep_msg = ". Trying again in {sleep_interval} seconds"
+            sleep_msg = f". Trying again in {sleep_interval} seconds"
         msg = f"Connection issue: {error_msg}{sleep_msg}"
         log.debug(msg)
         print(msg)
@@ -651,7 +654,7 @@ class Ayfie:
         settings = { k:v for k,v in settings.items() if v != None }
         if settings:
             config["settings"] = {"classification" : settings}
-        return config           
+        return config     
 
     def create_classifier(self, classifier_name, col_id, training_field, min_score, num_results, filters):
         classifier_id = classifier_name  # For now at least
@@ -707,11 +710,11 @@ class Ayfie:
             if values:
                 config[action] = {field: values}
             else:
-                raise ValueError(f"The action {action} requires a list of values, not '{values}'")
+                raise ValueError(f"The action '{action}' requires a list of values, not '{values}'")
         return config             
             
     def update_documents_by_query(self, col_id, query, filters, action, field, values=None):
-        data = self.__get_document_update_by_query_config(query, filters, action, field, values) 
+        data = self.__get_document_update_by_query_config(query, filters, action, field, values)
         endpoint = f'collections/{col_id}/documents'
         return self.__execute(endpoint, 'PATCH', data)
         
@@ -1188,14 +1191,15 @@ class AyfieConnector():
         
 class SchemaManager(AyfieConnector):
 
-    def add_field_if_absent(self):
+    def add_field_if_absent(self, schema_changes=None):
         col_id = self.ayfie.get_collection_id(self.config.col_name)
-        for schema_change in self.config.schema_changes:
-            field_name = schema_change['name']
-            if not self.ayfie.exists_collection_schema_field(col_id, field_name):
+        if not schema_changes:
+            schema_changes = self.config.schema_changes
+        for schema_change in schema_changes:
+            if not self.ayfie.exists_collection_schema_field(col_id, schema_change['name']):
                 self.ayfie.add_collection_schema_field(col_id, schema_change)
-                if not self.ayfie.exists_collection_schema_field(col_id, field_name):
-                    raise ConfigError(f"Failed to add new schema field '{field_name}'")
+                if not self.ayfie.exists_collection_schema_field(col_id, schema_change['name']):
+                    raise ConfigError(f"Failed to add new schema field '{schema_change['name']}'")
       
 
 class Feeder(AyfieConnector):
@@ -1385,9 +1389,138 @@ class Classifier(AyfieConnector):
         else:
             self.ayfie.classify_and_wait(col_id)  
             
-    def do_classification(self):
+    def do_classifications(self):
         for classification in self.config.classifications:
-            self.__create_and_train_classifiers(classification)
+            self.__do_classification(classification)
+            
+    def __get_training_and_test_sets(self, classification):
+        K = classification['k-fold']
+        assert (type(K) is int and K > 0),"No k-fold value defined"
+        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        query = f"_exists_:{classification['training_field']}"
+        doc_ids = ExpressTools(self.ayfie).get_doc_ids(col_id, query, random_order=True)
+        q, r = divmod(len(doc_ids), K)
+        doc_sets = [doc_ids[i * q + min(i, r):(i + 1) * q + min(i + 1, r)] for i in range(K)]
+        for i in range(K):
+            test_set_doc_ids = doc_sets[i]
+            training_set_doc_ids = list(doc_sets)
+            del training_set_doc_ids[i]
+            yield [id for id_set in list(training_set_doc_ids) for id in id_set], test_set_doc_ids
+            
+    def __write_to_test_output_file(self, file_path, content="", create_file=False):
+        if create_file:
+            with open(file_path, "w") as f:
+                f.write("""
+                    <html>
+                    <head>
+                     <style type="text/css">
+                    table {
+                      border-collapse:collapse; 
+                    }
+                    table td th { 
+                      padding:7px;  border:#4e95f4 1px solid;
+                    }
+                    th { 
+                      padding:0 15px 0 15px;
+                    }
+                    td { 
+                      padding:0 15px 0 15px;
+                    }
+                    table tr {
+                      background: #b8d1f3;
+                    }
+                    table tr td:nth-child(odd) { 
+                      background: #b8d1f3;
+                    }
+                    table tr td:nth-child(even) {
+                      background: #dae5f4;
+                    }
+                    td {
+                      text-align: right;
+                    }
+                    th {
+                      text-align: left;
+                    }
+                    </style>
+                    </head>
+                    <body>
+                """)
+        with open(file_path, "a") as f:
+            f.write(content)
+            
+    def __do_kfold_analyses(self, classification):
+        SchemaManager(self.config).add_field_if_absent([
+            {
+                "name"       : K_FOLD_FIELD,
+                "type"       : "KEYWORD",
+                "list"       : True
+            }
+        ])
+        known_categories = self.__get_known_categories(classification['training_field'])
+        self.recall = {}
+        self.precision = {}
+        for known_category in known_categories:
+            self.recall[known_category] = 0
+            self.precision[known_category] = 0
+        self.__write_to_test_output_file(classification['test_output_file'], create_file=True)
+        for training_set, test_set in self.__get_training_and_test_sets(classification):
+            DocumentUpdater(self.config).do_updates([
+                {
+                    "query": "*",
+                    "action": CLEAR_VALUES,
+                    "field": K_FOLD_FIELD
+                },
+                {
+                    "query": "*",
+                    "action": CLEAR_VALUES,
+                    "field": classification['output_field']
+                },
+                {
+                    "query": "*",
+                    "action": REPLACE_VALUES,
+                    "field": K_FOLD_FIELD,
+                    "values": ["training"],
+                    "filters": [{"field": "_id", "value": training_set}]
+                },
+                {
+                    "query": "*",
+                    "action": REPLACE_VALUES,
+                    "field": K_FOLD_FIELD,
+                    "values": ["verification"],
+                    "filters": [{"field": "_id", "value": test_set}]
+                }
+            ])
+            k_fold_classification = {
+                "name"                 : "k_fold",
+                "training_field"       : classification['training_field'],
+                "min_score"            : classification['min_score'],
+                "num_results"          : classification['num_results'],
+                "training_filters"     : [{"field": K_FOLD_FIELD, "value": "training"}],
+                "execution_filters"    : classification['execution_filters'],
+                "output_field"         : classification['output_field']
+            }
+            self.__create_and_train_classifiers(k_fold_classification)
+            if self.config.progress_bar:
+                self.create_classifier_job_and_wait(k_fold_classification)
+            content = self.__measure_accuracy(classification, known_categories) 
+            self.__write_to_test_output_file(classification['test_output_file'], content)
+            
+        for known_category in known_categories:
+            self.recall[known_category] = round(self.recall[known_category] / classification["k-fold"], 1)
+            self.precision[known_category] = round(self.precision[known_category] / classification["k-fold"], 1)
+        table = self.__gen_kfold_result_table("dummy", known_categories, True, classification)
+        self.__write_to_test_output_file(classification['test_output_file'], f"{table}</body></html>" )
+            
+    def __do_classification(self, classification):  
+        if classification['k-fold']:
+            try:
+                K = int(classification['k-fold'])
+            except:
+                raise ConfigError(f'"k-fold" is not an integer: "{K}"')
+            if K < 2:
+                raise ConfigError(f'"k-fold" cannot be smaller than 2')
+            self.__do_kfold_analyses(classification)
+        else:
             if self.config.progress_bar:
                 self.create_classifier_job_and_wait(classification)
             else:
@@ -1400,7 +1533,107 @@ class Classifier(AyfieConnector):
                         classification['execution_filters'],
                         classification['output_field']
                      )
-                 
+                    
+    def __get_known_categories(self, training_field):
+        return [aggregation["key"] for aggregation in Querier(self.config).search(
+            {
+                "query"        : "*",
+                "aggregations" : [training_field],
+                "size"         : 0
+            }
+        )["aggregations"][training_field]]
+        
+    def __measure_accuracy(self, classification, known_categories):
+        querier = Querier(self.config)
+        output_field = classification['output_field']
+        training_field = classification['training_field']
+        data_set_field = K_FOLD_FIELD
+        if len(known_categories) == 0:
+            raiseAutoDetectionError(f"No categories found") 
+        queries = {}
+        all_known_categories = []
+        for known_category in known_categories:
+            all_known_categories.append(f"{output_field}:{known_category}")
+            all_known_categories_ored = " OR ".join(all_known_categories)
+        for known_category in known_categories:
+            all_other_known_categories = all_known_categories.copy()
+            all_other_known_categories.remove(f"{output_field}:{known_category}")
+            all_other_known_categories_ored = " OR ".join(all_other_known_categories)
+        queries = {}
+        for known_category in known_categories:
+            queries[known_category] = {}
+            queries[known_category]["no_category"] = f"{training_field}:{known_category} AND NOT ({all_known_categories_ored}) AND {data_set_field}:verification"
+            for detected_category in known_categories:
+                queries[known_category][detected_category] = f"{output_field}:{detected_category} AND {training_field}:{known_category} AND {data_set_field}:verification"
+        result = {}
+        for known_category in known_categories:
+            result[known_category] = {}
+            for query in queries[known_category]:
+                result[known_category][query] = querier.search({
+                    "result": "query_and_numb_of_hits",
+                    "query": queries[known_category][query],
+                    "size" : 0
+                })['meta']['totalDocuments']
+        return self.__gen_kfold_result_table(result, known_categories)
+        
+    def __get_precision(self, category, result):
+        r = result[category].copy()
+        del r["no_category"]
+        try:
+            return 100* int(r[category])/int(sum(r.values()))
+        except ZeroDivisionError:
+            return 100.0
+        
+    def __get_recall(self, category, result):
+        numerator = int(result[category][category]) 
+        denominator = sum([item[category] for item in result.values()] + [result[category]["no_category"]])
+        try:
+            return 100 * numerator / denominator
+        except ZeroDivisionError:
+            return 100.0
+               
+    def __gen_kfold_result_table(self, result, known_categories, is_accumulated_score=False, classification=None):
+        table = "<table>"
+        if is_accumulated_score:
+            parameters = f'minScore={classification["min_score"]}, numResults={classification["num_results"]}' 
+            table += f'<tr><th colspan="{len(known_categories)+2}" style="text-align:center">RECALL & PRECISION AVERAGE ({parameters})</th></tr>'
+        table += "<tr><th></th>"
+        for known_category in known_categories:
+            table += f"<th>{known_category.upper()}</th>"
+        table += f"<th>Precision</th></tr>"
+        for known_category in known_categories:
+            table += f"<tr><th>DETECTED AS \"{known_category.upper()}\"</th>"
+            for detected_category in known_categories:
+                if is_accumulated_score:
+                    table += f"<td></td>"
+                else:
+                    table += f"<td>{result[known_category][detected_category]}</td>"
+            if is_accumulated_score:
+                precision = self.precision[known_category]
+            else:
+                precision = self.__get_precision(known_category, result)
+            table += f"<td>{round(precision, 1)} %</td></tr>"
+            if not is_accumulated_score:
+                self.precision[known_category] += precision
+        table += f"<tr><th>NOT DETECTED AS ANYTHING</th>"
+        for known_category in known_categories:
+            if is_accumulated_score:
+                table += f"<td></td>"
+            else:
+                table += f"<td>{result[known_category]['no_category']}</td>"
+        table += "</tr><tr><th>Recall</th>"
+        for known_category in known_categories:
+            if is_accumulated_score:
+                recall = self.recall[known_category]
+            else:
+                recall = self.__get_recall(known_category, result)
+            table += f"<td>{round(recall, 1)} %</td>" 
+            if not is_accumulated_score:
+                self.recall[known_category] += recall
+        table += "</tr></table><br>" 
+        return table
+ 
+ 
 class Clusterer(AyfieConnector):
 
     def create_clustering_job_and_wait(self):
@@ -1514,6 +1747,8 @@ class DocumentUpdater(AyfieConnector):
     def __update_documents_by_query(self, docs_update):
         col_id = self.ayfie.get_collection_id(self.config.col_name)
         if self.config.progress_bar:
+            if not "values" in docs_update:
+                docs_update["values"] = None
             job_id = self.ayfie.update_documents_by_query(
                           col_id, docs_update["query"], docs_update["filters"], 
                           docs_update["action"], docs_update["field"], docs_update["values"])
@@ -1531,13 +1766,17 @@ class DocumentUpdater(AyfieConnector):
         if not docs_updates:
             docs_updates = self.config.docs_updates
         for docs_update in docs_updates:
-            filters = []
-            if docs_update["filters"]:
-                filters = docs_update["filters"]
-                if docs_update["filters"] == "DOC_IDS":
-                    query = docs_update["id_extraction_query"]
-                    limit = docs_update["numb_of_docs_to_update"]
-                    filters = [{"field":"_id", "value": self.__get_doc_ids(query, limit)}]
+            if not "report_time" in docs_update:
+                docs_update["report_time"] = False
+            if not "values" in docs_update:
+                docs_update["values"] = []
+            if not "filters" in docs_update:
+                docs_update["filters"] = []
+            filters = docs_update["filters"]
+            if docs_update["filters"] == "DOC_IDS":
+                query = docs_update["id_extraction_query"]
+                limit = docs_update["numb_of_docs_to_update"]
+                filters = [{"field":"_id", "value": self.__get_doc_ids(query, limit)}]
             docs_update["filters"] = filters
             elapsed_time = self.__update_documents_by_query(docs_update)
             if docs_update["report_time"]:
@@ -1556,6 +1795,17 @@ class LogAnalyzer():
         if not exists(log_file_path):
             raise ConfigError(f"There is no {log_file_path}")
         self.info = [
+            {
+                "pattern" : r"^.*(20[12][0-9]-[01][0-9]-[0-9][0-9]T[012][0-9]:[0-6][0-9]:[0-9][0-9])\.[0-9]{9,9}Z .*$",
+                "extraction": [("Log start time", 1)],
+                "occurence": "first"
+            },
+            {
+                "pattern" : r"^.*(20[12][0-9]-[01][0-9]-[0-9][0-9]T[012][0-9]:[0-6][0-9]:[0-9][0-9])\.[0-9]{9,9}Z .*$",
+                "extraction": [("Log end time", 1)],
+                "occurence": "last",
+                "key": "end_date"
+            },
             {
                 "pattern" : r"^.*m[a-z]*_[0-9]*\s.*Container is mem limited to .*G \(of (.*G) of the host\).*$",
                 "extraction": [("Total RAM on host", 1)]
@@ -1583,6 +1833,10 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*skipExtractors=\[_gdpr\].*$",
                 "extraction": [("GDPR", "Disabled")]
+            },
+            {
+                "pattern" : r"^.*free: (.*gb)\[(.*%)\].*$",
+                "extraction": [("Available disk space: ", 1), ("Available disk capacity: ", 2)]
             }
         ]
         self.symptoms = [
@@ -1620,7 +1874,7 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*index read-only / allow delete \(api\).*$",
-                "indication": "The system is low on disk and Elasticsearch has write protecting the index to prevent possible index corruption."
+                "indication": "the system is low on disk and Elasticsearch has write protecting the index to prevent possible index corruption."
             },            
             {
                 "pattern" : r"^.*Timeout while waiting for ltlocate.*$",
@@ -1649,8 +1903,19 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*Update by query job failed after updating.*$",
                 "indication": "one is doing document tagging while some other job (for instance classification) is ongoing."
+            },
+            {
+                "pattern" : r"^.*Classifier output field is expected to be a list.*$",
+                "indication": "the classifier output field needs to be a list, but is not."
+            },
+            {
+                "pattern" : r"^.*all indices on this node will be marked read-only.*$",
+                "indication": "the system is low on disk and Elasticsearch has write protecting the index to prevent possible index corruption."
+            },
+            {
+                "pattern" : r"^.*java.io.IOException: No space left on device.*$",
+                "indication": "that one is out of disk space."
             }
-            
         ] 
         if self.custom_regex:
             self.symptoms.append({
@@ -1698,6 +1963,8 @@ class LogAnalyzer():
                             raise DataFormatError(f"File '{log_file}' is not recognized as a ayfie Inspector log file")
                     self.line_count += 1
                     for info in self.info:
+                        if "occurence" in info and info["occurence"] == "completed":
+                            continue
                         m = match(info["pattern"], line)
                         if m:
                             output_line = []
@@ -1709,7 +1976,12 @@ class LogAnalyzer():
                                 if type(item_value) is int:
                                     item_value = m.group(item_value)
                                 output_line.append(f"{item_name}: {item_value}")
-                            self.info_pieces[", ".join(output_line)] = True
+                            if "key" in info:
+                                self.info_pieces["key"] = ", ".join(output_line)
+                            else:
+                                self.info_pieces[", ".join(output_line)] = False
+                            if "occurence" in info and info["occurence"] == "first":
+                                info["occurence"] = "completed"  
                     for symptom in self.symptoms:
                         m = match(symptom["pattern"], line)
                         if m:
@@ -1728,7 +2000,17 @@ class LogAnalyzer():
                 raise DataFormatError(f"'File {log_file}' is most likley a binary file (or at a mininimum of wrong encoding)")
             except Exception:
                 raise
-                        
+                
+    def produce_output(self, title, data_dict):
+        if len(data_dict) > 0:
+            output = f"\n====== {title} ======\n"
+            for key in data_dict.keys():
+                if data_dict[key]:
+                    output += f"{data_dict[key]}\n"
+                else:
+                    output += f"{key}\n"
+        return output
+        
     def analyze(self):
         if isfile(self.log_file):
             self.__prepare_temp_log_directory(self.log_file, self.log_unpacking_dir)
@@ -1748,11 +2030,7 @@ class LogAnalyzer():
                 is_log_file = False
             analyses_output += f'\n\n====== FILE "{log_file}" {line_info}======\n'
             if is_log_file:
-                if len(self.info_pieces) > 0:
-                    analyses_output += "\n====== System Information ======\n"
-                    for info_piece in self.info_pieces.keys():
-                        analyses_output += f"{info_piece}\n"
-                    
+                analyses_output += self.produce_output("Time & System Information", self.info_pieces)
                 if self.errors_detected:
                     for symptom in self.symptoms:
                         if symptom["occurences"] > 0:
@@ -2038,7 +2316,6 @@ class Config():
         self.__init_report(self.reporting)
         self.reporting        = self.__get_item(config, 'reporting', False)
         self.__init_regression_testing(self.regression_testing)
-        
         self.__inputDataValidation()
 
     def __str__(self):
@@ -2133,6 +2410,15 @@ class Config():
                     id_mapping = line.split(id_conv_table_delimiter)
                     if len(id_mapping) >= minimum_columns:
                         self.id_mappings[id_mapping[id_conv_table_filename_column]] = id_mapping[id_conv_table_id_column]
+        # make a function of this to combine with almost identical code below              
+        if type(self.id_picking_list) == str:
+            filename = self.id_picking_list
+            try:
+                self.id_picking_list = loads(open(filename, "r").read())
+            except JSONDecodeError:
+                raise  DataFormatError(f"Bad JSON in file '{filename}' holder doc id list")
+            except FileNotFoundError:
+                raise ValueError(f"File '{filename}' with doc id list does not exists")
         
     def __init_processing(self, processing): 
         self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
@@ -2169,7 +2455,9 @@ class Config():
                 "num_results"       : self.__get_item(classification, 'numResults', 1),
                 "training_filters"  : self.__get_item(classification, 'training_filters', []),
                 "execution_filters" : self.__get_item(classification, 'execution_filters', []),
-                "output_field"      : self.__get_item(classification, 'outputField', 'pathclassification')
+                "output_field"      : self.__get_item(classification, 'outputField', 'pathclassification'),
+                "k-fold"            : self.__get_item(classification, 'k-fold', None),
+                "test_output_file"  : self.__get_item(classification, 'test_output_file', "test_output_file.html")
             })
         
     def __init_documents_updates(self, documents_updates):
@@ -2390,7 +2678,7 @@ class Admin():
             if self.config.clustering:
                 self.clusterer.create_clustering_job_and_wait()
             if self.config.classifications:
-                self.classifier.do_classification()
+                self.classifier.do_classifications()
             for search in self.config.searches:
                 try:
                     result = self.querier.search(search)
@@ -2442,7 +2730,7 @@ def run_cmd_line(cmd_line_args):
             datefmt = '%m/%d/%Y %H:%M:%S',
             filename = log_file,
             level = logging.DEBUG)
-    
+
     if len(cmd_line_args) != 2:
         print(f'Usage:   python {script_name_with_ext} <config-file-path>')
     else:
