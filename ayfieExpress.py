@@ -169,7 +169,13 @@ class Ayfie:
 
     def __init__(self, server='127.0.0.1', port='80', version='v1'):
         self.server = server
-        self.port = port
+        try:
+            self.port = str(int(port))
+        except ValueError:
+            raise ValueError(f"Value '{port}' is not a valid port number")
+        self.protocol = "http"
+        if self.port == '443':
+            self.protocol = "https"
         self.version = version
         self.product = 'ayfie'
         self.headers = HTTP_HEADER
@@ -229,7 +235,7 @@ class Ayfie:
             raise ValueError(error_msg)
 
     def __get_endpoint(self, path):
-        return f'http://{self.server}:{self.port}/{self.product}/{self.version}/{path}'
+        return f'{self.protocol}://{self.server}:{self.port}/{self.product}/{self.version}/{path}'
 
     def __gen_req_log_msg(self, verb, endpoint, data, headers):
         if len(str(data)) > MAX_LOG_ENTRY_SIZE:
@@ -1823,8 +1829,8 @@ class LogAnalyzer():
                 "extraction": [(1, 2)]
             },
             {
-                "pattern" : r"^.*AyfieVersion: Version: ([1-9].*), Buildinfo: (.*)$",
-                "extraction": [("ayfie Inspector version", 1), ("Buildinfo", 2)]
+                "pattern" : r"^(?!.*ayfie\.buildinfo).*main platform.config.AyfieVersion: (.*)$",   
+                "extraction": [("ayfie Inspector", 1)] 
             },
             {
                 "pattern" : r"^.*initializing general extractor with name _gdpr.*$",
@@ -1837,9 +1843,13 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*free: (.*gb)\[(.*%)\].*$",
                 "extraction": [("Available disk space: ", 1), ("Available disk capacity: ", 2)]
-            }
+            } 
         ]
         self.symptoms = [
+            {
+                "pattern" : r"^.*There is insufficient memory for the Java Runtime Environment to continue.*$",
+                "indication": "that the host has run out of available RAM (configured via .env or actual)"
+            },
             {
                 "pattern" : r"^.*Ignoring unknown properties with keys.*$",
                 "indication": "one has used an API parameter that does not exist or is mispelled."
@@ -1915,6 +1925,18 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*java.io.IOException: No space left on device.*$",
                 "indication": "that one is out of disk space."
+            },
+            {
+                "pattern" : r"^.*flood stage disk watermark [[0-9]{1,20%] exceeded on.*$",
+                "indication": "that one is out of disk space."
+            },
+            {
+                "pattern" : r"^.*Execution failed: Job aborted due to stage failure.*$",
+                "indication": "a job has failed. Use the job id from log line above to look up failure details with 'curl server:port/ayfie/v1/jobs/jobid'."
+            },
+            {
+                "pattern" : r"^.*hs_err_pid[0-9]+\.log.*$",
+                "indication": "there is a JVM process crash report at the given location within the given container."
             }
         ] 
         if self.custom_regex:
