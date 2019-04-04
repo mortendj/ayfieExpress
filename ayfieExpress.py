@@ -1931,8 +1931,8 @@ class LogAnalyzer():
                 "indication": "that one is out of disk space."
             },
             {
-                "pattern" : r"^.*Execution failed: Job aborted due to stage failure.*$",
-                "indication": "a job has failed. Use the job id from log line above to look up failure details with 'curl server:port/ayfie/v1/jobs/jobid'."
+                "pattern" : r"^.*(jobState=FAILED|,description=Execution failed: ).*$",
+                "indication": "a job has failed. Use the given jobId to look up failure details with 'curl server:port/ayfie/v1/jobs/jobId' (replace `jobId` with the id)"
             },
             {
                 "pattern" : r"^.*hs_err_pid[0-9]+\.log.*$",
