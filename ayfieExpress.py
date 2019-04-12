@@ -1,7 +1,6 @@
 from json import loads, dumps
 from json.decoder import JSONDecodeError
 from time import sleep, time
-from csv import DictReader, Sniffer
 from os.path import join, basename, dirname, exists, isdir, isfile, splitext, split as path_split, getsize, isabs
 from os import listdir, makedirs, walk, system, stat, getcwd, chdir
 from zipfile import is_zipfile, ZipFile
@@ -14,9 +13,19 @@ from typing import Union, List, Optional, Tuple, Set, Dict, DefaultDict, Any
 from re import search, match, sub
 from random import random, shuffle
 from subprocess import call
+from copy import deepcopy
 import logging
 import requests
 import sys
+import csv
+
+max_int_value = sys.maxsize
+while True:
+    try:
+        csv.field_size_limit(max_int_value)
+        break
+    except OverflowError:
+        max_int_value = int(max_int_value/2)
 
 try:
     import PyPDF2
@@ -25,6 +34,9 @@ except:
     pdf_is_suported = False
 
 log = logging.getLogger(__name__)
+
+INSPECTOR             = "inspector"
+SOLR                  = "solr"
 
 MAX_LOG_ENTRY_SIZE    = 1000
 
@@ -39,8 +51,12 @@ OFF_LINE              = "off-line"
 OVERRIDE_CONFIG       = "override_config"
 RESPECT_CONFIG        = "respect_config"
 
-HTTP_HEADER           = {'Content-Type':'application/hal+json'}
-HTTP_VERBS            = ['POST', 'GET', 'PUT', 'PATCH', 'DELETE']
+HTTP_GET              = 'GET'
+HTTP_PUT              = 'PUT'
+HTTP_POST             = 'POST'
+HTTP_PATCH            = 'PATCH'
+HTTP_DELETE           = 'DELETE'
+HTTP_VERBS            = [HTTP_POST, HTTP_GET, HTTP_PUT, HTTP_PATCH, HTTP_DELETE]
 JOB_TYPES             = ['PROCESSING', 'CLUSTERING', 'SAMPLING', 'CLASSIFICATION']
 JOB_STATES            = ['RUNNING', 'SUCCEEDED']
 FIELD_TYPES           = ['TEXT_EN', 'KEYWORD', 'ENTITY', 'EMAIL_ADDRESS', 'INTEGER',
@@ -163,11 +179,11 @@ def pretty_print(json):
             raise ValueError('json string cannot be empty string')
         json = loads(json)
     print(dumps(json, indent=4))
-            
+    
+    
+class SearchEngine:
 
-class Ayfie:
-
-    def __init__(self, server='127.0.0.1', port='80', version='v1'):
+    def __init__(self, server, port, base_endpoint, headers):
         self.server = server
         try:
             self.port = str(int(port))
@@ -176,12 +192,11 @@ class Ayfie:
         self.protocol = "http"
         if self.port == '443':
             self.protocol = "https"
-        self.version = version
-        self.product = 'ayfie'
-        self.headers = HTTP_HEADER
-        self.statusCodes = self.__getHTTPStatusCodes()
-
-    def __getHTTPStatusCodes(self):
+        self.base_endpoint = base_endpoint
+        self.headers = headers
+        self.statusCodes = self._getHTTPStatusCodes()
+        
+    def _getHTTPStatusCodes(self):
         return {
             200: {
                 "code": "200 OK",
@@ -226,25 +241,27 @@ class Ayfie:
                 "description": "This one is not listed in ayfie literature."
             }
         }
+             
+    def _get_endpoint(self, path, parameters):
+        if  parameters:
+             parameters = f"?{ parameters}"
+        return f'{self.protocol}://{self.server}:{self.port}/{self.base_endpoint}/{path}{parameters}'  
 
-    def __validateInputValue(self, input_value, allowed_values):
+    def _validateInputValue(self, input_value, allowed_values):
         if input_value not in allowed_values:
             allowed_values_str = '", "'.join(allowed_values)
             error_msg = f'Unknown input value "{input_value}".'
             error_msg += f'Allowed values are: "{allowed_values_str}".'
             raise ValueError(error_msg)
 
-    def __get_endpoint(self, path):
-        return f'{self.protocol}://{self.server}:{self.port}/{self.product}/{self.version}/{path}'
-
-    def __gen_req_log_msg(self, verb, endpoint, data, headers):
+    def _gen_req_log_msg(self, verb, endpoint, data, headers):
         if len(str(data)) > MAX_LOG_ENTRY_SIZE:
             data = {"too much":"data to log"}
         else:
             data = dumps(data)
         return f"Request: {verb} {endpoint} json={data} headers={headers}"
 
-    def __gen_response_err_msg(self, response_obj, ayfieStatus):
+    def _gen_response_err_msg(self, response_obj, ayfieStatus):
         ayfieStatusCode = ayfieStatus['code']
         ayfieDescription = ayfieStatus['description']
         err_msg = "No error message found within response object"
@@ -257,21 +274,21 @@ class Ayfie:
         msg += f'General error description: "{ayfieDescription}". '
         msg += f'Specific error description: "{err_msg}"'
         return msg
-
-    def __gen_non_ayfie_code_msg(self, code):
+        
+    def _gen_non_ayfie_code_msg(self, code):
         ayfieCodes = ', '.join(list(map(str, self.statusCodes.keys())))
         return f"Unexpected HTTP status code {code}, Expected: {ayfieCodes}"
 
-    def __get_id_from_header(self, headers):
+    def _get_id_from_header(self, headers):
         if 'location' in headers:
             url = headers['location']
-            p = f"^https?://.*/ayfie/{self.version}/(collections|jobs)/(.*$)"
+            p = f"^https?://.*/{self.base_endpoint}/(collections|jobs)/(.*$)"
             m = match(p, url)
             if m:
                 return m.group(2)
         return None
         
-    def __log_attempt_and_go_to_sleep(self, tries, error_msg, go_to_sleep): 
+    def _log_attempt_and_go_to_sleep(self, tries, error_msg, go_to_sleep): 
         sleep_msg = ""
         if go_to_sleep:
             sleep_interval = tries * 5
@@ -282,12 +299,12 @@ class Ayfie:
         msg = f"Connection issue: {error_msg}{sleep_msg}"
         log.debug(msg)
         print(msg)
-            
-    def __execute(self, path, verb, data={}):
-        self.__validateInputValue(verb, HTTP_VERBS)
+        
+    def _execute(self, path, verb, data={}, parameters=""):
+        self._validateInputValue(verb, HTTP_VERBS)
         request_function = getattr(requests, verb.lower())
-        endpoint = self.__get_endpoint(path)
-        log.debug(self.__gen_req_log_msg(verb, endpoint, data, self.headers))
+        endpoint = self._get_endpoint(path, parameters)
+        log.debug(self._gen_req_log_msg(verb, endpoint, data, self.headers))
         
         if data and verb == "POST" and "batches" in endpoint:
             with open("data.json", 'wb') as f:
@@ -302,15 +319,15 @@ class Ayfie:
                 response = request_function(endpoint, json=data, headers=self.headers)
                 break
             except requests.exceptions.ConnectionError as e:
-                self.__log_attempt_and_go_to_sleep(tries, str(e), go_to_sleep=True)
+                self._log_attempt_and_go_to_sleep(tries, str(e), go_to_sleep=True)
             except MemoryError:
-                self.__log_attempt_and_go_to_sleep(tries, "Out of memory - giving up!", go_to_sleep=False)
+                self._log_attempt_and_go_to_sleep(tries, "Out of memory - giving up!", go_to_sleep=False)
                 raise
             except Exception as e:
-                self.__log_attempt_and_go_to_sleep(tries, "Unknown/unhandled error reason", go_to_sleep=False) 
+                self._log_attempt_and_go_to_sleep(tries, "Unknown/unhandled error reason", go_to_sleep=False) 
                 raise
          
-        id_from_headers = self.__get_id_from_header(response.headers)
+        id_from_headers = self._get_id_from_header(response.headers)
         log.debug(f'HTTP response status: {response.status_code}')
         if response.status_code in self.statusCodes.keys():
             ayfieStatus = self.statusCodes[response.status_code]
@@ -319,20 +336,20 @@ class Ayfie:
                 "code": f"{response.status_code}",
                 "description": "Not a ayfie recognized response code"
             }
-            log.warning(self.__gen_non_ayfie_code_msg(response.status_code))
+            log.warning(self._gen_non_ayfie_code_msg(response.status_code))
         try:
             response_obj = loads(response.text) if len(response.text) else {}
         except JSONDecodeError:
-            pattern = "<head><title>(\d{3,3}) (.*)</title></head>"
+            pattern = "<title>(Error )(\d{3,3}) (.*)</title>"
             m = search(pattern, response.text)
             if m:
-                response_obj = {'error': m.group(2)}
+                response_obj = {'error': m.group(3)}
             else:
                 raise HTTPError(response.text)
         except:
             raise HTTPError(response.text)
         if response.status_code >= 400:
-            error_msg = self.__gen_response_err_msg(response_obj, ayfieStatus)
+            error_msg = self._gen_response_err_msg(response_obj, ayfieStatus)
             log.debug(error_msg)
             if response.status_code >= 500:
                 with open(f"failed-batch-{response.status_code}-error.json", "wb") as f:
@@ -341,19 +358,229 @@ class Ayfie:
         if id_from_headers and not 'batches' in path:
             return id_from_headers
         return response_obj
+        
+    def _get_all_items_of_an_item_type(self, item_type):
+        raise NotImplementedError
+        
+    def _wait_for_collection_event(self, col_id, event, timeout=None):
+        sleep(1)
+        
+    def _wait_for_collection_state(self, col_id, state, timeout):
+        sleep(1)
 
-    def __wait_for(self, wait_type, id, good_value, bad_value=None, timeout=None):
+    def _wait_for_collection_to_appear(self, col_id, timeout=120):
+        sleep(1)
+
+    def _wait_for_collection_to_disappear(self, col_id, timeout=120):
+        sleep(1)
+              
+    ######### Collection Management #########
+
+    def create_collection(self, col_name, col_id=None):
+        raise NotImplementedError
+        
+    def create_collection_and_wait(self, col_name, col_id=None, timeout=120):
+        id_string = col_id if col_id else col_name
+        m = match("^[0-9a-z_-]+$", id_string)
+        if not m:
+            raise ValueError(f"Trying to create collection with illegal collection id string: '{id_string}'")
+        col_id = self.create_collection(col_name, col_id)
+        self._wait_for_collection_to_appear(col_id, timeout)
+        return col_id 
+        
+    def get_collections(self):
+        return self._get_all_items_of_an_item_type('collections')   
+
+    def delete_collection(self, col_id):
+        raise NotImplementedError
+ 
+    def delete_collection_and_wait(self, col_id, timeout=120):
+        self.delete_collection(col_id)
+        self._wait_for_collection_to_disappear(col_id, timeout)
+        
+    def delete_all_collections_and_wait(self, timeout=120):
+        col_ids = self.get_collection_ids()
+        for col_id in col_ids:
+            self.delete_collection(col_id)
+        for col_id in col_ids:
+            self._wait_for_collection_to_disappear(col_id, timeout)
+
+    def get_collection(self, col_id):
+        raise NotImplementedError
+
+    def get_collection_state(self, col_id):
+        raise NotImplementedError
+
+    def get_collection_schema(self, col_id):
+        raise NotImplementedError
+        
+    def add_collection_schema_field(self, col_id, schema_field_config):
+         raise NotImplementedError
+         
+    def get_collection_schema_field(self, col_id, field_name):
+        raise NotImplementedError
+        
+    def exists_collection_schema_field(self, col_id, field_name):
+        schema = self.get_collection_schema(col_id)
+        if field_name in schema["fields"]:
+            return True
+        return False
+
+    def commit_collection(self, col_id):
+        raise NotImplementedError
+
+    def commit_collection_and_wait(self, col_id, timeout=300):
+        raise NotImplementedError
+
+    def feed_collection_documents(self, col_id, documents):
+        raise NotImplementedError
+
+    def get_collection_documents(self, col_id, page_size=100):
+        raise NotImplementedError
+
+    def get_collection_size(self, col_id):
+        raise NotImplementedError
+        
+    def _get_collections_item(self, item, col_name=None):
+        raise NotImplementedError
+            
+    def get_collection_names(self):
+        return self._get_collections_item('name')
+
+    def get_collection_ids(self, col_name=None):
+        return self._get_collections_item('id', col_name)
+        
+    def get_collection_id(self, col_name):
+        raise NotImplementedError
+        
+    def exists_collection_with_id(self, col_id):
+        raise NotImplementedError
+
+    def exists_collection_with_name(self, col_name):
+        if col_name in self.get_collection_names():
+            return True
+        return False
+
+    def meta_search(self, col_id, json_query):
+        raise NotImplementedError
+
+    def json_based_meta_concept_search(self, col_id, json_query):
+        raise NotImplementedError
+
+    def doc_search(self, col_id, json_query):
+        raise NotImplementedError
+
+    def search_collection(self, col_id, query, size=10, offset=0, filters=[], exclude=[], aggregations=[], scroll=False, meta_data=False):
+        raise NotImplementedError
+        
+    def next_scroll_page(self, link):
+        raise NotImplementedError
+ 
+    ######### Jobs #########
+
+    def create_job(self, config):
+        raise NotImplementedError
+        
+    def get_jobs(self):
+        raise NotImplementedError
+        
+    def get_job(self, job_id, verbose=None):
+         raise NotImplementedError
+
+    def create_job_and_wait(self, config, timeout=None):
+        raise NotImplementedError
+        
+    ######### Processing / Indexing #########
+
+    def get_process_config(self, col_id):
+        return {}
+
+    def process_collection(self, col_id, config={}):
+        return
+    
+    def process_collection_and_wait(self, col_id, config={}, timeout=None):
+        return
+
+      
+class Solr(SearchEngine):
+
+    def __init__(self, server, port, api_version=None):
+        SearchEngine.__init__(self, server, port, "solr", {"Content-Type":"application/json"})
+        
+    def create_collection(self, col_name, col_id=None):
+        parameters = f"name={col_name}&action=CREATE&numShards=2&replicationFactor=1"
+        return self._execute("admin/collections", HTTP_POST, parameters=parameters)
+      
+    def delete_collection(self, col_id):   
+        self._execute(f'admin/collections', HTTP_GET, parameters=f"action=DELETE&name={col_id}")
+        
+    def get_collection_schema(self, col_id):
+        return self._execute(f'{col_id}/schema/fields', HTTP_GET)
+        
+    def add_collection_schema_field(self, col_id, schema_field_config):
+        schema_field_config = {"add-field": {k:v for k,v in schema_field_config.items() if v != []}}
+        path = f'{col_id}/schema/'
+        return self._execute(path, HTTP_POST, schema_field_config)
+        
+    def _get_collections_item(self, item, col_name=None):
+        if item in ['name', 'id']:
+            return [collection for collection in self.get_collections() if not col_name or collection['name'] == col_name]
+        else:
+            raise ValueError("Solr does not support other items then 'name' and 'id'")
+            
+    def get_collection_id(self, col_name):
+        return col_name
+        
+    def meta_search(self, col_id, json_query):
+        print('https://lucene.apache.org/solr/guide/7_1/json-request-api.html')
+        return self._execute(f"{col_id}/select", HTTP_GET, parameters=f"q={json_query['query']}")
+ 
+    def ping(self):
+        endpoint = f"admin/ping"
+        response = self._execute(HTTP_GET, endpoint)
+        return response
+       
+    def feed_collection_documents(self, col_id, documents):
+        return self._execute(f"{col_id}/update", HTTP_POST, documents)
+        
+    def commit_collection(self, col_id):
+        self._execute(f"{col_id}/update", HTTP_GET, parameters="commit=true")
+        
+    def commit_collection_and_wait(self, col_id, timeout=300):
+        raise NotImplementedError
+        
+    def commit_collection_and_wait(self, col_id, timeout=300):
+        self.commit_collection(col_id)
+         
+    def _get_all_items_of_an_item_type(self, item_type):
+        self._validateInputValue(item_type, ITEM_TYPES)
+        itemNames = item_type.split(':')
+        endpoint = f"admin/{itemNames[0]}"
+        parameters = "action=LIST&wt=json"
+        result = self._execute(endpoint, HTTP_GET, parameters=parameters)
+        resultField = itemNames[1] if len(itemNames) > 1 else itemNames[0]
+        if resultField in result:
+            return result[resultField]
+        return []
+
+        
+class Inspector(SearchEngine):
+  
+    def __init__(self, server, port, api_version='v1'):
+        SearchEngine.__init__(self, server, port,  f"ayfie/{api_version}", {'Content-Type':'application/hal+json'})
+
+    def _wait_for(self, wait_type, id, good_value, bad_value=None, timeout=None):
         if not wait_type in WAIT_TYPES:
             raise ValueError(f"'{wait_type}' is not in {WAIT_TYPES}")
         if wait_type == COL_EVENT:
-            self.__validateInputValue(good_value, COL_EVENTS)
+            self._validateInputValue(good_value, COL_EVENTS)
             negation = " not" if good_value == COL_APPEAR else " "
             err_msg  = f'Collection "{id}" still{negation} there after {timeout} seconds'
         elif wait_type == COL_STATE:
-            self.__validateInputValue(good_value, COL_STATES)
+            self._validateInputValue(good_value, COL_STATES)
             err_msg  = f'Collection "{id}" still not in state {good_value} after {timeout} seconds'
         elif wait_type == CLASSIFIER_STATE:
-            self.__validateInputValue(good_value, CLASSIFIER_STATES)
+            self._validateInputValue(good_value, CLASSIFIER_STATES)
             err_msg  = f'Classifier "{id}" still not in state {good_value} after {timeout} seconds'
         else:
             ValueError(f"Incident type {wait_type} does not exists")
@@ -385,32 +612,32 @@ class Ayfie:
             sleep(5)
             count_down -= 1
             
-    def __wait_for_collection_event(self, col_id, event, timeout=None):
-        self.__wait_for(COL_EVENT, col_id, event, None, timeout)
+    def _wait_for_collection_event(self, col_id, event, timeout=None):
+        self._wait_for(COL_EVENT, col_id, event, None, timeout)
         
-    def __wait_for_collection_state(self, col_id, state, timeout):
-        self.__wait_for(COL_STATE, col_id, state, None, timeout)
+    def _wait_for_collection_state(self, col_id, state, timeout):
+        self._wait_for(COL_STATE, col_id, state, None, timeout)
 
-    def __wait_for_collection_to_appear(self, col_id, timeout=120):
-        self.__wait_for(COL_EVENT, col_id, COL_APPEAR, None, timeout)
+    def _wait_for_collection_to_appear(self, col_id, timeout=120):
+        self._wait_for(COL_EVENT, col_id, COL_APPEAR, None, timeout)
 
-    def __wait_for_collection_to_disappear(self, col_id, timeout=120):
-        self.__wait_for(COL_EVENT, col_id, COL_DISAPPEAR, None, timeout)
+    def _wait_for_collection_to_disappear(self, col_id, timeout=120):
+        self._wait_for(COL_EVENT, col_id, COL_DISAPPEAR, None, timeout)
 
-    def __change_collection_state(self, col_id, transition):
-        self.__validateInputValue(transition, COL_TRANSITION)
+    def _change_collection_state(self, col_id, transition):
+        self._validateInputValue(transition, COL_TRANSITION)
         data = {"collectionState": transition}
-        return self.__execute(f'collections/{col_id}', 'PATCH', data)
+        return self._execute(f'collections/{col_id}', HTTP_PATCH, data)
  
-    def __wait_for_collection_to_be_committed(self, col_id, timeout):
-        self.__wait_for(COL_STATE, col_id, 'COMMITTED', None, timeout)
+    def _wait_for_collection_to_be_committed(self, col_id, timeout):
+        self._wait_for(COL_STATE, col_id, 'COMMITTED', None, timeout)
         
-    def __get_all_items_of_an_item_type(self, item_type):
-        self.__validateInputValue(item_type, ITEM_TYPES)
+    def _get_all_items_of_an_item_type(self, item_type):
+        self._validateInputValue(item_type, ITEM_TYPES)
         itemNames = item_type.split(':')
         endpoint = itemNames[0]
-        resultField = itemNames[1] if len(itemNames) > 1 else endpoint
-        result = self.__execute(endpoint, 'GET')
+        resultField = itemNames[1] if len(itemNames) > 1 else itemNames[0]
+        result = self._execute(endpoint, HTTP_GET)
         if '_embedded' in result:
             if resultField in result['_embedded']:
                 return result['_embedded'][resultField]
@@ -422,87 +649,55 @@ class Ayfie:
         data = {'name': col_name}
         if col_id:
             data['id'] = col_id
-        return self.__execute('collections', 'POST', data)
-
-    def create_collection_and_wait(self, col_name, col_id=None, timeout=120):
-        id_string = col_id if col_id else col_name
-        m = match("^[0-9a-z_-]+$", id_string)
-        if not m:
-            raise ValueError(f"Trying to create collection with illegal collection id string: '{id_string}'")
-        col_id = self.create_collection(col_name, col_id)
-        self.__wait_for_collection_to_appear(col_id, timeout)
-        return col_id
-        
-    def get_collections(self):
-        return self.__get_all_items_of_an_item_type('collections')   
+        return self._execute('collections', HTTP_POST, data) 
 
     def delete_collection(self, col_id):
-        self.__execute(f'collections/{col_id}', 'DELETE')
+        self._execute(f'collections/{col_id}', HTTP_DELETE)
 
     def delete_collection_and_wait(self, col_id, timeout=120):
         self.delete_collection(col_id)
-        self.__wait_for_collection_to_disappear(col_id, timeout)
-
-    def delete_all_collections_and_wait(self, timeout=120):
-        col_ids = self.get_collection_ids()
-        for col_id in col_ids:
-            self.delete_collection(col_id)
-        for col_id in col_ids:
-            self.__wait_for_collection_to_disappear(col_id, timeout)
+        self._wait_for_collection_to_disappear(col_id, timeout)
 
     def get_collection(self, col_id):
-        return self.__execute(f'collections/{col_id}', 'GET')
+        return self._execute(f'collections/{col_id}', HTTP_GET)
 
     def get_collection_state(self, col_id):
         return self.get_collection(col_id)["collectionState"]
 
     def get_collection_schema(self, col_id):
-        return self.__execute(f'collections/{col_id}/schema', 'GET')
+        return self._execute(f'collections/{col_id}/schema', HTTP_GET)
         
     def add_collection_schema_field(self, col_id, schema_field_config):
         schema_field_config = {k:v for k,v in schema_field_config.items() if v != []}
         path = f'collections/{col_id}/schema/fields'
-        return self.__execute(path, 'POST', schema_field_config)
+        return self._execute(path, HTTP_POST, schema_field_config)
         
     def get_collection_schema_field(self, col_id, field_name):
         path = f'collections/{col_id}/schema/fields/{field_name}'
-        return self.__execute(path, 'GET')
-        
-    def exists_collection_schema_field(self, col_id, field_name):
-        schema = self.__execute(f'collections/{col_id}/schema', 'GET')
-        if field_name in schema["fields"]:
-            return True
-        return False
+        return self._execute(path, HTTP_GET)
 
     def commit_collection(self, col_id):
-        self.__change_collection_state(col_id, "COMMIT")
+        self._change_collection_state(col_id, "COMMIT")
 
     def commit_collection_and_wait(self, col_id, timeout=300):
         self.commit_collection(col_id)
-        self.__wait_for_collection_to_be_committed(col_id, timeout)
+        self._wait_for_collection_to_be_committed(col_id, timeout)
 
     def feed_collection_documents(self, col_id, documents):
         path = f'collections/{col_id}/batches'
         data = {'documents': documents}
-        return self.__execute(path, 'POST', data)
+        return self._execute(path, HTTP_POST, data)
 
     def get_collection_documents(self, col_id, page_size=100):
         path = f'collections/{col_id}/documents?size={page_size}'
-        return self.__execute(path, 'GET')
+        return self._execute(path, HTTP_GET)
 
     def get_collection_size(self, col_id):
         path = f'collections/{col_id}/documents?size=0'
-        return self.__execute(path, 'GET')["meta"]["totalDocuments"]
-
-    def __get_collections_item(self, item, col_name=None):
-        return [collection[item] for collection in self.get_collections()
-            if not col_name or collection['name'] == col_name]
+        return self._execute(path, HTTP_GET)["meta"]["totalDocuments"]
         
-    def get_collection_names(self):
-        return self.__get_collections_item('name')
-
-    def get_collection_ids(self, col_name=None):
-        return self.__get_collections_item('id', col_name)
+    def _get_collections_item(self, item, col_name=None):
+        return [collection[item] for collection in self.get_collections() if not col_name or collection['name'] == col_name]
 
     def get_collection_id(self, col_name):
         ids = self.get_collection_ids(col_name)
@@ -517,18 +712,13 @@ class Ayfie:
             return True
         return False
 
-    def exists_collection_with_name(self, col_name):
-        if col_name in self.get_collection_names():
-            return True
-        return False
-
     def meta_search(self, col_id, json_query):
         path = f'collections/{col_id}/search'
-        return self.__execute(path, 'POST', json_query)
+        return self._execute(path, HTTP_POST, json_query)
 
     def json_based_meta_concept_search(self, col_id, json_query):
         path = f'collections/{col_id}/search/concept'
-        return self.__execute(path, 'POST', json_query)
+        return self._execute(path, HTTP_POST, json_query)
 
     def doc_search(self, col_id, json_query):
         return self.meta_search(col_id, json_query)['result']
@@ -555,23 +745,23 @@ class Ayfie:
             return self.doc_search(col_id, json_query)
         
     def next_scroll_page(self, link):
-        return self.__execute("/".join(link.replace('//', "").split('/')[3:]), 'GET')
+        return self._execute("/".join(link.replace('//', "").split('/')[3:]), HTTP_GET)
  
     ######### Jobs #########
 
     def create_job(self, config):
-        return self.__execute('jobs', 'POST', config)
+        return self._execute('jobs', HTTP_POST, config)
         
     def get_jobs(self):
-        return self.__execute('jobs', 'GET')
+        return self._execute('jobs', HTTP_GET)
         
     def get_job(self, job_id, verbose=None):
         endpoint = f'jobs/{job_id}'
         if verbose:
             endpoint += "?verbose=true"
-        return self.__execute(endpoint, 'GET')
+        return self._execute(endpoint, HTTP_GET)
         
-    def __wait_for_job_to_finish(self, job_id, timeout=None):
+    def _wait_for_job_to_finish(self, job_id, timeout=None):
         start_time = None
         while True:
             job_status = self.get_job(job_id)["state"]
@@ -587,9 +777,9 @@ class Ayfie:
 
     def create_job_and_wait(self, config, timeout=None):
         job_id = self.create_job(config)
-        return self.__wait_for_job_to_finish(job_id, timeout)
+        return self._wait_for_job_to_finish(job_id, timeout)
         
-    ######### Processing #########
+        ######### Processing / Indexing #########
 
     def get_process_config(self, col_id):
         return {
@@ -609,7 +799,7 @@ class Ayfie:
 
     ######### Clustering #########
 
-    def __get_clustering_config(self, col_id, clusters_per_level=None,
+    def _get_clustering_config(self, col_id, clusters_per_level=None,
                               docs_per_cluster=None, max_recursion_depth=None,
                               gramian_singular_vectors=None, min_df=None,
                               max_df_fraction=None, gramian_threshold=None,
@@ -635,16 +825,16 @@ class Ayfie:
         return config
 
     def create_clustering_job(self, col_id, **kwargs):
-        config = self.__get_clustering_config(col_id, **kwargs)
+        config = self._get_clustering_config(col_id, **kwargs)
         return self.create_job(config)
         
     def create_clustering_job_and_wait(self, col_id, **kwargs):
-        config = self.__get_clustering_config(col_id, **kwargs)
+        config = self._get_clustering_config(col_id, **kwargs)
         return self.create_job_and_wait(config, timeout)  ############################### timeout not defined, causes a crash
 
     ######### Classification #########
  
-    def __get_classifier_config(self, classifier_name=None, col_id=None, min_score=None,
+    def _get_classifier_config(self, classifier_name=None, col_id=None, min_score=None,
                                       num_results=None, filters=None, output_field=None):
         config = {
             "collectionId" : col_id,
@@ -673,13 +863,13 @@ class Ayfie:
             "numResults": num_results,
             "filters": filters
         }
-        self.__execute('classifiers', 'POST', data)
+        self._execute('classifiers', HTTP_POST, data)
         
     def get_classifiers(self):
-        return self.__get_all_items_of_an_item_type('classifiers')
+        return self._get_all_items_of_an_item_type('classifiers')
 
     def get_classifier(self, classifier_name):
-        return self.__execute(f'classifiers/{classifier_name}', 'GET')
+        return self._execute(f'classifiers/{classifier_name}', HTTP_GET)
 
     def get_classifier_names(self):
         return [classifier['name'] for classifier in self.get_classifiers()]
@@ -693,18 +883,18 @@ class Ayfie:
             self.delete_classifier(classifier_name)
 
     def delete_classifier(self, classifier_name):
-        return self.__execute(f'classifiers/{classifier_name}', 'DELETE')
+        return self._execute(f'classifiers/{classifier_name}', HTTP_DELETE)
 
     def update_document(self, col_id, doc_id, field, values):
         data = {field: values}
         endpoint = f'collections/{col_id}/documents/{doc_id}'
-        self.__execute(endpoint, 'PATCH', data)
+        self._execute(endpoint, HTTP_PATCH, data)
 
     def update_documents(self, col_id, doc_ids, field, values):
         for doc_id in doc_ids:
             self.update_document(col_id, doc_id, field, values) 
 
-    def __get_document_update_by_query_config(self, query, filters, action, field, values=None):
+    def _get_document_update_by_query_config(self, query, filters, action, field, values=None):
         if not action in DOC_UPDATE_ACTIONS:
             raise ValueError(f"Parameter action cannot be {action}, but must be in {DOC_UPDATE_ACTIONS}")
         config = {"query" : {"query" : query}}
@@ -720,26 +910,26 @@ class Ayfie:
         return config             
             
     def update_documents_by_query(self, col_id, query, filters, action, field, values=None):
-        data = self.__get_document_update_by_query_config(query, filters, action, field, values)
+        data = self._get_document_update_by_query_config(query, filters, action, field, values)
         endpoint = f'collections/{col_id}/documents'
-        return self.__execute(endpoint, 'PATCH', data)
+        return self._execute(endpoint, HTTP_PATCH, data)
         
     def update_documents_by_query_and_wait(self, col_id, query, filters, action, field, values, timeout=None):
         job_id = self.update_documents_by_query(col_id, query, filters, action, field, values)
-        return self.__wait_for_job_to_finish(job_id, timeout)
+        return self._wait_for_job_to_finish(job_id, timeout)
         
     def train_classifier(self, classifier_name):
         data = {"classifierState": 'TRAIN'}
-        return self.__execute(f'classifiers/{classifier_name}', 'PATCH', data)
+        return self._execute(f'classifiers/{classifier_name}', HTTP_PATCH, data)
  
     def wait_for_classifier_to_be_trained(self, classifier_name):
-        self.__wait_for("classifier_state", classifier_name, "TRAINED", "INVALID")
+        self._wait_for("classifier_state", classifier_name, "TRAINED", "INVALID")
         
         
 class ExpressTools():
 
     def __init__(self, ayfie):
-        self.ayfie = ayfie
+        self.engine = ayfie
  
     def get_doc_ids(self, col_id, query="*", limit=None, random_order=False):
         if not limit:
@@ -749,7 +939,7 @@ class ExpressTools():
             limit = int(limit)
             if limit < docs_per_request:
                 docs_per_request = limit
-        result = self.ayfie.search_collection(col_id, query, docs_per_request, 
+        result = self.engine.search_collection(col_id, query, docs_per_request, 
                  exclude=["content", "term", "location", "organization", "person", "email"], 
                  scroll=True, meta_data=True)
         all_ids = [doc['document']['id'] for doc in result["result"]]
@@ -758,7 +948,7 @@ class ExpressTools():
                 link = result["_links"]["next"]["href"]
             except:
                 break
-            result = self.ayfie.next_scroll_page(link)
+            result = self.engine.next_scroll_page(link)
             ids = [doc['document']['id'] for doc in result["result"]]
             if len(ids) == 0:
                 break
@@ -840,7 +1030,7 @@ class FileHandlingTools():
             return TXT
         elif extension == '.csv' or extension == '.tsv':
             try:
-                dialect = Sniffer().sniff(org_start_char_sequence)
+                dialect = csv.Sniffer().sniff(org_start_char_sequence)
                 return CSV
             except:
                 return None
@@ -943,7 +1133,7 @@ class DataSource():
         self.config = config
         self.created_temp_data_dir = False
         if self.config.data_source == None:
-            raise ValueError(f"The new parameter 'data_source' is mandatory and used instead of both 'data_dir' and 'data_file'. Replace any of these with 'data_source' if you are still using those in your configuration.")
+            raise ValueError(f"Parameter 'data_source' is mandatory (but it can point to an empty source)")
         if not exists(self.config.data_source):
             raise ValueError(f"There is no file or directory called '{self.config.data_source}'")
         if isdir(self.config.data_source):
@@ -965,17 +1155,17 @@ class DataSource():
         if self.created_temp_data_dir:
             delete_dir_tree(self.data_dir)
             
-    def __get_file_type(self, file_path):
+    def _get_file_type(self, file_path):
         file_type, encoding = FileHandlingTools().get_file_type(file_path)
         if file_type == CSV:
             if self.config.treat_csv_as_text:
                 file_type = TXT
         return file_type, encoding
 
-    def __unzip(self, file_type, file_path, unzip_dir):
+    def _unzip(self, file_type, file_path, unzip_dir):
         return FileHandlingTools().unzip(file_type, file_path, unzip_dir)
 
-    def __convert_pdf_to_text(self, file_path):
+    def _convert_pdf_to_text(self, file_path):
         if not pdf_is_suported:
             raise ModuleNotFoundError('run "pip install PyPDF2"')
         with open(file_path, 'rb') as f:
@@ -985,13 +1175,13 @@ class DataSource():
                 pages.append(pdf.getPage(page_number).extractText())
             return ' '.join(pages)
 
-    def __get_file_content(self, file_path_or_handle):
+    def _get_file_content(self, file_path_or_handle):
         if type(file_path_or_handle) is str:
             with open(file_path_or_handle, 'rb') as f:
-                f = self.__skip_file_byte_order_mark(f)
+                f = self._skip_file_byte_order_mark(f)
                 content = f.read()
         else:
-            f = self.__skip_file_byte_order_mark(file_path_or_handle)
+            f = self._skip_file_byte_order_mark(file_path_or_handle)
             content = f.read()
         if self.config.encoding == AUTO:
             if self.detected_encoding:
@@ -1019,7 +1209,7 @@ class DataSource():
             return content.decode(self.config.encoding)
         raise Exception(f"Unable to resolve encoding for '{f.name}'")
         
-    def __skip_file_byte_order_mark(self, f):
+    def _skip_file_byte_order_mark(self, f):
         bytes_to_skip = 0
         start_byte_sequence = f.read(4)
         for bom in TEXT_ENCODINGS:
@@ -1030,53 +1220,19 @@ class DataSource():
         f.read(bytes_to_skip)
         return f
 
-    def __gen_id_from_file_path(self, file_path):
+    def _gen_id_from_file_path(self, file_path):
         return splitext(basename(file_path))[0]
-
-    def __construct_doc(self, id, content):
-        doc = {
-            "id": id,
-            "fields": {
-                "content": content
-            }
-        }
-        doc_size = 0
-        if self.config.report_fed_doc_size or self.config.max_doc_characters or self.config.min_doc_characters:
-            doc_size = len(content)
-            if self.config.second_content_field:
-                doc_size += doc_size
-        if self.config.second_content_field:
-            doc["fields"][self.config.second_content_field] = content
-        if self.config.report_fed_doc_size:
-            self._print(f"Doc size for document with id {id} is {doc_size} characters") 
-        if ((self.config.max_doc_characters and (doc_size > self.config.max_doc_characters)) 
-                     or (self.config.min_doc_characters and (doc_size < self.config.min_doc_characters))):   
-            log.info(f"Document with id {id} dropped due to a size of {doc_size} characters")    
-            return None
-        if self.config.document_type:
-            if self.config.document_type in DOCUMENT_TYPES:
-                doc["fields"]['documentType'] = self.config.document_type
-            else:
-                raise ConfigError(f"Unknown document type {document_type}")
-        if self.config.preprocess:
-            if self.config.preprocess in PREPROCESS_TYPES:
-                doc["fields"]['preprocess'] = self.config.preprocess
-            else:
-                raise ConfigError(f"Unknown preprocess type {preprocess}")
-        if self.config.email_address_separator:  
-            doc["fields"]['emailAddressSeparator'] = self.config.email_address_separator
-        return doc
         
-    def __gen_doc_from_csv(self, csv_file, mappings, format):
+    def _gen_doc_from_csv(self, csv_file, mappings, format):
         if not mappings:
             raise ConfigError("Configuration lacks a csv mapping table")
-        for row in DictReader(csv_file, **format):
+        for row in csv.DictReader(csv_file, **format):
             doc = {"id": row[mappings['id']]}
             doc["fields"] = {**{k:row[v] for k,v in mappings["fields"].items() if not type(v) is list},
                             **{k:[row[v[0]]] for k,v in mappings["fields"].items() if type(v) is list}}
             yield doc
  
-    def __get_document(self, file_path, auto_detected_file_type):
+    def _get_document(self, file_path, auto_detected_file_type):
         retrieve_document = True
         if self.config.file_picking_list:
             retrieve_document = False
@@ -1106,10 +1262,10 @@ class DataSource():
             }
         with open(file_path, **args) as f:
             if data_type == CSV:
-                for document in self.__gen_doc_from_csv(f, self.config.csv_mappings, self.config.format):
+                for document in self._gen_doc_from_csv(f, self.config.csv_mappings, self.config.format):
                     yield document
             elif data_type in [AYFIE, AYFIE_RESULT]:
-                data = self.__get_file_content(f)
+                data = self._get_file_content(f)
                 if data_type == AYFIE:
                     self.config.format['root'] = 'documents'
                 elif data_type == AYFIE_RESULT:
@@ -1117,7 +1273,7 @@ class DataSource():
                 try:
                     for document in loads(data)[self.config.format['root']]:
                         if data_type == AYFIE_RESULT:
-                            yield self.__construct_doc(document["document"]["id"], document["document"]["content"])
+                            yield self._construct_doc(document["document"]["id"], document["document"]["content"])
                         else:
                             yield document
                 except JSONDecodeError as e:
@@ -1127,11 +1283,11 @@ class DataSource():
                 if self.config.ignore_pdfs: 
                     log.info("Dropping file as not configured to process pdf files")
                 else:
-                    yield self.__construct_doc(self.__gen_id_from_file_path(file_path), self.__convert_pdf_to_text(file_path))
+                    yield self._construct_doc(self._gen_id_from_file_path(file_path), self._convert_pdf_to_text(file_path))
             elif data_type in [WORD_DOC, XLSX, XML]:
                 log.info(f"Skipping '{file_path}' - conversion of {data_type} still not implemented")
             elif data_type == TXT:
-                yield self.__construct_doc(self.__gen_id_from_file_path(file_path), self.__get_file_content(file_path))
+                yield self._construct_doc(self._gen_id_from_file_path(file_path), self._get_file_content(file_path))
             else:
                 log.error(f"Unknown data type '{data_type}'")
 
@@ -1139,15 +1295,15 @@ class DataSource():
         self.file_size = {}
         self.file_paths = []
         for file_path in FileHandlingTools().get_next_file(self.data_dir, extension_filter=self.config.file_extension_filter):
-            file_type, self.detected_encoding = self.__get_file_type(file_path)
+            file_type, self.detected_encoding = self._get_file_type(file_path)
             if self.config.file_type_filter and not file_type in self.config.file_type_filter:
                 log.debug(f"'{file_path}' auto detected (1) as '{file_type}' and not excluded due to file type filter: {self.config.file_type_filter}")
                 continue
             log.debug(f"'{file_path}' auto detected (1) as '{file_type}'")
             if file_type in ZIP_FILE_TYPES:
-                self.__unzip(file_type, file_path, self.unzip_dir)
+                self._unzip(file_type, file_path, self.unzip_dir)
                 for unzipped_file in FileHandlingTools().get_next_file(self.unzip_dir, extension_filter=self.config.file_extension_filter):
-                    file_type, self.detected_encoding = self.__get_file_type(unzipped_file)
+                    file_type, self.detected_encoding = self._get_file_type(unzipped_file)
                     if self.config.file_type_filter and not file_type in self.config.file_type_filter:
                         log.debug(f"'{file_path}' auto detected (2) as '{file_type} and not excluded due to file type filter: {self.config.file_type_filter}")
                         continue
@@ -1155,12 +1311,12 @@ class DataSource():
                         log.info(f"Skipping '{unzipped_file}' - zip files within zip files are not supported")
                         continue
                     log.debug(f"'{file_path}' auto detected (2) as '{file_type}'")
-                    for document in self.__get_document(unzipped_file, file_type):
+                    for document in self._get_document(unzipped_file, file_type):
                         if document:
                             self.updateFileStatistics(unzipped_file)
                             yield document
             else:
-                for document in self.__get_document(file_path, file_type):
+                for document in self._get_document(file_path, file_type):
                     if document:
                         self.file_paths.append(file_path)
                         self.updateFileStatistics(file_path)
@@ -1180,70 +1336,138 @@ class DataSource():
         for file_path in self.file_size:
             total_size += self.file_size[file_path]
         return len(self.file_size), total_size
+        
+    def _drop_due_to_size(self, id, content):
+        doc_size = 0
+        if self.config.report_fed_doc_size or self.config.max_doc_characters or self.config.min_doc_characters:
+            doc_size = len(content)
+            if self.config.second_content_field:
+                doc_size += doc_size
+        if self.config.report_fed_doc_size:
+            self._print(f"Doc size for document with id {id} is {doc_size} characters") 
+        if ((self.config.max_doc_characters and (doc_size > self.config.max_doc_characters)) 
+                     or (self.config.min_doc_characters and (doc_size < self.config.min_doc_characters))):   
+            log.info(f"Document with id {id} dropped due to a size of {doc_size} characters")    
+            return True
+        return False
+        
+    def _construct_doc(self, id, content):
+        raise NotImplementedError
 
+        
+class InspectorDataSource(DataSource):
 
-class AyfieConnector():
+    def _construct_doc(self, id, content):
+        if self._drop_due_to_size(id, content):
+            return None
+            
+        doc = {
+            "id": id,
+            "fields": {
+                "content": content
+            }
+        }
+        if self.config.second_content_field:
+            doc["fields"][self.config.second_content_field] = content
+        if self.config.document_type:
+            if self.config.document_type in DOCUMENT_TYPES:
+                doc["fields"]['documentType'] = self.config.document_type
+            else:
+                raise ConfigError(f"Unknown document type {document_type}")
+        if self.config.preprocess:
+            if self.config.preprocess in PREPROCESS_TYPES:
+                doc["fields"]['preprocess'] = self.config.preprocess
+            else:
+                raise ConfigError(f"Unknown preprocess type {preprocess}")
+        if self.config.email_address_separator:  
+            doc["fields"]['emailAddressSeparator'] = self.config.email_address_separator
+        return doc
+
+        
+class SolrDataSource(DataSource):
+
+    def _construct_doc(self, id, content):
+        if self._drop_due_to_size(id, content):
+            return None
+            
+        doc = {
+            "id": id,
+            "content": content
+        }
+        if self.config.second_content_field:
+            doc[self.config.second_content_field] = content
+        if self.config.document_type:
+            raise ConfigError("No document type supported for Solr, correct config") 
+        if self.config.preprocess:
+            raise ConfigError("No preprocessing supported for Solr, correct config")
+        if self.config.email_address_separator:  
+            raise ConfigError("No email sepearator supported for Solr, correct config")
+        return doc
+
+        
+class EngineConnector():
     
     def __init__(self, config, data_source=None):
-        self.data_source = data_source
         self.config = config
+        self.data_source = data_source
         args = [self.config.server, self.config.port, self.config.api_version]
-        self.ayfie = Ayfie(*args)
-        
+        if self.config.engine == "inspector":
+            self.engine = Inspector(*args)
+        elif self.config.engine == "solr":
+            self.engine = Solr(*args)
+                
     def _print(self, message, end='\n'):
         if not self.config.silent_mode:
             print(message, end=end)
         
         
-class SchemaManager(AyfieConnector):
+class SchemaManager(EngineConnector):
 
     def add_field_if_absent(self, schema_changes=None):
-        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        col_id = self.engine.get_collection_id(self.config.col_name)
         if not schema_changes:
             schema_changes = self.config.schema_changes
         for schema_change in schema_changes:
-            if not self.ayfie.exists_collection_schema_field(col_id, schema_change['name']):
-                self.ayfie.add_collection_schema_field(col_id, schema_change)
-                if not self.ayfie.exists_collection_schema_field(col_id, schema_change['name']):
+            if not self.engine.exists_collection_schema_field(col_id, schema_change['name']):
+                self.engine.add_collection_schema_field(col_id, schema_change)
+                if not self.engine.exists_collection_schema_field(col_id, schema_change['name']):
                     raise ConfigError(f"Failed to add new schema field '{schema_change['name']}'")
       
 
-class Feeder(AyfieConnector):
+class Feeder(EngineConnector):
 
     def collection_exists(self):
-        if self.ayfie.exists_collection_with_name(self.config.col_name):
+        if self.engine.exists_collection_with_name(self.config.col_name):
             return True
         else:
             return False
 
     def delete_collection_if_exists(self):
-        if self.ayfie.exists_collection_with_name(self.config.col_name):
+        if self.engine.exists_collection_with_name(self.config.col_name):
             log.info(f'Deleting collection "{self.config.col_name}"')
-            col_id = self.ayfie.get_collection_id(self.config.col_name)
-            self.ayfie.delete_collection_and_wait(col_id)
+            col_id = self.engine.get_collection_id(self.config.col_name)
+            self.engine.delete_collection_and_wait(col_id)
 
     def delete_all_collections(self):
         log.info('Deleting all collections')
-        self.ayfie.delete_all_collections_and_wait()
+        self.engine.delete_all_collections_and_wait()
 
     def create_collection_if_not_exists(self):
-        if not self.ayfie.exists_collection_with_name(self.config.col_name):
+        if not self.engine.exists_collection_with_name(self.config.col_name):
             log.info(f'Creating collection "{self.config.col_name}"')
             col_id = self.config.col_name
-            self.ayfie.create_collection_and_wait(self.config.col_name, col_id)
+            self.engine.create_collection_and_wait(self.config.col_name, col_id)
 
     def __send_batch(self):
-        if self.config.report_doc_ids:
-            self._print([doc['id'] for doc in self.batch])
         if self.config.ayfie_json_dump_file:
             with open(self.config.ayfie_json_dump_file, "wb") as f:
                 try:
                     f.write(dumps({'documents': self.batch}, indent=4).encode('utf-8'))
                 except Exception as e:
                     log.warning(f'Writing copy of batch to be sent to disk failed with the message: {str(e)}')    
-        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        col_id = self.engine.get_collection_id(self.config.col_name)
         log.info(f'About to feed batch of {len(self.batch)} documents')
-        return self.ayfie.feed_collection_documents(col_id, self.batch)
+        return self.engine.feed_collection_documents(col_id, self.batch)
 
     def process_batch(self, is_last_batch=False):
         if self.config.file_copy_destination: 
@@ -1262,6 +1486,9 @@ class Feeder(AyfieConnector):
             self._print(f"Feeding disabled, {self.doc_count} documents not uploaded to collection '{self.config.col_name}'")
         else:
             batch_failed = False
+            doc_ids_msg = ""
+            if self.config.report_doc_ids:
+                doc_ids_msg = f" The batch contained these doc ids: {', '.join([doc['id'] for doc in self.batch])}"
             try:
                 response = self.__send_batch()
                 if self.config.report_doc_error:
@@ -1275,8 +1502,8 @@ class Feeder(AyfieConnector):
             if batch_failed:
                 sentence_start = "A"
                 if is_last_batch:
-                    sentence_start = "A last"
-                err_message = f"{sentence_start} batch of {self.batch_size} docs fed to collection '{self.config.col_name}' failed: '{err_message}'"
+                    sentence_start = "The last"
+                err_message = f"{sentence_start} batch of {self.batch_size} docs fed to collection '{self.config.col_name}' failed: '{err_message}'" + doc_ids_msg
                 self._print(err_message)
                 log.error(err_message)
             else:
@@ -1284,7 +1511,7 @@ class Feeder(AyfieConnector):
                 sentence_start = "So far"
                 if is_last_batch:
                     sentence_start = "A total of" 
-                self._print(f"{sentence_start} {self.doc_count} documents has been uploaded to collection '{self.config.col_name}'")
+                self._print(f"{sentence_start} {self.doc_count} documents has been uploaded to collection '{self.config.col_name}'.{doc_ids_msg}")
         self.batch = []
         self.batch_size = 0
         
@@ -1336,8 +1563,8 @@ class Feeder(AyfieConnector):
         if self.config.progress_bar:
             return JobsHandler(self.config).job_processesing("PROCESSING", self.config.processing)
         else:
-            col_id = self.ayfie.get_collection_id(self.config.col_name)
-            self.ayfie.process_collection_and_wait(col_id)
+            col_id = self.engine.get_collection_id(self.config.col_name)
+            self.engine.process_collection_and_wait(col_id)
         
     def feed_documents_and_commit(self):
         feeding_time = self.feed_documents()
@@ -1349,34 +1576,33 @@ class Feeder(AyfieConnector):
         if self.doc_count <= 0:
             log.info(f'No documents to feed')
             return
-        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        col_id = self.engine.get_collection_id(self.config.col_name)
         log.info(f'Fed {self.doc_count} documents. Starting to commit')
-        self.ayfie.commit_collection_and_wait(col_id)
+        self.engine.commit_collection_and_wait(col_id)
         log.info(f'Done committing')
 
     def feed_documents_commit_and_process(self):
         self.feed_documents_and_commit()
-        log.info(f'Starting to process')
         processing_time = self.process()
         if self.config.feeding_report_time:
             self._print(f"The processing operation took {str(processing_time)} seconds")
         log.info(f'Done processing')
 
 
-class Classifier(AyfieConnector):
+class Classifier(EngineConnector):
 
     def __create_and_train_classifiers(self, classification):
-        if classification['name'] in self.ayfie.get_classifier_names():
-            self.ayfie.delete_classifier(classification['name'])
-        col_id = self.ayfie.get_collection_id(self.config.col_name) 
-        self.ayfie.create_classifier(classification['name'], col_id, classification['training_field'],
+        if classification['name'] in self.engine.get_classifier_names():
+            self.engine.delete_classifier(classification['name'])
+        col_id = self.engine.get_collection_id(self.config.col_name) 
+        self.engine.create_classifier(classification['name'], col_id, classification['training_field'],
                                      classification['min_score'], classification['num_results'], 
                                      classification['training_filters']) 
-        self.ayfie.train_classifier(classification['name'])
-        self.ayfie.wait_for_classifier_to_be_trained(classification['name'])
+        self.engine.train_classifier(classification['name'])
+        self.engine.wait_for_classifier_to_be_trained(classification['name'])
 
     def create_classifier_job_and_wait(self, classification):
-        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        col_id = self.engine.get_collection_id(self.config.col_name)
         if "dummy" in classification:
             del classification["dummy"]
         settings = {
@@ -1393,7 +1619,7 @@ class Classifier(AyfieConnector):
         if self.config.progress_bar:
             return JobsHandler(self.config).job_processesing("CLASSIFICATION", settings, more_params)
         else:
-            self.ayfie.classify_and_wait(col_id)  
+            self.engine.classify_and_wait(col_id)  
             
     def do_classifications(self):
         for classification in self.config.classifications:
@@ -1402,9 +1628,9 @@ class Classifier(AyfieConnector):
     def __get_training_and_test_sets(self, classification):
         K = classification['k-fold']
         assert (type(K) is int and K > 0),"No k-fold value defined"
-        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        col_id = self.engine.get_collection_id(self.config.col_name)
         query = f"_exists_:{classification['training_field']}"
-        doc_ids = ExpressTools(self.ayfie).get_doc_ids(col_id, query, random_order=True)
+        doc_ids = ExpressTools(self.engine).get_doc_ids(col_id, query, random_order=True)
         q, r = divmod(len(doc_ids), K)
         doc_sets = [doc_ids[i * q + min(i, r):(i + 1) * q + min(i + 1, r)] for i in range(K)]
         for i in range(K):
@@ -1527,11 +1753,12 @@ class Classifier(AyfieConnector):
                 raise ConfigError(f'"k-fold" cannot be smaller than 2')
             self.__do_kfold_analyses(classification)
         else:
+            self.__create_and_train_classifiers(classification)
             if self.config.progress_bar:
-                self.create_classifier_job_and_wait(classification)
+                self.create_classifier_job_and_wait(classification) 
             else:
-                col_id = self.ayfie.get_collection_id(self.config.col_name)
-                self.ayfie.create_classifier_job_and_wait(col_id,
+                col_id = self.engine.get_collection_id(self.config.col_name)
+                self.engine.create_classifier_job_and_wait(col_id,
                         classification['name'],
                         self.config.col_name,
                         classification['min_score'],
@@ -1640,11 +1867,11 @@ class Classifier(AyfieConnector):
         return table
  
  
-class Clusterer(AyfieConnector):
+class Clusterer(EngineConnector):
 
     def create_clustering_job_and_wait(self):
         if self.config.clustering:
-            col_id = self.ayfie.get_collection_id(self.config.col_name)
+            col_id = self.engine.get_collection_id(self.config.col_name)
             config = {
                 "collectionId" : col_id,
                 "type" : "CLUSTERING",
@@ -1658,20 +1885,20 @@ class Clusterer(AyfieConnector):
             if self.config.progress_bar:
                 return JobsHandler(self.config).job_processesing("CLUSTERING", config)
             else:
-                self.ayfie.process_collection_and_wait(col_id)
+                self.engine.process_collection_and_wait(col_id)
         else:
             log.info('No clustering job')
 
             
-class Querier(AyfieConnector):
+class Querier(EngineConnector):
 
     def search(self, search):
-        col_id = self.ayfie.get_collection_id(self.config.col_name)
-        return self.ayfie.meta_search(col_id, search)
+        col_id = self.engine.get_collection_id(self.config.col_name)
+        return self.engine.meta_search(col_id, search)
  
     def get_search_result_pages(self, search):
-        col_id = self.ayfie.get_collection_id(self.config.col_name)
-        result = self.ayfie.search_collection(col_id, search["query"], MAX_PAGE_SIZE, 0, search["filters"], search["exclude"], search["aggregations"], scroll=True, meta_data=True)
+        col_id = self.engine.get_collection_id(self.config.col_name)
+        result = self.engine.search_collection(col_id, search["query"], MAX_PAGE_SIZE, 0, search["filters"], search["exclude"], search["aggregations"], scroll=True, meta_data=True)
         docs = result["result"]
         while True:
             if len(docs):
@@ -1682,15 +1909,15 @@ class Querier(AyfieConnector):
                 link = result["_links"]["next"]["href"]
             except:
                 break
-            result = self.ayfie.next_scroll_page(link)
+            result = self.engine.next_scroll_page(link)
             docs = result["result"]
        
     def get_collection_schema(self):
-        col_id = self.ayfie.get_collection_id(self.config.col_name)
-        return self.ayfie.get_collection_schema(col_id)
+        col_id = self.engine.get_collection_id(self.config.col_name)
+        return self.engine.get_collection_schema(col_id)
         
         
-class Reporter(AyfieConnector):  
+class Reporter(EngineConnector): 
 
     def __get_jobs_status(self):
         jobs_handler = JobsHandler(self.config)
@@ -1698,7 +1925,7 @@ class Reporter(AyfieConnector):
         job_id = None
         latest_job_only = False
         if self.config.report_jobs in ["collection", "collection_latest"]:
-            col_id = self.ayfie.get_collection_id(self.config.col_name)
+            col_id = self.engine.get_collection_id(self.config.col_name)
             if self.config.report_jobs == "collection_latest":
                 latest_job_only = True
         elif type(self.config.report_jobs) is int:
@@ -1736,7 +1963,8 @@ class Reporter(AyfieConnector):
             raise ValueError(f"'{log_file_path}' does not exist")
         LogAnalyzer(
             log_file_path, self.config.report_output_destination, TMP_LOG_UNPACK_DIR, 
-            self.config.report_dump_lines, self.config.report_custom_regex).analyze()
+            self.config.report_dump_lines, self.config.report_custom_regex, 
+            self.config.report_noise_filtering).analyze()
 
     def __get_memory_config(self):
         print ("got here")
@@ -1748,25 +1976,25 @@ class Reporter(AyfieConnector):
             self.__get_logs_status()
       
 
-class DocumentUpdater(AyfieConnector):
+class DocumentUpdater(EngineConnector):
 
     def __update_documents_by_query(self, docs_update):
-        col_id = self.ayfie.get_collection_id(self.config.col_name)
+        col_id = self.engine.get_collection_id(self.config.col_name)
         if self.config.progress_bar:
             if not "values" in docs_update:
                 docs_update["values"] = None
-            job_id = self.ayfie.update_documents_by_query(
+            job_id = self.engine.update_documents_by_query(
                           col_id, docs_update["query"], docs_update["filters"], 
                           docs_update["action"], docs_update["field"], docs_update["values"])
             return JobsHandler(self.config).track_job(job_id, "UPDATE")
         else:
-            return self.ayfie.update_documents_by_query_and_wait(
+            return self.engine.update_documents_by_query_and_wait(
                           col_id, docs_update["query"], docs_update["filters"], 
                           docs_update["action"], docs_update["field"], docs_update["values"])
             
     def __get_doc_ids(self, query, limit=None, random_order=False):
-        col_id = self.ayfie.get_collection_id(self.config.col_name)
-        return ExpressTools(self.ayfie).get_doc_ids(col_id, query, limit, random_order)
+        col_id = self.engine.get_collection_id(self.config.col_name)
+        return ExpressTools(self.engine).get_doc_ids(col_id, query, limit, random_order)
         
     def do_updates(self, docs_updates=None):
         if not docs_updates:
@@ -1791,16 +2019,20 @@ class DocumentUpdater(AyfieConnector):
             
 class LogAnalyzer():
 
-    def __init__(self, log_file_path, output_destination, log_unpacking_dir, dump_lines=False, custom_regex=None):
+    def __init__(self, log_file_path, output_destination, log_unpacking_dir, dump_lines=False, custom_regex=None, noise_filtering=False):
         self.output_destination = output_destination
         self.log_file = log_file_path
         self.dump_lines = dump_lines
         self.custom_regex = custom_regex
+        self.noise_filtering = noise_filtering
         self.log_unpacking_dir = log_unpacking_dir
         self.unzip_dir = UNZIP_DIR
         if not exists(log_file_path):
             raise ConfigError(f"There is no {log_file_path}")
-        self.info = [
+        self.filtered_patterns = [
+            "^.*RestControllerRequestLoggingAspect: triggering JobController.getJob\(\.\.\) with args:.*$"
+        ] 
+        self.error_info = [
             {
                 "pattern" : r"^.*(20[12][0-9]-[01][0-9]-[0-9][0-9]T[012][0-9]:[0-6][0-9]:[0-9][0-9])\.[0-9]{9,9}Z .*$",
                 "extraction": [("Log start time", 1)],
@@ -1811,6 +2043,17 @@ class LogAnalyzer():
                 "extraction": [("Log end time", 1)],
                 "occurence": "last",
                 "key": "end_date"
+            },
+            {
+                "pattern" : r"^.*free: (.*gb)\[(.*%)\].*$",
+                "extraction": [("At the start: Available disk space: ", 1), ("Available disk capacity: ", 2)],
+                "occurence": "first"
+            }, 
+            {
+                "pattern" : r"^.*free: (.*gb)\[(.*%)\].*$",
+                "extraction": [("At the end: Available disk space: ", 1), ("Available disk capacity: ", 2)],
+                "occurence": "last",
+                "key": "disk_space"
             },
             {
                 "pattern" : r"^.*m[a-z]*_[0-9]*\s.*Container is mem limited to .*G \(of (.*G) of the host\).*$",
@@ -1839,11 +2082,7 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*skipExtractors=\[_gdpr\].*$",
                 "extraction": [("GDPR", "Disabled")]
-            },
-            {
-                "pattern" : r"^.*free: (.*gb)\[(.*%)\].*$",
-                "extraction": [("Available disk space: ", 1), ("Available disk capacity: ", 2)]
-            } 
+            }
         ]
         self.symptoms = [
             {
@@ -1885,7 +2124,11 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*index read-only / allow delete \(api\).*$",
                 "indication": "the system is low on disk and Elasticsearch has write protecting the index to prevent possible index corruption."
-            },            
+            },
+            {
+                "pattern" : r"^.*low disk watermark \[[0-9]+%\] exceeded.*$",
+                "indication": "the system is starting to get low on disk and Elasticsearch is taking its first precautionary meassures to prevent future index corruption."
+            },
             {
                 "pattern" : r"^.*Timeout while waiting for ltlocate.*$",
                 "indication": "an entity extraction job took too long and timed out."
@@ -1962,6 +2205,15 @@ class LogAnalyzer():
         else:
             fht.recreate_directory(log_dir)
             copy(log_file, log_dir)
+            
+    def __line_filtering(self, line):
+        if len(line.strip()) == 0:
+            return ""
+        for pattern in self.filtered_patterns:
+            m = match(pattern, line)
+            if m:
+                return ""
+        return line
         
     def __process_log_file(self, log_file):
         if not exists(log_file):
@@ -1975,55 +2227,60 @@ class LogAnalyzer():
                 encoding = "utf-16"
             else:
                 encoding = detected_encoding
+        error_info = deepcopy(self.error_info)
         with open(log_file, "r", encoding=encoding) as f:
-            self.line_count = 0
-            self.info_pieces = {}
-            try:
-                for line in f:
-                    if self.line_count == 0:
-                        if not line.strip().startswith("Attaching to"):
-                            raise DataFormatError(f"File '{log_file}' is not recognized as a ayfie Inspector log file")
-                    self.line_count += 1
-                    for info in self.info:
-                        if "occurence" in info and info["occurence"] == "completed":
-                            continue
-                        m = match(info["pattern"], line)
+            with open(log_file + ".filtered", "a") as filtered_file: 
+                self.line_count = 0
+                self.info_pieces = {}
+                try:
+                    for line in f:
+                        if self.noise_filtering:
+                            filtered_file.write(self.__line_filtering(line))
+                        if self.line_count == 0:
+                            if not line.strip().startswith("Attaching to"):
+                                raise DataFormatError(f"File '{log_file}' is not recognized as a ayfie Inspector log file")
+                        self.line_count += 1
+                        for info in error_info:                    
+                            if "occurence" in info and info["occurence"] == "completed":
+                                continue
+                            m = match(info["pattern"], line)
+                            if m:
+                                output_line = []
+                                for item in info["extraction"]:
+                                    item_name = item[0]
+                                    item_value = item[1]
+                                    if type(item_name) is int:
+                                        item_name = m.group(item_name)
+                                    if type(item_value) is int:
+                                        item_value = m.group(item_value)
+                                    output_line.append(f"{item_name}: {item_value}")
+                                if "key" in info:
+                                    self.info_pieces["key"] = ", ".join(output_line)
+                                else:
+                                    self.info_pieces[", ".join(output_line)] = False
+                                if "occurence" in info and info["occurence"] == "first":
+                                    info["occurence"] = "completed"                
+                        for symptom in self.symptoms:
+                            m = match(symptom["pattern"], line)
+                            if m:
+                                self.errors_detected = True
+                                symptom["occurences"] += 1
+                                symptom["last_occurence_line"] = self.line_count
+                                symptom["last_occurence_sample"] = m.group(0)
+                                if self.dump_lines:
+                                    print(m.group(0))
+                        m = match(r"Exception", line)
                         if m:
-                            output_line = []
-                            for item in info["extraction"]:
-                                item_name = item[0]
-                                item_value = item[1]
-                                if type(item_name) is int:
-                                    item_name = m.group(item_name)
-                                if type(item_value) is int:
-                                    item_value = m.group(item_value)
-                                output_line.append(f"{item_name}: {item_value}")
-                            if "key" in info:
-                                self.info_pieces["key"] = ", ".join(output_line)
-                            else:
-                                self.info_pieces[", ".join(output_line)] = False
-                            if "occurence" in info and info["occurence"] == "first":
-                                info["occurence"] = "completed"  
-                    for symptom in self.symptoms:
-                        m = match(symptom["pattern"], line)
-                        if m:
-                            self.errors_detected = True
-                            symptom["occurences"] += 1
-                            symptom["last_occurence_line"] = self.line_count
-                            symptom["last_occurence_sample"] = m.group(0)
-                            if self.dump_lines:
-                                print(m.group(0))
-                    m = match(r"Exception", line)
-                    if m:
-                        if not m.group(0) in self.exceptions:
-                            self.exceptions[m.group(0)] = 0
-                        self.exceptions[m.group(0)] += 1
-            except UnicodeDecodeError as e:
-                raise DataFormatError(f"'File {log_file}' is most likley a binary file (or at a mininimum of wrong encoding)")
-            except Exception:
-                raise
+                            if not m.group(0) in self.exceptions:
+                                self.exceptions[m.group(0)] = 0
+                            self.exceptions[m.group(0)] += 1
+                except UnicodeDecodeError as e:
+                    raise DataFormatError(f"'File {log_file}' is most likley a binary file (or at a mininimum of wrong encoding)")
+                except Exception:
+                    raise
                 
     def produce_output(self, title, data_dict):
+        output = ""
         if len(data_dict) > 0:
             output = f"\n====== {title} ======\n"
             for key in data_dict.keys():
@@ -2032,7 +2289,7 @@ class LogAnalyzer():
                 else:
                     output += f"{key}\n"
         return output
-        
+         
     def analyze(self):
         if isfile(self.log_file):
             self.__prepare_temp_log_directory(self.log_file, self.log_unpacking_dir)
@@ -2048,6 +2305,8 @@ class LogAnalyzer():
             try:
                 self.__process_log_file(log_file)
                 line_info = f'({self.line_count} LINES) '
+                if self.line_count == 0:
+                    is_log_file = False
             except DataFormatError:
                 is_log_file = False
             analyses_output += f'\n\n====== FILE "{log_file}" {line_info}======\n'
@@ -2072,18 +2331,18 @@ class LogAnalyzer():
                     f.write(analyses_output.encode('utf-8'))
 
                     
-class JobsHandler(AyfieConnector):
+class JobsHandler(EngineConnector):
     
     def __start_job(self, job_type, settings, more_params={}):
         config = {
-            "collectionId" : self.ayfie.get_collection_id(self.config.col_name),
+            "collectionId" : self.engine.get_collection_id(self.config.col_name),
             "type" : job_type
         }
         if settings:
             config["settings"] = settings
         for key, value in more_params.items():
             config[key] = value
-        return self.ayfie.create_job(config)
+        return self.engine.create_job(config)
         
     def track_job(self, job_id, job_type):
         elapsed_time = -1
@@ -2231,7 +2490,7 @@ class JobsHandler(AyfieConnector):
     
     def __get_job(self, job_id):
         if not job_id in self.job_and_sub_job_by_id:
-            job = self.ayfie.get_job(job_id)
+            job = self.engine.get_job(job_id)
             self.__update_structures(job)
         return self.job_and_sub_job_by_id[job_id]
            
@@ -2248,24 +2507,24 @@ class JobsHandler(AyfieConnector):
         return sub_jobs_list
                           
     def __get_job_and_sub_job_status_obj(self, job_id, completed_sub_jobs):
-        json_job_list = dumps(self.ayfie.get_jobs())
+        json_job_list = dumps(self.engine.get_jobs())
         self.__gen_auxilary_data_structures(json_job_list)
         sub_jobs = self.__get_list_of_sub_jobs(json_job_list, job_id, completed_sub_jobs)
         return {"job": self.__get_job(job_id), "sub_jobs": sub_jobs}
         
     def __get_job_status(self, job_id):
-        json_job_list = dumps(self.ayfie.get_jobs())
+        json_job_list = dumps(self.engine.get_jobs())
         self.__gen_auxilary_data_structures(json_job_list)
         return(self.__get_job(job_id)['state']) 
         
     def __print_job_and_sub_jobs(self, job_info, verbose=False):
         if verbose:
-            print(dumps(self.ayfie.get_job(job_info["id"]), indent=3))
+            print(dumps(self.engine.get_job(job_info["id"]), indent=3))
         else:
             print(f'   -job: {job_info["state"]} {job_info["id"]} {job_info["type"]} {job_info["time_stamp"].replace("T", " ").split(".")[0]}')
         for sub_job_id in job_info['sub_jobs']:
             if verbose:
-                print(dumps(self.ayfie.get_job(sub_job_id), indent=3))
+                print(dumps(self.engine.get_job(sub_job_id), indent=3))
             else:
                 sub_job_info = self.__get_job(sub_job_id)
                 print(f'       -sub-job: {sub_job_info["state"].ljust(10)} {sub_job_id.ljust(10)} {sub_job_info["type"].ljust(22)}  {sub_job_info["clock_time"].ljust(8)}')
@@ -2286,7 +2545,7 @@ class JobsHandler(AyfieConnector):
         
     def print_jobs_overview(self, json_job_list=None, col_id=None, job_id=None, latest_job_only=False, verbose=False):
         if not json_job_list:
-            json_job_list = dumps(self.ayfie.get_jobs()) 
+            json_job_list = dumps(self.engine.get_jobs()) 
         self.__gen_auxilary_data_structures(json_job_list)
         for collection_id in self.job_and_sub_jobs_structure.keys():
             if col_id and col_id != collection_id:
@@ -2309,6 +2568,7 @@ class JobsHandler(AyfieConnector):
 class Config():
 
     def __init__(self, config):
+        self.engine           = self.__get_item(config, 'engine', INSPECTOR)
         self.silent_mode      = self.__get_item(config, 'silent_mode', True)
         self.config_source    = self.__get_item(config, 'config_source', None)
         self.server           = self.__get_item(config, 'server', '127.0.0.1')
@@ -2539,10 +2799,12 @@ class Config():
         self.report_verbose           = self.__get_item(report, 'verbose', False)
         self.report_jobs              = self.__get_item(report, 'jobs', False)
         self.report_logs_source       = self.__get_item(report, 'logs_source', False)
+        self.report_noise_filtering   = self.__get_item(report, 'noise_filtering', False)
         self.report_retrieve_logs     = self.__get_item(report, 'retrieve_logs', False)
         self.report_dump_lines        = self.__get_item(report, 'dump_lines', False)
         self.report_custom_regex      = self.__get_item(report, 'custom_regex', None)
         self.report_jobs_overview     = self.__get_item(report, 'jobs_overview', False)
+        
         
     def __init_regression_testing(self, regression_testing):
         self.upload_config_dir        = self.__get_item(regression_testing, 'upload_config_dir', None)
@@ -2554,7 +2816,9 @@ class Config():
             if not self.col_name:
                 raise ConfigError('Mandatory input parameter collection name (col_name) has not been given') 
         if self.report_logs_source and self.report_retrieve_logs: 
-            raise ConfigError('Either analyze existing file or produce new ones, both is not possible')   
+            raise ConfigError('Either analyze existing file or produce new ones, both is not possible')  
+        if self.progress_bar and self.engine == SOLR:
+            self.progress_bar = False
 
             
 class TestExecutor():
@@ -2638,14 +2902,17 @@ class Admin():
         self.config = config
         data_source = None
         if self.config.feeding:
-            data_source = DataSource(self.config)
+            if self.config.engine == INSPECTOR:
+                data_source = InspectorDataSource(self.config)
+            elif self.config.engine == SOLR:
+                data_source = SolrDataSource(self.config)
         self.schema_manager = SchemaManager(self.config)
         self.feeder = Feeder(self.config, data_source)
-        self.clusterer  = Clusterer(self.config)
-        self.classifier = Classifier(self.config)
         self.querier = Querier(self.config)
         self.document_updater = DocumentUpdater(self.config)
-        self.reporter = Reporter(self.config)  
+        self.reporter = Reporter(self.config)
+        self.clusterer  = Clusterer(self.config)
+        self.classifier = Classifier(self.config)
         
     def run_config(self):
         if self.config.api_call:
@@ -2686,7 +2953,7 @@ class Admin():
                     else:
                         self.feeder.feed_documents_commit_and_process()
                 else:
-                    raise ConfigError('Cannot feed to non-existing collection')
+                    raise ConfigError(f'Cannot feed to non-existing collection "{self.config.col_name}"')
             else:
                 if not self.feeder.collection_exists():
                     raise ConfigError(f'There is no collection "{self.config.col_name}"')
@@ -2773,10 +3040,10 @@ def run_cmd_line(cmd_line_args):
             admin = Admin(Config(config))
             return admin.run_config()
 
-
 run_from_cmd_line = False
 if __name__ == '__main__':
     run_from_cmd_line = True
     run_cmd_line(sys.argv)
+
    
     
