@@ -761,10 +761,16 @@ class Inspector(SearchEngine):
             endpoint += "?verbose=true"
         return self._execute(endpoint, HTTP_GET)
         
-    def _wait_for_job_to_finish(self, job_id, timeout=None):
+    def _wait_for_job_to_finish(self, job_id, timeout=None, no_state_finish=False):
         start_time = None
         while True:
-            job_status = self.get_job(job_id)["state"]
+            job_report = self.get_job(job_id)
+            if not "state" in job_report:
+                if no_state_finish:
+                    job_report["state"] = 'SUCCEEDED'
+                else:
+                    raise KeyError('No "state" in job report')
+            job_status = job_report["state"]
             if start_time == None and job_status in ['RUNNING','SUCCEEDED','FAILURE']:
                 start_time = time()
             elapsed_time = int(time() - start_time)
@@ -779,7 +785,7 @@ class Inspector(SearchEngine):
         job_id = self.create_job(config)
         return self._wait_for_job_to_finish(job_id, timeout)
         
-        ######### Processing / Indexing #########
+    ######### Processing / Indexing #########
 
     def get_process_config(self, col_id):
         return {
@@ -796,6 +802,20 @@ class Inspector(SearchEngine):
         if not config:
             config = self.get_process_config(col_id)
         return self.create_job_and_wait(config, timeout)
+        
+    ######### Sampling ######### 
+
+    def start_sampling(self, col_id, config):
+        path = f"collections/{col_id}/samples"
+        return self._execute(path, HTTP_POST, config)
+        
+    def start_sampling_and_wait(self, col_id, config, timeout=600):
+        job_id = self.start_sampling(col_id, config)
+        self._wait_for_job_to_finish(job_id, timeout, no_state_finish=True)
+        job_report = self.get_job(job_id)
+        if not "sample" in job_report:
+            raise DataFormatError('No "sample" item in job output')
+        return [doc["id"] for doc in job_report["sample"]]  
 
     ######### Clustering #########
 
@@ -828,9 +848,9 @@ class Inspector(SearchEngine):
         config = self._get_clustering_config(col_id, **kwargs)
         return self.create_job(config)
         
-    def create_clustering_job_and_wait(self, col_id, **kwargs):
+    def create_clustering_job_and_wait(self, col_id, timeout=None, **kwargs):
         config = self._get_clustering_config(col_id, **kwargs)
-        return self.create_job_and_wait(config, timeout)  ############################### timeout not defined, causes a crash
+        return self.create_job_and_wait(config, timeout)
 
     ######### Classification #########
  
@@ -1865,6 +1885,23 @@ class Classifier(EngineConnector):
                 self.recall[known_category] += recall
         table += "</tr></table><br>" 
         return table
+
+ 
+class Sampler(EngineConnector):
+
+    def create_sampling_job_and_wait(self):
+        if self.config.sampling:
+            col_id = self.engine.get_collection_id(self.config.col_name)
+            job_id = self.engine.start_sampling(col_id, self.config.sampling)
+            elapsed_time = JobsHandler(self.config).track_job(job_id, "SAMPLING")
+            job_report = self.engine.get_job(job_id)
+            if not "sample" in job_report:
+                raise DataFormatError('No "sample" item in job output')
+            if self.config.sampling_report_time:
+                self._print(f"The sampling operation took {str(elapsed_time)} seconds")
+            return [doc["id"] for doc in job_report["sample"]]
+        else:
+            log.info('No sampling job')
  
  
 class Clusterer(EngineConnector):
@@ -2229,7 +2266,7 @@ class LogAnalyzer():
                 encoding = detected_encoding
         error_info = deepcopy(self.error_info)
         with open(log_file, "r", encoding=encoding) as f:
-            with open(log_file + ".filtered", "a") as filtered_file: 
+            with open(log_file + ".filtered", "a") as filtered_file:
                 self.line_count = 0
                 self.info_pieces = {}
                 try:
@@ -2579,7 +2616,9 @@ class Config():
         self.progress_bar     = self.__get_item(config, 'progress_bar', True)
         self.document_update  = self.__get_item(config, 'document_update', False)
         self.processing       = self.__get_item(config, 'processing', False)
-        self.reporting        = self.__get_item(config, 'reporting', False)
+        self.__init_processing(self.processing)
+        self.sampling         = self.__get_item(config, 'sampling', False)        
+        self.__init_sampling(self.sampling)
         self.api_call         = self.__get_item(config, 'api_call', False)
         self.__init_api_call(self.api_call)
         self.schema           = self.__get_item(config, 'schema', False)
@@ -2594,9 +2633,9 @@ class Config():
         self.__init_documents_updates(self.documents_updates)
         self.searches         = self.__get_item(config, 'search', False)
         self.__init_search(self.searches)
-        self.regression_testing = self.__get_item(config, 'regression_testing', False)
-        self.__init_report(self.reporting)
         self.reporting        = self.__get_item(config, 'reporting', False)
+        self.__init_report(self.reporting)
+        self.regression_testing = self.__get_item(config, 'regression_testing', False)
         self.__init_regression_testing(self.regression_testing)
         self.__inputDataValidation()
 
@@ -2706,6 +2745,19 @@ class Config():
         self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
         self.near_duplicate_evaluation= self.__get_item(processing, 'near_duplicate_evaluation', None)
         self.processing_report_time   = self.__get_item(processing, 'report_time', False)
+        
+    def __init_sampling(self, sampling):
+        if sampling:
+            self.sampling = {
+                "method"                    : self.__get_item(sampling, 'method', "SMART"),
+                "size"                      : self.__get_item(sampling, 'size', 100),
+                "smart_specificity"         : self.__get_item(sampling, 'smartSpecificity', 0.3),
+                "smart_dimensions"          : self.__get_item(sampling, 'smartDimensions', 100),
+                "smart_min_df"              : self.__get_item(sampling, 'smartMinDf', 0.0005),
+                "smart_presampling"         : self.__get_item(sampling, 'smartPresampling', 100),
+                "filters"                   : self.__get_item(sampling, 'filters', []), 
+            }
+            self.sampling_report_time       = self.__get_item(sampling, 'report_time', False)
 
     def __init_clustering(self, clustering):
         if not clustering:
@@ -2804,7 +2856,6 @@ class Config():
         self.report_dump_lines        = self.__get_item(report, 'dump_lines', False)
         self.report_custom_regex      = self.__get_item(report, 'custom_regex', None)
         self.report_jobs_overview     = self.__get_item(report, 'jobs_overview', False)
-        
         
     def __init_regression_testing(self, regression_testing):
         self.upload_config_dir        = self.__get_item(regression_testing, 'upload_config_dir', None)
@@ -2913,6 +2964,7 @@ class Admin():
         self.reporter = Reporter(self.config)
         self.clusterer  = Clusterer(self.config)
         self.classifier = Classifier(self.config)
+        self.sampler = Sampler(self.config)
         
     def run_config(self):
         if self.config.api_call:
@@ -2968,6 +3020,8 @@ class Admin():
                 self.clusterer.create_clustering_job_and_wait()
             if self.config.classifications:
                 self.classifier.do_classifications()
+            if self.config.sampling:
+                pretty_print(self.sampler.create_sampling_job_and_wait())
             for search in self.config.searches:
                 try:
                     result = self.querier.search(search)
