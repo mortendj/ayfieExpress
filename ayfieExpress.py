@@ -37,6 +37,7 @@ log = logging.getLogger(__name__)
 
 INSPECTOR             = "inspector"
 SOLR                  = "solr"
+ELASTICSEARCH         = "elasticsearch"
 
 MAX_LOG_ENTRY_SIZE    = 1000
 
@@ -243,9 +244,11 @@ class SearchEngine:
         }
              
     def _get_endpoint(self, path, parameters):
-        if  parameters:
+        if parameters:
              parameters = f"?{ parameters}"
-        return f'{self.protocol}://{self.server}:{self.port}/{self.base_endpoint}/{path}{parameters}'  
+        if self.base_endpoint and self.base_endpoint[-1] != "/":
+            self.base_endpoint += "/"
+        return f'{self.protocol}://{self.server}:{self.port}/{self.base_endpoint}{path}{parameters}'  
 
     def _validateInputValue(self, input_value, allowed_values):
         if input_value not in allowed_values:
@@ -282,7 +285,7 @@ class SearchEngine:
     def _get_id_from_header(self, headers):
         if 'location' in headers:
             url = headers['location']
-            p = f"^https?://.*/{self.base_endpoint}/(collections|jobs)/(.*$)"
+            p = f"^https?://.*/{self.base_endpoint}(collections|jobs)/(.*$)"
             m = match(p, url)
             if m:
                 return m.group(2)
@@ -300,12 +303,28 @@ class SearchEngine:
         log.debug(msg)
         print(msg)
         
+    def _response_format_converter(self, response_obj):
+        return response_obj
+        
+    def _get_response_object(self, response, verb, endpoint):
+        try:
+            response_obj = loads(response.text) if len(response.text) else {}
+        except JSONDecodeError:
+            pattern = "<title>(Error )(\d{3,3}) (.*)</title>"
+            m = search(pattern, response.text)
+            if m:
+                response_obj = {'error': m.group(3)}
+            else:
+                raise HTTPError(response.text)
+        except:
+            raise HTTPError(response.text)
+        return self._response_format_converter(response_obj)
+        
     def _execute(self, path, verb, data={}, parameters=""):
         self._validateInputValue(verb, HTTP_VERBS)
         request_function = getattr(requests, verb.lower())
         endpoint = self._get_endpoint(path, parameters)
         log.debug(self._gen_req_log_msg(verb, endpoint, data, self.headers))
-        
         if data and verb == "POST" and "batches" in endpoint:
             with open("data.json", 'wb') as f:
                 f.write(dumps(data).encode('utf-8'))
@@ -337,17 +356,7 @@ class SearchEngine:
                 "description": "Not a ayfie recognized response code"
             }
             log.warning(self._gen_non_ayfie_code_msg(response.status_code))
-        try:
-            response_obj = loads(response.text) if len(response.text) else {}
-        except JSONDecodeError:
-            pattern = "<title>(Error )(\d{3,3}) (.*)</title>"
-            m = search(pattern, response.text)
-            if m:
-                response_obj = {'error': m.group(3)}
-            else:
-                raise HTTPError(response.text)
-        except:
-            raise HTTPError(response.text)
+        response_obj = self._get_response_object(response, verb, endpoint)
         if response.status_code >= 400:
             error_msg = self._gen_response_err_msg(response_obj, ayfieStatus)
             log.debug(error_msg)
@@ -359,8 +368,19 @@ class SearchEngine:
             return id_from_headers
         return response_obj
         
+    def _get_item_picking_endpoint_and_parameters(self, itemName):
+        return itemName, ""
+    
     def _get_all_items_of_an_item_type(self, item_type):
-        raise NotImplementedError
+        self._validateInputValue(item_type, ITEM_TYPES)
+        itemNames = item_type.split(':')
+        endpoint, parameters = self._get_item_picking_endpoint_and_parameters(itemNames[0])
+        result_field = itemNames[1] if len(itemNames) > 1 else itemNames[0]
+        result = self._execute(endpoint, HTTP_GET, parameters=parameters)
+        if '_embedded' in result:
+            if result_field in result['_embedded']:
+                return result['_embedded'][result_field]
+        return []
         
     def _wait_for_collection_event(self, col_id, event, timeout=None):
         sleep(1)
@@ -442,7 +462,7 @@ class SearchEngine:
         raise NotImplementedError
         
     def _get_collections_item(self, item, col_name=None):
-        raise NotImplementedError
+        return [collection[item] for collection in self.get_collections() if not col_name or collection['name'] == col_name]
             
     def get_collection_names(self):
         return self._get_collections_item('name')
@@ -500,12 +520,28 @@ class SearchEngine:
     
     def process_collection_and_wait(self, col_id, config={}, timeout=None):
         return
-
-      
+        
+        
 class Solr(SearchEngine):
 
     def __init__(self, server, port, api_version=None):
         SearchEngine.__init__(self, server, port, "solr", {"Content-Type":"application/json"})
+         
+    def _response_format_converter(self, response_obj):
+        converted_obj = None
+        if "collections" in response_obj:
+            collections = [{"id":col,"name":col} for col in response_obj["collections"]]
+            converted_obj = {"_embedded": {"collections": collections}}
+        elif "success" in response_obj:
+            converted_obj = {}
+        elif "error" in response_obj:
+            converted_obj = {"error": response_obj["error"]["msg"]}
+        elif "responseHeader" in response_obj and "status" in response_obj["responseHeader"]:
+            if response_obj["responseHeader"]["status"] == 0:
+                converted_obj = {}
+        if converted_obj == None:
+            raise NotImplementedError("'_response_format_converter()' not completed")
+        return converted_obj
         
     def create_collection(self, col_name, col_id=None):
         parameters = f"name={col_name}&action=CREATE&numShards=2&replicationFactor=1"
@@ -521,12 +557,6 @@ class Solr(SearchEngine):
         schema_field_config = {"add-field": {k:v for k,v in schema_field_config.items() if v != []}}
         path = f'{col_id}/schema/'
         return self._execute(path, HTTP_POST, schema_field_config)
-        
-    def _get_collections_item(self, item, col_name=None):
-        if item in ['name', 'id']:
-            return [collection for collection in self.get_collections() if not col_name or collection['name'] == col_name]
-        else:
-            raise ValueError("Solr does not support other items then 'name' and 'id'")
             
     def get_collection_id(self, col_name):
         return col_name
@@ -547,21 +577,50 @@ class Solr(SearchEngine):
         self._execute(f"{col_id}/update", HTTP_GET, parameters="commit=true")
         
     def commit_collection_and_wait(self, col_id, timeout=300):
-        raise NotImplementedError
-        
-    def commit_collection_and_wait(self, col_id, timeout=300):
         self.commit_collection(col_id)
-         
-    def _get_all_items_of_an_item_type(self, item_type):
-        self._validateInputValue(item_type, ITEM_TYPES)
-        itemNames = item_type.split(':')
-        endpoint = f"admin/{itemNames[0]}"
-        parameters = "action=LIST&wt=json"
-        result = self._execute(endpoint, HTTP_GET, parameters=parameters)
-        resultField = itemNames[1] if len(itemNames) > 1 else itemNames[0]
-        if resultField in result:
-            return result[resultField]
-        return []
+        
+    def _get_item_picking_endpoint_and_parameters(self, item_name):
+        return f"admin/{item_name}", "action=LIST&wt=json"
+
+        
+class Elasticsearch(Solr):
+
+    def __init__(self, server, port, api_version=None):
+        SearchEngine.__init__(self, server, port, "", {"Content-Type":"application/json"})
+        
+    def _get_response_object(self, response, verb, endpoint):
+        response_obj = {}
+        items = [{"id":line.split()[2],"name":line.split()[2]} for line in response.text.split('\n') if len(line.strip())]
+        if verb == HTTP_GET and endpoint.endswith("_cat/indices"):
+            response_obj = {"_embedded": {"collections": items}}
+        return response_obj
+        
+    def create_collection(self, col_name, col_id=None):
+        return self._execute(col_name, HTTP_PUT)
+        
+    def delete_collection(self, col_id):   
+        self._execute(col_id, HTTP_DELETE)
+       
+    def feed_collection_documents(self, col_id, documents):
+        return self._execute(f"{col_id}/update", HTTP_POST, documents)
+        
+        """
+        POST http://path.to.your.cluster/myIndex/person/_bulk
+        
+        POST elasticsearch_domain/_bulk
+        { "index": { "_index" : "index", "_type" : "type", "_id" : "id" } }
+        { "A JSON": "document" }
+
+        { "index":{} }
+        { "name":"john doe","age":25 }
+        { "index":{} }
+        { "name":"mary smith","age":32 }
+        """
+        
+    def _get_item_picking_endpoint_and_parameters(self, item_name):
+        if item_name == "collections":
+            return "_cat/indices", ""
+        raise ValueError(f'Item name "{item_name}" is not supported')
 
         
 class Inspector(SearchEngine):
@@ -572,6 +631,8 @@ class Inspector(SearchEngine):
     def _wait_for(self, wait_type, id, good_value, bad_value=None, timeout=None):
         if not wait_type in WAIT_TYPES:
             raise ValueError(f"'{wait_type}' is not in {WAIT_TYPES}")
+        if not id or not type(id) is str:
+            raise ValueError(f"The 'id' must be a string, and not '{str(id)}'")
         if wait_type == COL_EVENT:
             self._validateInputValue(good_value, COL_EVENTS)
             negation = " not" if good_value == COL_APPEAR else " "
@@ -631,17 +692,6 @@ class Inspector(SearchEngine):
  
     def _wait_for_collection_to_be_committed(self, col_id, timeout):
         self._wait_for(COL_STATE, col_id, 'COMMITTED', None, timeout)
-        
-    def _get_all_items_of_an_item_type(self, item_type):
-        self._validateInputValue(item_type, ITEM_TYPES)
-        itemNames = item_type.split(':')
-        endpoint = itemNames[0]
-        resultField = itemNames[1] if len(itemNames) > 1 else itemNames[0]
-        result = self._execute(endpoint, HTTP_GET)
-        if '_embedded' in result:
-            if resultField in result['_embedded']:
-                return result['_embedded'][resultField]
-        return []
 
     ######### Collection Management #########
 
@@ -649,7 +699,8 @@ class Inspector(SearchEngine):
         data = {'name': col_name}
         if col_id:
             data['id'] = col_id
-        return self._execute('collections', HTTP_POST, data) 
+        result = self._execute('collections', HTTP_POST, data) 
+        return result
 
     def delete_collection(self, col_id):
         self._execute(f'collections/{col_id}', HTTP_DELETE)
@@ -695,9 +746,6 @@ class Inspector(SearchEngine):
     def get_collection_size(self, col_id):
         path = f'collections/{col_id}/documents?size=0'
         return self._execute(path, HTTP_GET)["meta"]["totalDocuments"]
-        
-    def _get_collections_item(self, item, col_name=None):
-        return [collection[item] for collection in self.get_collections() if not col_name or collection['name'] == col_name]
 
     def get_collection_id(self, col_name):
         ids = self.get_collection_ids(col_name)
@@ -1069,7 +1117,8 @@ class FileHandlingTools():
             with tarfile_open(file_path) as tar:
                 tar.extractall(unzip_dir)
         elif file_type == GZ_FILE:
-            with open(unzip_dir, 'wb') as f, gzip_open(file_path, 'rb') as z:
+            output_file_path = file_path.replace(".gz","")
+            with open(join(unzip_dir, output_file_path), 'wb') as f, gzip_open(file_path, 'rb') as z:
                 f.write(z.read())
         elif file_type == BZ2_FILE:
             with open(unzip_dir, 'wb') as f, open(file_path,'rb') as z:
@@ -1150,6 +1199,7 @@ class FileHandlingTools():
 class DataSource():
 
     def __init__(self, config, unzip_dir=UNZIP_DIR):
+        self._init()
         self.config = config
         self.created_temp_data_dir = False
         if self.config.data_source == None:
@@ -1170,6 +1220,9 @@ class DataSource():
         self.unzip_dir = unzip_dir
         self.total_retrieved_file_count = 0
         self.total_retrieved_file_size = 0
+        
+    def _init(self):
+        self.doc_fields_key = "fields"
 
     def __del__(self):
         if self.created_temp_data_dir:
@@ -1247,9 +1300,14 @@ class DataSource():
         if not mappings:
             raise ConfigError("Configuration lacks a csv mapping table")
         for row in csv.DictReader(csv_file, **format):
-            doc = {"id": row[mappings['id']]}
-            doc["fields"] = {**{k:row[v] for k,v in mappings["fields"].items() if not type(v) is list},
-                            **{k:[row[v[0]]] for k,v in mappings["fields"].items() if type(v) is list}}
+            fields = {**{k:row[v] for k,v in mappings["fields"].items() if not type(v) is list},
+                      **{k:[row[v[0]]] for k,v in mappings["fields"].items() if type(v) is list}}
+            doc = {}
+            if self.doc_fields_key:
+                doc[self.doc_fields_key] = fields
+            else:
+                doc = fields
+            doc["id"] = row[mappings['id']]
             yield doc
  
     def _get_document(self, file_path, auto_detected_file_type):
@@ -1295,7 +1353,7 @@ class DataSource():
                         if data_type == AYFIE_RESULT:
                             yield self._construct_doc(document["document"]["id"], document["document"]["content"])
                         else:
-                            yield document
+                            yield self._convert_doc(document) 
                 except JSONDecodeError as e:
                     log.error(f"JSON decoding error for {file_path}: {str(e)}")
                     return None
@@ -1310,8 +1368,105 @@ class DataSource():
                 yield self._construct_doc(self._gen_id_from_file_path(file_path), self._get_file_content(file_path))
             else:
                 log.error(f"Unknown data type '{data_type}'")
-
+                
+    def _get_document_fragments(self, document):
+        if self.config.fragmented_doc_dir:
+            if not exists(self.config.fragmented_doc_dir):
+                makedirs(self.config.fragmented_doc_dir) 
+        fields = [field for field in document['fields'] if field != "content"]
+        if not "content" in document['fields']:
+            raise DataFormatError("The document has no 'content' field under 'fields'")
+        fragments = []
+        fragment_length = self.config.doc_fragment_length
+        content_length = len(document['fields']["content"])
+        mini_fragments = document['fields']["content"].split()
+        number_of_fragments = int(content_length / fragment_length)
+        if number_of_fragments > self.config.max_doc_fragments:
+            fragment_length = content_length / self.config.max_doc_fragments
+        new_fragment = ""
+        for mini_fragment in mini_fragments:
+            if len(new_fragment) == 0:
+                new_fragment = f" {mini_fragment}"
+                continue
+            if len(new_fragment) > fragment_length:
+                fragments.append(new_fragment)
+                new_fragment = f" {mini_fragment}"
+            else:
+                diff_now = fragment_length - len(new_fragment)
+                diff_after = abs(fragment_length - (len(new_fragment) + len(mini_fragment)))
+                if diff_after < diff_now:
+                    new_fragment += f" {mini_fragment}"
+                else:
+                    fragments.append(new_fragment)
+                    new_fragment = f" {mini_fragment}"
+        if len(new_fragment):
+            fragments.append(new_fragment)
+        
+        if len(fragments) >= 2:
+            split_document = {"id":"", "fields":{}}
+            for field in fields:
+                split_document["fields"][field] = document["fields"][field]
+            for i in range(len(fragments) - 1):
+                split_document["id"] = f'{document["id"]}_{str(i)}'
+                split_document["fields"]["content"] = fragments[i] + fragments[i+1]
+                if self.config.fragmented_doc_dir:
+                    with open(join(self.config.fragmented_doc_dir, split_document["id"] + ".json"), "wb") as f:
+                        f.write(dumps(split_document, indent=4).encode("utf-8"))
+                yield split_document
+                   
+    def extract_plain_text_email(self, email):
+        boundary_marker = None
+        is_boundary_definition_line = False
+        is_a_new_message = False
+        is_plain_text_message = False
+        header_section = []
+        is_header_section = True
+        message_lines = [] 
+        for line in email.split("\n"):
+            if is_plain_text_message:
+                if boundary_marker in line:
+                    break
+                else:
+                    message_lines.append(line)
+            if is_a_new_message:
+                m = match("^\s*Content-Type:\s*text/plain;.*$", line)
+                if m:
+                    is_a_new_message = False
+                    is_plain_text_message = True
+            if is_boundary_definition_line:
+                m = match("^\s*boundary=\"(.+)\"\s*$", line)
+                if m:
+                    boundary_marker = m.group(1)
+                    is_boundary_definition_line = False
+            if boundary_marker:
+                if boundary_marker in line:
+                    is_a_new_message = True
+            elif match("Content-Type:\s*multipart/mixed;", line):
+                is_boundary_definition_line = True
+                is_header_section = False
+            if is_header_section:
+                header_section.append(line)
+        return "\n".join(header_section + message_lines)
+                
+    def _do_multipart_processing(self, document):
+        if self.config.convert_multipart_msg or self.config.flag_multipart_msg:
+            if "multipart/mixed" in document["fields"]["content"]:
+                if self.config.flag_multipart_msg:
+                    print(f'Document with id "{document["id"]}" is a multipart email')
+                if self.config.convert_multipart_msg:
+                    document["fields"]["content"] = self.extract_plain_text_email(document["fields"]["content"])             
+        return document
+                        
     def get_documents(self):
+        for document in self._get_unsplit_documents():
+            document = self._do_multipart_processing(document)
+            if self.config.doc_fragmentation:
+                for document_fragment in self._get_document_fragments(document):
+                    yield document_fragment
+            else:
+                yield document
+
+    def _get_unsplit_documents(self):
         self.file_size = {}
         self.file_paths = []
         for file_path in FileHandlingTools().get_next_file(self.data_dir, extension_filter=self.config.file_extension_filter):
@@ -1372,12 +1527,6 @@ class DataSource():
         return False
         
     def _construct_doc(self, id, content):
-        raise NotImplementedError
-
-        
-class InspectorDataSource(DataSource):
-
-    def _construct_doc(self, id, content):
         if self._drop_due_to_size(id, content):
             return None
             
@@ -1402,9 +1551,15 @@ class InspectorDataSource(DataSource):
         if self.config.email_address_separator:  
             doc["fields"]['emailAddressSeparator'] = self.config.email_address_separator
         return doc
-
         
+    def _convert_doc(self, document):
+        return document
+
+    
 class SolrDataSource(DataSource):
+
+    def _init(self):
+        self.doc_fields_key = None
 
     def _construct_doc(self, id, content):
         if self._drop_due_to_size(id, content):
@@ -1423,6 +1578,11 @@ class SolrDataSource(DataSource):
         if self.config.email_address_separator:  
             raise ConfigError("No email sepearator supported for Solr, correct config")
         return doc
+        
+    def _convert_doc(self, document):
+        converted_doc = document["fields"]
+        converted_doc["id"] = document["id"]
+        return converted_doc
 
         
 class EngineConnector():
@@ -1431,10 +1591,15 @@ class EngineConnector():
         self.config = config
         self.data_source = data_source
         args = [self.config.server, self.config.port, self.config.api_version]
-        if self.config.engine == "inspector":
+        if self.config.engine == INSPECTOR:
             self.engine = Inspector(*args)
-        elif self.config.engine == "solr":
+        elif self.config.engine == SOLR:
             self.engine = Solr(*args)
+        elif self.config.engine == ELASTICSEARCH:
+            self.engine = Elasticsearch(*args)
+        else:
+            raise ValueError(f"Engine {self.config.engine} is not supported")
+            
                 
     def _print(self, message, end='\n'):
         if not self.config.silent_mode:
@@ -2139,7 +2304,7 @@ class LogAnalyzer():
                 "indication": "the system has run out of memory"
             },
             {
-                "pattern" : r"^.*None of the configured nodes are available.*$",
+                "pattern" : r"^.*None of the configured nodes (were|are) available.*$",
                 "indication": "the host is low on disk and/or memory."
             },
             {
@@ -2266,7 +2431,11 @@ class LogAnalyzer():
                 encoding = detected_encoding
         error_info = deepcopy(self.error_info)
         with open(log_file, "r", encoding=encoding) as f:
-            with open(log_file + ".filtered", "a") as filtered_file:
+            if self.noise_filtering:
+                output_file = log_file + ".filtered"
+            else:
+                output_file = "dummy.txt"
+            with open(output_file, "a") as filtered_file:
                 self.line_count = 0
                 self.info_pieces = {}
                 try:
@@ -2719,10 +2888,16 @@ class Config():
         self.treat_csv_as_text        = self.__get_item(feeding, 'treat_csv_as_text', False)
         self.max_docs_to_feed         = self.__get_item(feeding, 'max_docs_to_feed', None)
         #self.id_from_filename_regex   = self.__get_item(feeding, 'id_from_filename_regex', None)
+        self.doc_fragmentation        = self.__get_item(feeding, 'doc_fragmentation', False)
+        self.doc_fragment_length      = self.__get_item(feeding, 'doc_fragment_length', 100)   
+        self.max_doc_fragments        = self.__get_item(feeding, 'max_doc_fragments', 10000) 
+        self.fragmented_doc_dir       = self.__get_item(feeding, 'fragmented_doc_dir', None) 
+        self.convert_multipart_msg    = self.__get_item(feeding, 'convert_multipart_msg', False) 
+        self.flag_multipart_msg       = self.__get_item(feeding, 'flag_multipart_msg', False)         
         id_conv_table_file            = self.__get_item(feeding, 'id_conversion_table_file', None)
         id_conv_table_delimiter       = self.__get_item(feeding, 'id_conversion_table_delimiter', ",")
         id_conv_table_id_column       = self.__get_item(feeding, 'id_conv_table_id_column', None)
-        id_conv_table_filename_column = self.__get_item(feeding, 'id_conv_table_filename_column', None)             
+        id_conv_table_filename_column = self.__get_item(feeding, 'id_conv_table_filename_column', None)         
         self.id_mappings = {}
         if id_conv_table_file:
             minimum_columns = max(id_conv_table_id_column, id_conv_table_filename_column) + 1 
@@ -2954,7 +3129,7 @@ class Admin():
         data_source = None
         if self.config.feeding:
             if self.config.engine == INSPECTOR:
-                data_source = InspectorDataSource(self.config)
+                data_source = DataSource(self.config)
             elif self.config.engine == SOLR:
                 data_source = SolrDataSource(self.config)
         self.schema_manager = SchemaManager(self.config)
@@ -3075,24 +3250,32 @@ def run_cmd_line(cmd_line_args):
             level = logging.DEBUG)
 
     if len(cmd_line_args) != 2:
+        print(f'The script "{script_name_with_ext}" takes exactly 1 parameter:\n')
         print(f'Usage:   python {script_name_with_ext} <config-file-path>')
-    else:
-        config_file_path = cmd_line_args[1]
-        with open(config_file_path, 'rb') as f:
-            try:
-                config = loads(f.read().decode('utf-8'))
-                if 'config_source' not in config:
-                    config['config_source'] = config_file_path
-                if 'silent_mode' not in config:
-                    if run_from_cmd_line:
-                        config['silent_mode'] = False
-                    else:
-                        config['silent_mode'] = True
-            except JSONDecodeError as e:
-                raise ConfigError(f'Bad JSON in config file "{config_file_path}": {e}')
+        return
+    file_path = cmd_line_args[1]
+    if not isfile(file_path):
+        print(f'"{file_path}" is not a file:\n')
+        print(f'Usage:   python {script_name_with_ext} <config-file-path>')
+        return
 
-            admin = Admin(Config(config))
-            return admin.run_config()
+    config_file_path = cmd_line_args[1]
+    with open(config_file_path, 'rb') as f:
+        try:
+            config = loads(f.read().decode('utf-8'))
+            if 'config_source' not in config:
+                config['config_source'] = config_file_path
+            if 'silent_mode' not in config:
+                if run_from_cmd_line:
+                    config['silent_mode'] = False
+                else:
+                    config['silent_mode'] = True
+        except JSONDecodeError as e:
+            print(f'Config file "{config_file_path}" contains bad json: {e}')
+            return
+
+        admin = Admin(Config(config))
+        return admin.run_config()
 
 run_from_cmd_line = False
 if __name__ == '__main__':
