@@ -45,7 +45,7 @@ ROOT_SUB_DIR          = 'ayfieExpress_output'
 UNZIP_DIR             = join(ROOT_SUB_DIR, 'unzipDir')
 DATA_DIR              = join(ROOT_SUB_DIR, 'dataDir')
 LOG_DIR               = join(ROOT_SUB_DIR, 'log')
-INSPECTOR_LOG_DIR     = join(ROOT_SUB_DIR, 'inspector_download')
+DOWNLOAD_DIR          = join(ROOT_SUB_DIR, 'inspector_download')
 TMP_LOG_UNPACK_DIR    = join(ROOT_SUB_DIR, 'temp_log_unpacking')
 
 OFF_LINE              = "off-line"
@@ -1117,8 +1117,8 @@ class FileHandlingTools():
             with tarfile_open(file_path) as tar:
                 tar.extractall(unzip_dir)
         elif file_type == GZ_FILE:
-            output_file_path = file_path.replace(".gz","")
-            with open(join(unzip_dir, output_file_path), 'wb') as f, gzip_open(file_path, 'rb') as z:
+            output_file_name = basename(file_path).replace(".gz", "")
+            with open(join(unzip_dir, output_file_name), 'wb') as f, gzip_open(file_path, 'rb') as z:
                 f.write(z.read())
         elif file_type == BZ2_FILE:
             with open(unzip_dir, 'wb') as f, open(file_path,'rb') as z:
@@ -1146,22 +1146,29 @@ class FileHandlingTools():
         if not exists(dir_path):
             raise IOError("Failed to create directory '{dir_path}'") 
 
-    def get_next_file(self, root, dir_filter=None, extension_filter=None):
+    def get_next_file(self, root, dir_filter=None, extension_filter=None, min_size=0, max_size=0):
         items = listdir(root)
         files = [item for item in items if isfile(join(root, item))]
         dirs = [item for item in items if isdir(join(root, item))]
         for f in files:
+            file_path = join(root, f)
+            if min_size or max_size: 
+                file_size = stat(file_path).st_size
+                if min_size and file_size < min_size:
+                    continue
+                if max_size and file_size > max_size:
+                    continue
             path_without_extension, extension = splitext(f)
             if extension_filter:
                 if extension in extension_filter:
-                    yield join(root, f)
+                    yield file_path
             else:
-                yield join(root, f)
+                yield file_path
         for dir in dirs:
             if dir_filter:
                 if dir in dir_filter:
                     continue
-            for f in self.get_next_file(join(root, dir), dir_filter, extension_filter):
+            for f in self.get_next_file(join(root, dir), dir_filter, extension_filter, min_size, max_size):
                 yield f
 
     def __write_fragment_to_file(self, dir_name, fragment_name, fragment_count, fragment_lines):
@@ -1194,6 +1201,11 @@ class FileHandlingTools():
                     line_count += 1
         if line_count > 0: 
             self.__write_fragment_to_file(dir_name, fragment_name, fragment_count, fragment_lines)
+            
+    def get_random_path(self, path, name_prefix=""):
+        if name_prefix:
+            name_prefix += "-"
+        return join(path, f"{name_prefix}{str(int(random() * 10000000))}")
          
 
 class DataSource():
@@ -1204,12 +1216,15 @@ class DataSource():
         self.created_temp_data_dir = False
         if self.config.data_source == None:
             raise ValueError(f"Parameter 'data_source' is mandatory (but it can point to an empty source)")
+        if self.config.data_source.startswith('http'):
+            FileHandlingTools().recreate_directory(DOWNLOAD_DIR)
+            self.config.data_source = WebContent().download(self.config.data_source, DOWNLOAD_DIR)         
         if not exists(self.config.data_source):
             raise ValueError(f"There is no file or directory called '{self.config.data_source}'")
         if isdir(self.config.data_source):
             self.data_dir = self.config.data_source
         elif isfile(self.config.data_source):
-            self.data_dir = DATA_DIR + '_' +  str(int(random() * 10000000))
+            self.data_dir = FileHandlingTools().get_random_path(DATA_DIR)
             self.created_temp_data_dir = True
             FileHandlingTools().recreate_directory(self.data_dir)
             copy(self.config.data_source, self.data_dir)
@@ -1323,8 +1338,12 @@ class DataSource():
         if data_type == AUTO:
             data_type = auto_detected_file_type
             if not data_type:
-                log.error(f'File type detetection failed for "{file_path}"')
-                return None
+                if self.config.fallback_data_type:
+                    data_type = self.config.fallback_data_type
+                    log.error(f'File type detetection failed for "{file_path}", using fallback data type "{data_type}"')
+                else:
+                    log.error(f'File type detetection failed for "{file_path}" and no fallback data type set')
+                    return None
         args = { 'mode': 'rb' }
         encoding = 'utf-8'
         if self.config.encoding == AUTO:
@@ -1465,31 +1484,47 @@ class DataSource():
                     yield document_fragment
             else:
                 yield document
-
-    def _get_unsplit_documents(self):
-        self.file_size = {}
-        self.file_paths = []
-        for file_path in FileHandlingTools().get_next_file(self.data_dir, extension_filter=self.config.file_extension_filter):
-            file_type, self.detected_encoding = self._get_file_type(file_path)
-            if self.config.file_type_filter and not file_type in self.config.file_type_filter:
-                log.debug(f"'{file_path}' auto detected (1) as '{file_type}' and not excluded due to file type filter: {self.config.file_type_filter}")
-                continue
-            log.debug(f"'{file_path}' auto detected (1) as '{file_type}'")
-            if file_type in ZIP_FILE_TYPES:
-                self._unzip(file_type, file_path, self.unzip_dir)
-                for unzipped_file in FileHandlingTools().get_next_file(self.unzip_dir, extension_filter=self.config.file_extension_filter):
-                    file_type, self.detected_encoding = self._get_file_type(unzipped_file)
-                    if self.config.file_type_filter and not file_type in self.config.file_type_filter:
-                        log.debug(f"'{file_path}' auto detected (2) as '{file_type} and not excluded due to file type filter: {self.config.file_type_filter}")
-                        continue
-                    if file_type in ZIP_FILE_TYPES:
-                        log.info(f"Skipping '{unzipped_file}' - zip files within zip files are not supported")
-                        continue
-                    log.debug(f"'{file_path}' auto detected (2) as '{file_type}'")
+                
+    def _get_documents_from_zipped_files(self, file_type, file_path, unzip_dir):
+        try:
+            FileHandlingTools().recreate_directory(unzip_dir)
+            log.debug(f"Created output directory '{unzip_dir}' for zip file '{file_path}'")
+            self._unzip(file_type, file_path, unzip_dir)
+            for unzipped_file in FileHandlingTools().get_next_file(unzip_dir, None, self.config.file_extension_filter, 
+                                                                   self.config.min_doc_size, self.config.max_doc_size):
+                file_type, self.detected_encoding = self._get_file_type(unzipped_file)
+                log.debug(f"'{unzipped_file}' auto detected as '{file_type}'")
+                if self.config.file_type_filter and not file_type in self.config.file_type_filter:
+                    log.debug(f"'{file_path}' auto detected (2) as '{file_type} and not excluded due to file type filter: {self.config.file_type_filter}")
+                    continue
+                if file_type in ZIP_FILE_TYPES:
+                    sub_unzip_dir = FileHandlingTools().get_random_path(unzip_dir)
+                    for document in self._get_documents_from_zipped_files(file_type, unzipped_file, sub_unzip_dir):
+                        yield document
+                else:
                     for document in self._get_document(unzipped_file, file_type):
                         if document:
                             self.updateFileStatistics(unzipped_file)
                             yield document
+        except:
+            raise
+        finally:
+            FileHandlingTools().delete_directory(unzip_dir)
+            log.debug(f"Deleting directory '{unzip_dir}'")
+
+    def _get_unsplit_documents(self):
+        self.file_size = {}
+        self.file_paths = []
+        for file_path in FileHandlingTools().get_next_file(self.data_dir, None, self.config.file_extension_filter, 
+                                                           self.config.min_doc_size, self.config.max_doc_size):
+            file_type, self.detected_encoding = self._get_file_type(file_path)
+            log.debug(f"'{file_path}' auto detected as '{file_type}'")
+            if self.config.file_type_filter and not file_type in self.config.file_type_filter:
+                log.debug(f"'{file_path}' auto detected (1) as '{file_type}' and not excluded due to file type filter: {self.config.file_type_filter}")
+                continue
+            if file_type in ZIP_FILE_TYPES:
+                for document in self._get_documents_from_zipped_files(file_type, file_path, self.unzip_dir):
+                    yield document
             else:
                 for document in self._get_document(file_path, file_type):
                     if document:
@@ -1700,6 +1735,20 @@ class Feeder(EngineConnector):
         self.batch = []
         self.batch_size = 0
         
+    def _get_unit_adapted_byte_figure(self, number_of_bytes):
+        if number_of_bytes >= 1024 * 1024 * 1024:
+            number_of_bytes /= 1024 * 1024 * 1024
+            unit = "GB"
+        elif number_of_bytes >= 1024 * 1024:
+            number_of_bytes /= 1024 * 1024
+            unit = "MB"
+        elif number_of_bytes >= 1024:
+            number_of_bytes /= 1024
+            unit = "KB"
+        else:
+            return number_of_bytes, "bytes"
+        return round(number_of_bytes, 3), unit
+        
     def feed_documents(self):
         self.batch = []
         self.doc_count = 0
@@ -1711,7 +1760,7 @@ class Feeder(EngineConnector):
         failure = None
         log_message = ""
         start_time = time()
-        id_picking_list = [str(id) for id in self.config.id_picking_list]
+        id_picking_list = [str(id) for id in self.config.id_picking_list]       
         try:
             for document in self.data_source.get_documents():
                 if self.config.id_mappings:
@@ -1721,6 +1770,7 @@ class Feeder(EngineConnector):
                     if not (str(document["id"]) in id_picking_list):
                         continue
                 self.batch.append(document)
+                log.debug(f'Document with id "{document["id"]}" added to batch')
                 self.batch_size = len(self.batch)
                 if (self.batch_size >= self.config.batch_size) or (
                               self.config.max_docs_to_feed and (self.batch_size >= self.config.max_docs_to_feed)):
@@ -1739,7 +1789,8 @@ class Feeder(EngineConnector):
         finally:
             elapsed_time = int(time() - start_time)
             file_count, total_file_size = self.data_source.get_file_statistics()
-            log_message = f"A total of {file_count} files and {total_file_size} bytes were retrieved from disk" + log_message
+            total_file_size, unit = self._get_unit_adapted_byte_figure(number_of_bytes)
+            log_message = f"A total of {file_count} files and {total_file_size} {unit} were retrieved from disk" + log_message
             log.info(log_message)
             self._print(log_message)
         return elapsed_time
@@ -2142,8 +2193,8 @@ class Reporter(EngineConnector):
             raise ValueError("Reporting options 'logs_source' and 'retrieve_logs' cannot both be set")
         if self.config.report_logs_source:
             if self.config.report_logs_source.startswith('http'):
-                FileHandlingTools().recreate_directory(INSPECTOR_LOG_DIR)
-                log_file_path = WebContent().download(self.config.report_logs_source, INSPECTOR_LOG_DIR)
+                FileHandlingTools().recreate_directory(DOWNLOAD_DIR)
+                log_file_path = WebContent().download(self.config.report_logs_source, DOWNLOAD_DIR)
             else:
                 log_file_path = self.config.report_logs_source
         elif self.config.report_retrieve_logs:
@@ -2274,7 +2325,7 @@ class LogAnalyzer():
                 "extraction": [(1, 2)]
             },
             {
-                "pattern" : r"^(?!.*ayfie\.buildinfo).*main platform.config.AyfieVersion: (.*)$",   
+                "pattern" : r"^.*main platform.config.AyfieVersion: (.*)$",   
                 "extraction": [("ayfie Inspector", 1)] 
             },
             {
@@ -2288,7 +2339,7 @@ class LogAnalyzer():
         ]
         self.symptoms = [
             {
-                "pattern" : r"^.*There is insufficient memory for the Java Runtime Environment to continue.*$",
+                "pattern" : r"^.*insufficient memory for the Java Runtime Environment.*$",
                 "indication": "that the host has run out of available RAM (configured via .env or actual)"
             },
             {
@@ -2297,7 +2348,7 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*All masters are unresponsive.*$",
-                "indication": "there was a unsufficient process clean up after a failure. Corrective action would be to bounce the api container."
+                "indication": "there was a insufficient process clean up after a failure. Corrective action would be to bounce the api container."
             },
             {
                 "pattern" : r"^.*Missing an output location for shuffle.*$",
@@ -2309,19 +2360,19 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*java\.lang\.OutOfMemoryError.*$",
-                "indication": "the host has run out of memory."
+                "indication": "the JVM has run out of memory."
             },            
             {
                 "pattern" : r"^.*all nodes failed.*$",
-                "indication": "the disk is too slow for the given load."
+                "indication": "that before used to be referred to as 'slow disk' errors, but that we now know are more nuanced than that (will be updated)"
             },
             {
                 "pattern" : r"^.*no other nodes left.*$",
-                "indication": "the disk is too slow for the given load."
+                "indication": "that before used to be referred to as 'slow disk' errors, but that we now know are more nuanced than that (will be updated)"
             },
             {
                 "pattern" : r"^.*all shards failed.*$",
-                "indication": "something is off with the Elasticsearch index partitions."
+                "indication": "something is off with the Elasticsearch index partitions. Check for a possilbe scroll request on the previous log line as scroll requests that comes more than 20 minutes (the fixed search result scroll timeout value) apart could cause this issue"
             },
             {
                 "pattern" : r"^.*index read-only / allow delete \(api\).*$",
@@ -2382,6 +2433,10 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*hs_err_pid[0-9]+\.log.*$",
                 "indication": "there is a JVM process crash report at the given location within the given container."
+            },
+            {
+                "pattern" : r"^.*Total size of serialized results.+bigger than spark.driver.maxResultSize.*$",
+                "indication": "one has run  into a hard coded mem limit that has been removed in later versions."
             }
         ] 
         if self.custom_regex:
@@ -2860,6 +2915,7 @@ class Config():
             self.data_source = join(path_split(self.config_source)[0], self.data_source)
         self.csv_mappings             = self.__get_item(feeding, 'csv_mappings', self.csv_mappings)
         self.data_type                = self.__get_item(feeding, 'data_type', AUTO)
+        self.fallback_data_type       = self.__get_item(feeding, 'fallback_data_type', None)
         self.prefeeding_action        = self.__get_item(feeding, 'prefeeding_action', NO_ACTION)
         self.format                   = self.__get_item(feeding, 'format', {})
         self.encoding                 = self.__get_item(feeding, 'encoding', AUTO)
