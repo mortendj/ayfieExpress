@@ -495,6 +495,9 @@ class SearchEngine:
         
     def next_scroll_page(self, link):
         raise NotImplementedError
+        
+    def get_next_scroll_pages(self, page):
+        raise NotImplementedError
  
     ######### Jobs #########
 
@@ -794,6 +797,23 @@ class Inspector(SearchEngine):
         
     def next_scroll_page(self, link):
         return self._execute("/".join(link.replace('//', "").split('/')[3:]), HTTP_GET)
+        
+    def get_next_scroll_pages(self, page):
+        while True:
+            try:
+                link = page["_links"]["next"]["href"]
+            except:
+                break
+            page = self.next_scroll_page(link)
+            if "result" in page:
+                number_of_docs = len(page["result"])
+            elif "_embedded" in page:
+                number_of_docs = len(page["_embedded"]["documents"])
+            else:
+                raise KeyError('Neither "_embedded" nor "result" in result page')
+            if number_of_docs == 0:
+                break
+            yield page
  
     ######### Jobs #########
 
@@ -992,42 +1012,6 @@ class Inspector(SearchEngine):
  
     def wait_for_classifier_to_be_trained(self, classifier_name):
         self._wait_for("classifier_state", classifier_name, "TRAINED", "INVALID")
-        
-        
-class ExpressTools():
-
-    def __init__(self, ayfie):
-        self.engine = ayfie
- 
-    def get_doc_ids(self, col_id, query="*", limit=None, random_order=False):
-        if not limit:
-            limit = "ALL"
-        docs_per_request = 10000
-        if limit and limit != "ALL":
-            limit = int(limit)
-            if limit < docs_per_request:
-                docs_per_request = limit
-        result = self.engine.search_collection(col_id, query, docs_per_request, 
-                 exclude=["content", "term", "location", "organization", "person", "email"], 
-                 scroll=True, meta_data=True)
-        all_ids = [doc['document']['id'] for doc in result["result"]]
-        while True:
-            try:
-                link = result["_links"]["next"]["href"]
-            except:
-                break
-            result = self.engine.next_scroll_page(link)
-            ids = [doc['document']['id'] for doc in result["result"]]
-            if len(ids) == 0:
-                break
-            all_ids += ids
-            if limit != "ALL" and len(all_ids) >= int(limit):
-                break
-        if limit != "ALL" and limit < len(all_ids):
-            all_ids = all_ids[:limit]
-        if random_order:
-            shuffle(all_ids)
-        return all_ids
         
         
 class WebContent():
@@ -1634,13 +1618,35 @@ class EngineConnector():
             self.engine = Elasticsearch(*args)
         else:
             raise ValueError(f"Engine {self.config.engine} is not supported")
-            
-                
+                 
     def _print(self, message, end='\n'):
         if not self.config.silent_mode:
             print(message, end=end)
+            
+    def get_doc_ids(self, col_id, query="*", limit=None, random_order=False, filters=[]):
+        if not limit:
+            limit = "ALL"
+        docs_per_request = 10000
+        if limit and limit != "ALL":
+            limit = int(limit)
+            if limit < docs_per_request:
+                docs_per_request = limit
+        result = self.engine.search_collection(col_id, query, docs_per_request, filters=filters,
+                 exclude=["content", "term", "location", "organization", "person", "email"], 
+                 scroll=True, meta_data=True)
+        all_ids = [doc['document']['id'] for doc in result["result"]]
+        for result in self.engine.get_next_scroll_pages(result):
+            ids = [doc['document']['id'] for doc in result["result"]]
+            all_ids += ids
+            if limit != "ALL" and len(all_ids) >= int(limit):
+                break
+        if limit != "ALL" and limit < len(all_ids):
+            all_ids = all_ids[:limit]
+        if random_order:
+            shuffle(all_ids)
+        return all_ids
         
-        
+
 class SchemaManager(EngineConnector):
 
     def add_field_if_absent(self, schema_changes=None):
@@ -1652,7 +1658,78 @@ class SchemaManager(EngineConnector):
                 self.engine.add_collection_schema_field(col_id, schema_change)
                 if not self.engine.exists_collection_schema_field(col_id, schema_change['name']):
                     raise ConfigError(f"Failed to add new schema field '{schema_change['name']}'")
-      
+                    
+
+class DocumentRetriever(EngineConnector):
+
+    def retrieve_documents(self):
+        self.search_operation = False
+        if self.config.doc_retrieval_query or self.config.doc_retrieval_filters:
+            self.search_operation = True
+        col_id = self.engine.get_collection_id(self.config.col_name)
+        fields = self._get_fields_to_extract(col_id, self.config.doc_retrieval_fields)
+        with open(self.config.doc_retrieval_output_file, mode='w', newline='', encoding="utf-8") as f:
+            csv_writer = csv.DictWriter(f, fieldnames=fields, dialect=self.config.doc_retrieval_csv_dialect)
+            if self.config.doc_retrieval_csv_header_row:
+                csv_writer.writeheader()
+            doc_count = -1
+            for doc_batch in self._get_documents(col_id, self.config.doc_retrieval_query, self.config.doc_retrieval_filters):
+                for document in doc_batch:
+                    doc_count += 1
+                    if self.config.doc_retrieval_max_docs:
+                        if doc_count >= self.config.doc_retrieval_max_docs:
+                            self._print(f"Aborting after {self.config.doc_retrieval_max_docs} documents as directed via configuration")
+                            return
+                    if doc_count and doc_count % self.config.doc_retrieval_report_frequency == 0:
+                        self._print(f"So far {doc_count} documents have been extracted")
+                    row = {}
+                    for field in fields:
+                        if self.search_operation:
+                            value = document["document"].get(field, '')
+                        else:
+                            value = document.get(field, '')
+                        if type(value) is list:
+                            value = self.config.doc_retrieval_separator.join(value)
+                        if type(value) is str:
+                            row[field] = value.replace('\n', ' ').replace('\t', ' ')
+                        else:
+                            row[field] = value
+                    csv_writer.writerow(row)
+        tail = "."            
+        if self.search_operation:
+            tail = " matching configured query and/or filters."
+        self._print(f"Done after extracting all {doc_count} documents{tail}")
+                         
+    def _get_documents(self, col_id, query="", filters=[]):
+        if self.search_operation:
+            result_page = self.engine.search_collection(col_id, query, self.config.doc_retrieval_batch_size, 0, filters,
+                                                        self.config.doc_retrieval_exclude, scroll=True, meta_data=True)
+            yield result_page["result"]
+        else:
+            result_page = self.engine.get_collection_documents(col_id, self.config.doc_retrieval_batch_size)
+            yield result_page["_embedded"]["documents"]
+        for result_page in self.engine.get_next_scroll_pages(result_page):
+            if self.search_operation:
+                yield result_page["result"]
+            else:  
+                yield result_page["_embedded"]["documents"]
+ 
+    def _get_fields_to_extract(self, col_id, fields):
+        if fields:
+            return fields
+        schema = self.engine.get_collection_schema(col_id)
+        if "fields" in schema:
+            if self.config.doc_retrieval_drop_underscore_fields:
+                fields = [field for field in schema["fields"].keys() if not field.startswith("_")]
+            else:
+                fields = [field for field in schema["fields"].keys()]
+        else:
+            raise KeyError("No field 'fields' in schema: {}".format(schema))
+        for field in self.config.doc_retrieval_exclude:
+            fields.remove(field)
+        return fields
+        
+            
 
 class Feeder(EngineConnector):
 
@@ -1789,7 +1866,7 @@ class Feeder(EngineConnector):
         finally:
             elapsed_time = int(time() - start_time)
             file_count, total_file_size = self.data_source.get_file_statistics()
-            total_file_size, unit = self._get_unit_adapted_byte_figure(number_of_bytes)
+            total_file_size, unit = self._get_unit_adapted_byte_figure(total_file_size)  
             log_message = f"A total of {file_count} files and {total_file_size} {unit} were retrieved from disk" + log_message
             log.info(log_message)
             self._print(log_message)
@@ -1866,7 +1943,7 @@ class Classifier(EngineConnector):
         assert (type(K) is int and K > 0),"No k-fold value defined"
         col_id = self.engine.get_collection_id(self.config.col_name)
         query = f"_exists_:{classification['training_field']}"
-        doc_ids = ExpressTools(self.engine).get_doc_ids(col_id, query, random_order=True)
+        doc_ids = self.engine.get_doc_ids(col_id, query, random_order=True)
         q, r = divmod(len(doc_ids), K)
         doc_sets = [doc_ids[i * q + min(i, r):(i + 1) * q + min(i + 1, r)] for i in range(K)]
         for i in range(K):
@@ -2247,7 +2324,7 @@ class DocumentUpdater(EngineConnector):
             
     def __get_doc_ids(self, query, limit=None, random_order=False):
         col_id = self.engine.get_collection_id(self.config.col_name)
-        return ExpressTools(self.engine).get_doc_ids(col_id, query, limit, random_order)
+        return self.engine.get_doc_ids(col_id, query, limit, random_order)
         
     def do_updates(self, docs_updates=None):
         if not docs_updates:
@@ -2364,11 +2441,11 @@ class LogAnalyzer():
             },            
             {
                 "pattern" : r"^.*all nodes failed.*$",
-                "indication": "that before used to be referred to as 'slow disk' errors, but that we now know are more nuanced than that (will be updated)"
+                "indication": "we have come across what before used to be referred to as 'slow disk' errors, but that we now know are more nuanced than that (will be updated)"
             },
             {
                 "pattern" : r"^.*no other nodes left.*$",
-                "indication": "that before used to be referred to as 'slow disk' errors, but that we now know are more nuanced than that (will be updated)"
+                "indication": "we have come across what before used to be referred to as 'slow disk' errors, but that we now know are more nuanced than that (will be updated)"
             },
             {
                 "pattern" : r"^.*all shards failed.*$",
@@ -2839,6 +2916,8 @@ class Config():
         self.csv_mappings     = self.__get_item(config, 'csv_mappings', None)
         self.progress_bar     = self.__get_item(config, 'progress_bar', True)
         self.document_update  = self.__get_item(config, 'document_update', False)
+        self.doc_retrieval    = self.__get_item(config, 'document_retrieval', False)
+        self.__init_doc_retrieval(self.doc_retrieval)
         self.processing       = self.__get_item(config, 'processing', False)
         self.__init_processing(self.processing)
         self.sampling         = self.__get_item(config, 'sampling', False)        
@@ -3051,6 +3130,35 @@ class Config():
                             raise  DataFormatError(f"Bad JSON in file '{filename}' holder doc id list")
                         except FileNotFoundError:
                             raise ValueError(f"File '{filename}' with doc id list does not exists")
+                            
+    def __init_doc_retrieval(self, doc_retrieval):
+        self.doc_retrieval_output_file            = self.__get_item(doc_retrieval, 'output_file', "output.csv")
+        self.doc_retrieval_fields                 = self.__get_item(doc_retrieval, 'fields', None)
+        self.doc_retrieval_batch_size             = self.__get_item(doc_retrieval, 'batch_size', 1000)
+        self.doc_retrieval_csv_dialect            = self.__get_item(doc_retrieval, 'csv_dialect', None)
+        self.doc_retrieval_separator              = self.__get_item(doc_retrieval, 'csv_separator', "|")
+        self.doc_retrieval_query                  = self.__get_item(doc_retrieval, 'query', "")
+        self.doc_retrieval_filters                = self.__get_item(doc_retrieval, 'filters', [])
+        self.doc_retrieval_exclude                = self.__get_item(doc_retrieval, 'exclude', [])
+        self.doc_retrieval_max_docs               = self.__get_item(doc_retrieval, 'max_docs', None)
+        self.doc_retrieval_csv_header_row         = self.__get_item(doc_retrieval, 'csv_header_row', True) 
+        self.doc_retrieval_report_frequency       = self.__get_item(doc_retrieval, 'report_frequency', 1000)  
+        self.doc_retrieval_drop_underscore_fields = self.__get_item(doc_retrieval, 'drop_underscore_fields', True) 
+        if self.doc_retrieval_csv_dialect:
+            if not self.doc_retrieval_csv_dialect in csv.list_dialects():
+                raise ValueError(f"'{self.doc_retrieval_}' is not csv dialect")
+        else:
+            self.doc_retrieval_csv_dialect = 'custom_config'
+            csv.register_dialect(
+                self.doc_retrieval_csv_dialect, 
+                delimiter        = self.__get_item(doc_retrieval, 'csv_delimiter', ','),
+                doublequote      = self.__get_item(doc_retrieval, 'csv_double_quote', True), 
+                quotechar        = self.__get_item(doc_retrieval, 'csv_quote_char', '"'), 
+                lineterminator   = self.__get_item(doc_retrieval, 'csv_line_terminator', '\r\n'), 
+                escapechar       = self.__get_item(doc_retrieval, 'csv_escape_char', None),
+                quoting          = eval("csv." + self.__get_item(doc_retrieval, 'csv_quoting', "QUOTE_MINIMAL")),
+                skipinitialspace = self.__get_item(doc_retrieval, 'csv_skip_initial_space', False)
+            )
 
     def __init_search(self, searches):
         if not searches:
@@ -3195,6 +3303,7 @@ class Admin():
         self.reporter = Reporter(self.config)
         self.clusterer  = Clusterer(self.config)
         self.classifier = Classifier(self.config)
+        self.doc_retriever = DocumentRetriever(self.config)
         self.sampler = Sampler(self.config)
         
     def run_config(self):
@@ -3251,6 +3360,8 @@ class Admin():
                 self.clusterer.create_clustering_job_and_wait()
             if self.config.classifications:
                 self.classifier.do_classifications()
+            if self.config.doc_retrieval:
+                self.doc_retriever.retrieve_documents()
             if self.config.sampling:
                 pretty_print(self.sampler.create_sampling_job_and_wait())
             for search in self.config.searches:
@@ -3332,11 +3443,13 @@ def run_cmd_line(cmd_line_args):
 
         admin = Admin(Config(config))
         return admin.run_config()
+        
 
 run_from_cmd_line = False
 if __name__ == '__main__':
     run_from_cmd_line = True
     run_cmd_line(sys.argv)
+
 
    
     
