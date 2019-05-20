@@ -81,7 +81,7 @@ COL_DISAPPEAR         = 'disappear'
 COL_EVENTS            = [COL_APPEAR, COL_DISAPPEAR]
 ITEM_TYPES            = ['collections', 'classifiers', 'jobs:jobinstances']
 
-MAX_BATCH_SIZE        = 1000
+BATCH_SIZE            = 1000
 MAX_PAGE_SIZE         = 10000
 
 DEL_ALL_COL           = "delete_all_collections"
@@ -1662,14 +1662,37 @@ class SchemaManager(EngineConnector):
 
 class DocumentRetriever(EngineConnector):
 
+    def _get_batch_size(self, batch_size, exlude_fields): 
+        if batch_size == "auto":
+            batch_size = 1000
+            if self.search_operation:
+                if "content" in exlude_fields:
+                    batch_size = MAX_PAGE_SIZE
+        else:
+            try:
+                batch_size = int(batch_size)
+            except:
+                raise ValueError('Parameter "batch_size" must be an integer')
+        if batch_size > MAX_PAGE_SIZE:
+            batch_size = MAX_PAGE_SIZE
+        return batch_size
+
     def retrieve_documents(self):
+        """
         self.search_operation = False
         if self.config.doc_retrieval_query or self.config.doc_retrieval_filters:
             self.search_operation = True
+        """
+        self.search_operation = True  # HARDCODED TO USE THE SEARCH API ALL THE TIME  
+        
         col_id = self.engine.get_collection_id(self.config.col_name)
-        fields = self._get_fields_to_extract(col_id, self.config.doc_retrieval_fields)
+        self.schema_fields = self._get_schema_fields(col_id)
+        requested_fields = self._get_fields_to_extract(col_id)
+        self.exclude_fields = self._get_fields_to_exclude(self.schema_fields, requested_fields)
+        self.batch_size = self._get_batch_size(self.config.doc_retrieval_batch_size, self.exclude_fields)
+        
         with open(self.config.doc_retrieval_output_file, mode='w', newline='', encoding="utf-8") as f:
-            csv_writer = csv.DictWriter(f, fieldnames=fields, dialect=self.config.doc_retrieval_csv_dialect)
+            csv_writer = csv.DictWriter(f, fieldnames=requested_fields, dialect=self.config.doc_retrieval_csv_dialect)
             if self.config.doc_retrieval_csv_header_row:
                 csv_writer.writeheader()
             doc_count = -1
@@ -1678,12 +1701,12 @@ class DocumentRetriever(EngineConnector):
                     doc_count += 1
                     if self.config.doc_retrieval_max_docs:
                         if doc_count >= self.config.doc_retrieval_max_docs:
-                            self._print(f"Aborting after {self.config.doc_retrieval_max_docs} documents as directed via configuration")
+                            self._print(f"Aborting after extracted {doc_count} as configured via parameter 'max_docs'")
                             return
                     if doc_count and doc_count % self.config.doc_retrieval_report_frequency == 0:
                         self._print(f"So far {doc_count} documents have been extracted")
                     row = {}
-                    for field in fields:
+                    for field in requested_fields:
                         if self.search_operation:
                             value = document["document"].get(field, '')
                         else:
@@ -1695,39 +1718,42 @@ class DocumentRetriever(EngineConnector):
                         else:
                             row[field] = value
                     csv_writer.writerow(row)
-        tail = "."            
-        if self.search_operation:
-            tail = " matching configured query and/or filters."
-        self._print(f"Done after extracting all {doc_count} documents{tail}")
+        self._print(f"Done after extracting all {doc_count} documents")
                          
-    def _get_documents(self, col_id, query="", filters=[]):
+    def _get_documents(self, col_id, query="", filters=[], exlude_fields=[]):
         if self.search_operation:
-            result_page = self.engine.search_collection(col_id, query, self.config.doc_retrieval_batch_size, 0, filters,
-                                                        self.config.doc_retrieval_exclude, scroll=True, meta_data=True)
+            result_page = self.engine.search_collection(col_id, query, self.batch_size, 0, filters,
+                                                        self.exclude_fields, scroll=True, meta_data=True)
             yield result_page["result"]
         else:
-            result_page = self.engine.get_collection_documents(col_id, self.config.doc_retrieval_batch_size)
+            result_page = self.engine.get_collection_documents(col_id, self.batch_size)
             yield result_page["_embedded"]["documents"]
         for result_page in self.engine.get_next_scroll_pages(result_page):
             if self.search_operation:
                 yield result_page["result"]
             else:  
                 yield result_page["_embedded"]["documents"]
- 
-    def _get_fields_to_extract(self, col_id, fields):
-        if fields:
-            return fields
+                          
+    def _get_schema_fields(self, col_id):
         schema = self.engine.get_collection_schema(col_id)
         if "fields" in schema:
-            if self.config.doc_retrieval_drop_underscore_fields:
-                fields = [field for field in schema["fields"].keys() if not field.startswith("_")]
-            else:
-                fields = [field for field in schema["fields"].keys()]
-        else:
-            raise KeyError("No field 'fields' in schema: {}".format(schema))
+            return [field for field in schema["fields"].keys()]
+        raise KeyError(f"No field 'fields' in schema: {schema}")
+ 
+    def _get_fields_to_extract(self, col_id):
+        fields = self.config.doc_retrieval_fields
+        if not fields:
+            fields = self.schema_fields
+        if self.config.doc_retrieval_drop_underscore_fields:
+            fields = [field for field in fields if not field.startswith("_")]
+        if not "id" in fields:
+            fields = ["id"] + fields
         for field in self.config.doc_retrieval_exclude:
             fields.remove(field)
         return fields
+        
+    def _get_fields_to_exclude(self, schema_fields, requested_fields):
+        return [field for field in schema_fields if field not in requested_fields]
         
             
 
@@ -2998,7 +3024,7 @@ class Config():
         self.prefeeding_action        = self.__get_item(feeding, 'prefeeding_action', NO_ACTION)
         self.format                   = self.__get_item(feeding, 'format', {})
         self.encoding                 = self.__get_item(feeding, 'encoding', AUTO)
-        self.batch_size               = self.__get_item(feeding, 'batch_size', MAX_BATCH_SIZE)
+        self.batch_size               = self.__get_item(feeding, 'batch_size', BATCH_SIZE)
         self.document_type            = self.__get_item(feeding, 'document_type', None)
         self.preprocess               = self.__get_item(feeding, 'preprocess', None)
         self.ayfie_json_dump_file     = self.__get_item(feeding, 'ayfie_json_dump_file', None)
@@ -3133,8 +3159,8 @@ class Config():
                             
     def __init_doc_retrieval(self, doc_retrieval):
         self.doc_retrieval_output_file            = self.__get_item(doc_retrieval, 'output_file', "output.csv")
-        self.doc_retrieval_fields                 = self.__get_item(doc_retrieval, 'fields', None)
-        self.doc_retrieval_batch_size             = self.__get_item(doc_retrieval, 'batch_size', 1000)
+        self.doc_retrieval_fields                 = self.__get_item(doc_retrieval, 'fields', [])
+        self.doc_retrieval_batch_size             = self.__get_item(doc_retrieval, 'batch_size', "auto")
         self.doc_retrieval_csv_dialect            = self.__get_item(doc_retrieval, 'csv_dialect', None)
         self.doc_retrieval_separator              = self.__get_item(doc_retrieval, 'csv_separator', "|")
         self.doc_retrieval_query                  = self.__get_item(doc_retrieval, 'query', "")
