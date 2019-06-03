@@ -14,6 +14,7 @@ from re import search, match, sub
 from random import random, shuffle
 from subprocess import call
 from copy import deepcopy
+from platform import system as operating_system
 import logging
 import requests
 import sys
@@ -30,9 +31,18 @@ while True:
 try:
     import PyPDF2
     pdf_is_suported = True
-except:
+except ModuleNotFoundError:
     pdf_is_suported = False
 
+
+UNRAR_TOOL_WINDOWS = None
+UNRAR_TOOL_LINUX   = None
+try:
+    import rarfile
+    rar_zip_format_is_suported = True
+except ModuleNotFoundError:
+    rar_zip_format_is_suported = False
+    
 log = logging.getLogger(__name__)
 
 INSPECTOR             = "inspector"
@@ -101,6 +111,7 @@ WORD_DOC              = "docx"
 XLSX                  = "xlsx"
 TXT                   = "txt"
 XML                   = 'xml'
+JSON_LINES            = 'json_lines'
 DATA_TYPES            = [AYFIE, AYFIE_RESULT, JSON, CSV, PDF, TXT]
 JSON_TYPES            = [AYFIE, AYFIE_RESULT, JSON]
 ZIP_FILE              = 'zip'
@@ -123,7 +134,8 @@ FILE_SIGNATURES = {
     BOM_UTF16_LE: BOM_UTF16_LE,
     BOM_UTF16_BE: BOM_UTF16_BE,
     BOM_UTF32_LE: BOM_UTF32_LE,
-    BOM_UTF32_BE: BOM_UTF32_BE
+    BOM_UTF32_BE: BOM_UTF32_BE,
+    b'{"': JSON_LINES
 }
 
 BOM_MARKS_NAMES = {
@@ -136,6 +148,7 @@ BOM_MARKS_NAMES = {
 
 MAX_CONNECTION_RETRIES = 100
 MAX_PAUSE_BEFORE_RETRY = 120
+SLEEP_LENGTH_FACTOR    = 5
 
 RETURN_RESULT          = 'return'
 DISPLAY_RESULT         = 'display'
@@ -294,19 +307,20 @@ class SearchEngine:
     def _log_attempt_and_go_to_sleep(self, tries, error_msg, go_to_sleep): 
         sleep_msg = ""
         if go_to_sleep:
-            sleep_interval = tries * 5
+            sleep_interval = tries * SLEEP_LENGTH_FACTOR
             if sleep_interval > MAX_PAUSE_BEFORE_RETRY:
                 sleep_interval = MAX_PAUSE_BEFORE_RETRY 
             sleep(sleep_interval)
             sleep_msg = f". Trying again in {sleep_interval} seconds"
         msg = f"Connection issue: {error_msg}{sleep_msg}"
         log.debug(msg)
-        print(msg)
+        if tries > 3:
+            print(msg)
         
     def _response_format_converter(self, response_obj):
         return response_obj
         
-    def _get_response_object(self, response, verb, endpoint):
+    def _get_response_object(self, response):
         try:
             response_obj = loads(response.text) if len(response.text) else {}
         except JSONDecodeError:
@@ -356,7 +370,7 @@ class SearchEngine:
                 "description": "Not a ayfie recognized response code"
             }
             log.warning(self._gen_non_ayfie_code_msg(response.status_code))
-        response_obj = self._get_response_object(response, verb, endpoint)
+        response_obj = self._get_response_object(response)
         if response.status_code >= 400:
             error_msg = self._gen_response_err_msg(response_obj, ayfieStatus)
             log.debug(error_msg)
@@ -1087,7 +1101,10 @@ class FileHandlingTools():
             except:
                 return None
         return None
-
+        
+    def _get_output_file_path(self, input_file_path, zip_file_extension, unzip_dir):
+        return join(unzip_dir, basename(input_file_path).replace(f".{zip_file_extension}", ""))
+    
     def unzip(self, file_type, file_path, unzip_dir):
         if file_type not in ZIP_FILE_TYPES:
             return False
@@ -1101,16 +1118,28 @@ class FileHandlingTools():
             with tarfile_open(file_path) as tar:
                 tar.extractall(unzip_dir)
         elif file_type == GZ_FILE:
-            output_file_name = basename(file_path).replace(".gz", "")
-            with open(join(unzip_dir, output_file_name), 'wb') as f, gzip_open(file_path, 'rb') as z:
+            output_file_path = self._get_output_file_path(file_path, "gz", unzip_dir)
+            with open(output_file_path, 'wb') as f, gzip_open(file_path, 'rb') as z:
                 f.write(z.read())
         elif file_type == BZ2_FILE:
-            with open(unzip_dir, 'wb') as f, open(file_path,'rb') as z:
+            output_file_path = self._get_output_file_path(file_path, "bz2", unzip_dir)
+            with open(output_file_path, 'wb') as f, open(file_path,'rb') as z:
                 f.write(decompress(z.read()))
         elif file_type == _7Z_FILE:
             log.info(f"Skipping '{file_path}' - 7z decompression still not implemented")
         elif file_type == RAR_FILE:
-            log.info(f"Skipping '{file_path}' - rar decompression still not implemented")
+            log.info(f"Skipping '{file_path}' - .rar file decompression still not implemented")
+            if False:  # What follows is part of future .rar file support
+                if not rar_zip_format_is_suported:
+                    raise ModuleNotFoundError('run "pip install rarfile" and install unrar executable and add to PATH')
+                rarfile.UNRAR_TOOL = UNRAR_TOOL_LINUX
+                if operating_system() == "Windows":
+                    rarfile.UNRAR_TOOL = UNRAR_TOOL_WINDOWS
+                rf = rarfile.RarFile(file_path)
+                for z in rf.infolist():
+                    output_file_path = self._get_output_file_path(z.filename, "", unzip_dir)
+                    with open(output_file_path, 'wb') as f:
+                        f.write(rf.read(z))
         else:
             raise ValueError(f'Unknown zip file type "{zip_file_type}"')
         return True
@@ -1295,6 +1324,13 @@ class DataSource():
     def _gen_id_from_file_path(self, file_path):
         return splitext(basename(file_path))[0]
         
+    def has_numeric_index_keys(self, mappings):
+        try:
+            dummy = sum(list(mappings["fields"].values()) + [mappings["id"]])
+            return True
+        except TypeError:
+            return False
+        
     def _gen_doc_from_csv(self, csv_file, mappings, format):
         if not mappings:
             raise ConfigError("Configuration lacks a csv mapping table")
@@ -1345,6 +1381,10 @@ class DataSource():
             if data_type == CSV:
                 for document in self._gen_doc_from_csv(f, self.config.csv_mappings, self.config.format):
                     yield document
+            elif data_type == JSON_LINES:
+                for document in self._get_file_content(f).split("\n"):
+                    if len(document.strip()):
+                        yield loads(document)
             elif data_type in [AYFIE, AYFIE_RESULT]:
                 data = self._get_file_content(f)
                 if data_type == AYFIE:
@@ -1645,8 +1685,14 @@ class EngineConnector():
         if random_order:
             shuffle(all_ids)
         return all_ids
-        
 
+     
+class Operational(EngineConnector):
+
+    def do_operation(self):
+        raise NotImplementedError("Class Operational has yet not been implemented")
+
+        
 class SchemaManager(EngineConnector):
 
     def add_field_if_absent(self, schema_changes=None):
@@ -1849,7 +1895,7 @@ class Feeder(EngineConnector):
             unit = "KB"
         else:
             return number_of_bytes, "bytes"
-        return round(number_of_bytes, 3), unit
+        return round(number_of_bytes, 1), unit
         
     def feed_documents(self):
         self.batch = []
@@ -1913,18 +1959,22 @@ class Feeder(EngineConnector):
             return
         if self.doc_count <= 0:
             log.info(f'No documents to feed')
-            return
+            return self.doc_count
         col_id = self.engine.get_collection_id(self.config.col_name)
         log.info(f'Fed {self.doc_count} documents. Starting to commit')
         self.engine.commit_collection_and_wait(col_id)
         log.info(f'Done committing')
+        return self.doc_count
 
     def feed_documents_commit_and_process(self):
-        self.feed_documents_and_commit()
-        processing_time = self.process()
-        if self.config.feeding_report_time:
-            self._print(f"The processing operation took {str(processing_time)} seconds")
-        log.info(f'Done processing')
+        numb_of_fed_docs = self.feed_documents_and_commit()
+        if numb_of_fed_docs == 0:
+            log.info(f'No documents to process')
+        else:
+            processing_time = self.process()
+            if self.config.feeding_report_time:
+                self._print(f"The processing operation took {str(processing_time)} seconds")
+            log.info(f'Done processing')
 
 
 class Classifier(EngineConnector):
@@ -1968,7 +2018,7 @@ class Classifier(EngineConnector):
         assert (type(K) is int and K > 0),"No k-fold value defined"
         col_id = self.engine.get_collection_id(self.config.col_name)
         query = f"_exists_:{classification['training_field']}"
-        doc_ids = self.engine.get_doc_ids(col_id, query, random_order=True)
+        doc_ids = self.get_doc_ids(col_id, query, random_order=True)
         q, r = divmod(len(doc_ids), K)
         doc_sets = [doc_ids[i * q + min(i, r):(i + 1) * q + min(i + 1, r)] for i in range(K)]
         for i in range(K):
@@ -2385,7 +2435,8 @@ class LogAnalyzer():
         if not exists(log_file_path):
             raise ConfigError(f"There is no {log_file_path}")
         self.filtered_patterns = [
-            "^.*RestControllerRequestLoggingAspect: triggering JobController.getJob\(\.\.\) with args:.*$"
+            "^.*RestControllerRequestLoggingAspect: triggering JobController.getJob\(\.\.\) with args:.*$",
+            "^.*Performing partial update on document.*$"
         ] 
         self.error_info = [
             {
@@ -2437,6 +2488,42 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*skipExtractors=\[_gdpr\].*$",
                 "extraction": [("GDPR", "Disabled")]
+            },
+            {
+                "pattern" : r"^.*SPARK_WORKER_MEM_LIMIT=([0-9]+G).*$",
+                "extraction": [("SPARK_WORKER_MEM_LIMIT", 1)]
+            },            
+            {
+                "pattern" : r"^.*SPARK_DRIVER_MEMORY=([0-9]+G).*$",
+                "extraction": [("SPARK_DRIVER_MEMORY", 1)]
+            },
+            {
+                "pattern" : r"^.*SPARK_EXECUTOR_MEMORY=([0-9]+G).*$",
+                "extraction": [("SPARK_EXECUTOR_MEMORY=", 1)]
+            },
+            {
+                "pattern" : r"^.*SPARK_WORKER_MEMORY=([0-9]+G).*$",
+                "extraction": [("SPARK_WORKER_MEMORY=", 1)]
+            },
+            {
+                "pattern" : r"^.*API_MEM_LIMIT=([0-9]+G).*$",
+                "extraction": [("API_MEM_LIMIT=", 1)]
+            },
+            {
+                "pattern" : r"^.*ELASTICSEARCH_MEM_LIMIT=([0-9]+G).*$",
+                "extraction": [("ELASTICSEARCH_MEM_LIMIT=", 1)]
+            },
+            {
+                "pattern" : r"^.*ELASTICSEARCH_MX_HEAP=([0-9]+G).*$",
+                "extraction": [("ELASTICSEARCH_MX_HEAP=", 1)]
+            },
+            {
+                "pattern" : r"^.*RECOGNITION_MEM_LIMIT=([0-9]+G).*$",
+                "extraction": [("RECOGNITION_MEM_LIMIT=", 1)]
+            },
+            {
+                "pattern" : r"^.*RECOGNITION_MX_HEAP=([0-9]+G).*$",
+                "extraction": [("RECOGNITION_MX_HEAP=", 1)]
             }
         ]
         self.symptoms = [
@@ -2537,9 +2624,13 @@ class LogAnalyzer():
                 "indication": "there is a JVM process crash report at the given location within the given container."
             },
             {
+                "pattern" : r"^.*fatal error on the network layer.*$",
+                "indication": "we came across an possible error indication that we have seen before, but that we yet not fully understand."
+            },
+            {
                 "pattern" : r"^.*Total size of serialized results.+bigger than spark.driver.maxResultSize.*$",
-                "indication": "one has run  into a hard coded mem limit that has been removed in later versions."
-            }
+                "indication": "one has run into a hard coded mem limit that has been removed in later versions."
+            }   
         ] 
         if self.custom_regex:
             self.symptoms.append({
@@ -2555,7 +2646,7 @@ class LogAnalyzer():
         self.errors_detected = False
         self.exceptions = {}
         
-    def __prepare_temp_log_directory(self, log_file, log_dir):
+    def _prepare_temp_log_directory(self, log_file, log_dir):
         fht = FileHandlingTools()
         file_type, detected_encoding = fht.get_file_type(log_file)
         if fht.unzip(file_type, log_file, self.unzip_dir):
@@ -2565,7 +2656,7 @@ class LogAnalyzer():
             fht.recreate_directory(log_dir)
             copy(log_file, log_dir)
             
-    def __line_filtering(self, line):
+    def _line_filtering(self, line):
         if len(line.strip()) == 0:
             return ""
         for pattern in self.filtered_patterns:
@@ -2574,73 +2665,84 @@ class LogAnalyzer():
                 return ""
         return line
         
-    def __process_log_file(self, log_file):
+    def _process_log_file(self, log_file):
         if not exists(log_file):
             raise ValueError(f"Path '{log_file}' does not exists")
         if isdir(log_file):
             raise ValueError(f"'{log_file}' is not a file, but a directory")
         file_type, detected_encoding = FileHandlingTools().get_file_type(log_file) 
-        encoding = "utf-8"
+        encodings = ["utf-8", "iso-8859-1"]
         if detected_encoding:
             if detected_encoding == "utf_16_le":
-                encoding = "utf-16"
-            else:
-                encoding = detected_encoding
+                detected_encoding = "utf-16"
+            if not detected_encoding in encodings:
+                encodings = [detected_encoding] + encodings
+        log.debug(f"Ordered encoding list: {str(encodings)}")
+        for encoding in encodings:
+            log.debug(f"Now decoding with encoding '{encoding}'")
+            try:
+                self._process_encoded_log_file(log_file, encoding)
+            except UnicodeDecodeError:
+                log.debug("UnicodeDecodeError")
+                continue
+            except DataFormatError:
+                log.debug("DataFormatError")
+                raise
+            return
+                
+    def _process_encoded_log_file(self, log_file, encoding): 
         error_info = deepcopy(self.error_info)
         with open(log_file, "r", encoding=encoding) as f:
             if self.noise_filtering:
                 output_file = log_file + ".filtered"
             else:
                 output_file = "dummy.txt"
+            with open(output_file, "w") as filtered_file:
+                pass
             with open(output_file, "a") as filtered_file:
                 self.line_count = 0
                 self.info_pieces = {}
-                try:
-                    for line in f:
-                        if self.noise_filtering:
-                            filtered_file.write(self.__line_filtering(line))
-                        if self.line_count == 0:
-                            if not line.strip().startswith("Attaching to"):
-                                raise DataFormatError(f"File '{log_file}' is not recognized as a ayfie Inspector log file")
-                        self.line_count += 1
-                        for info in error_info:                    
-                            if "occurence" in info and info["occurence"] == "completed":
-                                continue
-                            m = match(info["pattern"], line)
-                            if m:
-                                output_line = []
-                                for item in info["extraction"]:
-                                    item_name = item[0]
-                                    item_value = item[1]
-                                    if type(item_name) is int:
-                                        item_name = m.group(item_name)
-                                    if type(item_value) is int:
-                                        item_value = m.group(item_value)
-                                    output_line.append(f"{item_name}: {item_value}")
-                                if "key" in info:
-                                    self.info_pieces["key"] = ", ".join(output_line)
-                                else:
-                                    self.info_pieces[", ".join(output_line)] = False
-                                if "occurence" in info and info["occurence"] == "first":
-                                    info["occurence"] = "completed"                
-                        for symptom in self.symptoms:
-                            m = match(symptom["pattern"], line)
-                            if m:
-                                self.errors_detected = True
-                                symptom["occurences"] += 1
-                                symptom["last_occurence_line"] = self.line_count
-                                symptom["last_occurence_sample"] = m.group(0)
-                                if self.dump_lines:
-                                    print(m.group(0))
-                        m = match(r"Exception", line)
+                for line in f:
+                    if self.noise_filtering:
+                        filtered_file.write(self._line_filtering(line))
+                    if self.line_count == 0:
+                        if not line.strip().startswith("Attaching to"):
+                            raise DataFormatError(f"File '{log_file}' is not recognized as a ayfie Inspector log file")
+                    self.line_count += 1
+                    for info in error_info:                    
+                        if "occurence" in info and info["occurence"] == "completed":
+                            continue
+                        m = match(info["pattern"], line)
                         if m:
-                            if not m.group(0) in self.exceptions:
-                                self.exceptions[m.group(0)] = 0
-                            self.exceptions[m.group(0)] += 1
-                except UnicodeDecodeError as e:
-                    raise DataFormatError(f"'File {log_file}' is most likley a binary file (or at a mininimum of wrong encoding)")
-                except Exception:
-                    raise
+                            output_line = []
+                            for item in info["extraction"]:
+                                item_name = item[0]
+                                item_value = item[1]
+                                if type(item_name) is int:
+                                    item_name = m.group(item_name)
+                                if type(item_value) is int:
+                                    item_value = m.group(item_value)
+                                output_line.append(f"{item_name}: {item_value}")
+                            if "key" in info:
+                                self.info_pieces["key"] = ", ".join(output_line)
+                            else:
+                                self.info_pieces[", ".join(output_line)] = False
+                            if "occurence" in info and info["occurence"] == "first":
+                                info["occurence"] = "completed"                
+                    for symptom in self.symptoms:
+                        m = match(symptom["pattern"], line)
+                        if m:
+                            self.errors_detected = True
+                            symptom["occurences"] += 1
+                            symptom["last_occurence_line"] = self.line_count
+                            symptom["last_occurence_sample"] = m.group(0)
+                            if self.dump_lines:
+                                print(m.group(0))
+                    m = match(r"Exception", line)
+                    if m:
+                        if not m.group(0) in self.exceptions:
+                            self.exceptions[m.group(0)] = 0
+                        self.exceptions[m.group(0)] += 1
                 
     def produce_output(self, title, data_dict):
         output = ""
@@ -2655,7 +2757,7 @@ class LogAnalyzer():
          
     def analyze(self):
         if isfile(self.log_file):
-            self.__prepare_temp_log_directory(self.log_file, self.log_unpacking_dir)
+            self._prepare_temp_log_directory(self.log_file, self.log_unpacking_dir)
         elif isdir(self.log_file):
             self.log_unpacking_dir = self.log_file
         else:
@@ -2666,7 +2768,7 @@ class LogAnalyzer():
             is_log_file = True
             line_info = ""
             try:
-                self.__process_log_file(log_file)
+                self._process_log_file(log_file)
                 line_info = f'({self.line_count} LINES) '
                 if self.line_count == 0:
                     is_log_file = False
@@ -2943,12 +3045,12 @@ class Config():
         self.document_update  = self.__get_item(config, 'document_update', False)
         self.doc_retrieval    = self.__get_item(config, 'document_retrieval', False)
         self.__init_doc_retrieval(self.doc_retrieval)
+        self.operational      = self.__get_item(config, 'operational', None)
+        self.__init_operational(self.operational)
         self.processing       = self.__get_item(config, 'processing', False)
         self.__init_processing(self.processing)
         self.sampling         = self.__get_item(config, 'sampling', False)        
         self.__init_sampling(self.sampling)
-        self.api_call         = self.__get_item(config, 'api_call', False)
-        self.__init_api_call(self.api_call)
         self.schema           = self.__get_item(config, 'schema', False)
         self.__init_schema(self.schema)
         self.feeding          = self.__get_item(config, 'feeding', False)
@@ -2987,14 +3089,18 @@ class Config():
         if not op_specific_col_name:
             raise ValueError("The feeding collection has to be set at some level in the config file")
         return op_specific_col_name
-        
-    def __init_api_call(self, api_call):
-        self.api_call_endpoint        = self.__get_item(api_call, 'endpoint', None)
-        self.api_call_http_verb       = self.__get_item(api_call, 'http_verb', "GET")
-        self.api_call_os              = self.__get_item(api_call, 'os', "linux")
-        self.api_call_tool            = self.__get_item(api_call, 'tool', "curl")
-        self.api_call_indented        = self.__get_item(api_call, 'indented', False)
-        
+
+    def __init_operational(self, operational):
+        self.installer                = self.__get_item(operational, 'installer', None)
+        self.operation                = self.__get_item(operational, 'operation', None)
+        self.customization            = self.__get_item(operational, 'customization', None)
+        self.data_dir_path            = self.__get_item(operational, 'data_dir_path', None)
+        self.dot_env_file_path        = self.__get_item(operational, 'dot_env_file_path', None)
+        self.components               = self.__get_item(operational, 'components', None)
+        self.install_dir              = self.__get_item(operational, 'install_dir', None)
+        self.amount_of_RAM            = self.__get_item(operational, 'amount_of_RAM', 64)
+        self.dockerRegistry           = self.__get_item(operational, 'dockerRegistry', None)
+  
     def __init_schema(self, schema_changes):
         if not schema_changes:
             self.schema_changes = None
@@ -3228,12 +3334,9 @@ class Config():
         self.server_settings          = self.__get_item(regression_testing, 'server_settings', "override_config")
 
     def __inputDataValidation(self):
-        if self.server != OFF_LINE and (not self.regression_testing):
-            if not self.col_name:
-                raise ConfigError('Mandatory input parameter collection name (col_name) has not been given') 
         if self.report_logs_source and self.report_retrieve_logs: 
             raise ConfigError('Either analyze existing file or produce new ones, both is not possible')  
-        if self.progress_bar and self.engine == SOLR:
+        if self.progress_bar and self.engine != INSPECTOR:
             self.progress_bar = False
 
             
@@ -3322,6 +3425,7 @@ class Admin():
                 data_source = DataSource(self.config)
             elif self.config.engine == SOLR:
                 data_source = SolrDataSource(self.config)
+        self.operational = Operational(self.config)
         self.schema_manager = SchemaManager(self.config)
         self.feeder = Feeder(self.config, data_source)
         self.querier = Querier(self.config)
@@ -3333,10 +3437,6 @@ class Admin():
         self.sampler = Sampler(self.config)
         
     def run_config(self):
-        if self.config.api_call:
-            raise NotImplementedError("ApiCallGenerator yet to be implemented")
-            print(ApiCallGenerator(self.config).generate())
-            return 
         if self.config.regression_testing:
             if self.config.server_settings == OVERRIDE_CONFIG:
                 use_master_settings = True
@@ -3347,7 +3447,9 @@ class Admin():
             testExecutor = TestExecutor(self.config, use_master_settings)
             testExecutor.run_tests()
             return
-        
+            
+        if self.config.operational:
+            self.operational.do_operation()
         if self.config.server != OFF_LINE:
             if self.config.data_source:
                 if self.config.prefeeding_action not in PRE_ACTIONS:
