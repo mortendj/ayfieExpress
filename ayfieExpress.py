@@ -12,13 +12,20 @@ from shutil import copy, copytree as copy_dir_tree, rmtree as delete_dir_tree
 from typing import Union, List, Optional, Tuple, Set, Dict, DefaultDict, Any
 from re import search, match, sub
 from random import random, shuffle
-from subprocess import call
+from subprocess import run, PIPE, STDOUT, TimeoutExpired
 from copy import deepcopy
 from platform import system as operating_system
+from collections import deque
+from getpass import getuser
+import contextlib
 import logging
-import requests
 import sys
 import csv
+import warnings
+
+# The f-formated string below will produce a syntax error and be displayed
+# as part of the resulting error message if the version of Python is < 3.6
+f"ayfie Express requires Python 3.6 or later"
 
 max_int_value = sys.maxsize
 while True:
@@ -26,24 +33,7 @@ while True:
         csv.field_size_limit(max_int_value)
         break
     except OverflowError:
-        max_int_value = int(max_int_value/2)
-
-try:
-    import PyPDF2
-    pdf_is_suported = True
-except ModuleNotFoundError:
-    pdf_is_suported = False
-
-
-UNRAR_TOOL_WINDOWS = None
-UNRAR_TOOL_LINUX   = None
-try:
-    import rarfile
-    rar_zip_format_is_suported = True
-except ModuleNotFoundError:
-    rar_zip_format_is_suported = False
-    
-log = logging.getLogger(__name__)
+        max_int_value = int(max_int_value/2) 
 
 INSPECTOR             = "inspector"
 SOLR                  = "solr"
@@ -51,12 +41,12 @@ ELASTICSEARCH         = "elasticsearch"
 
 MAX_LOG_ENTRY_SIZE    = 1000
 
-ROOT_SUB_DIR          = 'ayfieExpress_output'
-UNZIP_DIR             = join(ROOT_SUB_DIR, 'unzipDir')
-DATA_DIR              = join(ROOT_SUB_DIR, 'dataDir')
-LOG_DIR               = join(ROOT_SUB_DIR, 'log')
-DOWNLOAD_DIR          = join(ROOT_SUB_DIR, 'inspector_download')
-TMP_LOG_UNPACK_DIR    = join(ROOT_SUB_DIR, 'temp_log_unpacking')
+ROOT_OUTPUT_DIR       = 'ayfieExpress_output'
+UNZIP_DIR             = join(ROOT_OUTPUT_DIR, 'unzipDir')
+DATA_DIR              = join(ROOT_OUTPUT_DIR, 'dataDir')
+LOG_DIR               = join(ROOT_OUTPUT_DIR, 'log')
+DOWNLOAD_DIR          = join(ROOT_OUTPUT_DIR, 'inspectorDownload')
+TMP_LOG_UNPACK_DIR    = join(ROOT_OUTPUT_DIR, 'tempLogUnpacking')
 
 OFF_LINE              = "off-line"
 OVERRIDE_CONFIG       = "override_config"
@@ -135,7 +125,6 @@ FILE_SIGNATURES = {
     BOM_UTF16_BE: BOM_UTF16_BE,
     BOM_UTF32_LE: BOM_UTF32_LE,
     BOM_UTF32_BE: BOM_UTF32_BE,
-    b'{"': JSON_LINES
 }
 
 BOM_MARKS_NAMES = {
@@ -171,7 +160,60 @@ COL_STATE              = 'col_state'
 CLASSIFIER_STATE       = 'classifier_state'
 WAIT_TYPES             = [COL_EVENT, COL_STATE, CLASSIFIER_STATE]
 
+OP_INSTALL             = "install"
+OP_START               = "start"
+OP_STOP                = "stop" 
+OP_UNINSTALL           = "uninstall"
+OP_PRUNE_SYSTEM        = "prune"
+OP_GEN_DOT_ENV         = "gen_dot_env"
+OPERATIONS             = [OP_INSTALL, OP_START, OP_STOP, OP_UNINSTALL, OP_PRUNE_SYSTEM, OP_GEN_DOT_ENV]
 
+MEM_LIMITS_64_AND_128_GB_RAM = {
+    "1": [
+        ["AYFIE_MEM_LIMIT",         42, 84],
+        ["ELASTICSEARCH_MEM_LIMIT", 10, 20],
+        ["EXTRACTION_MEM_LIMIT",     4,  8],
+        ["SUGGEST_MEM_LIMIT",        5, 10],
+    ],
+    "2": [
+        ["API_MEM_LIMIT",           14, 18],
+        ["ELASTICSEARCH_MEM_LIMIT",  9, 16],
+        ["ELASTICSEARCH_MX_HEAP",    6, 10],
+        ["SPARK_DRIVER_MEMORY",      6, 10],
+        ["SPARK_WORKER_MEM_LIMIT",  28, 60],
+        ["SPARK_WORKER_MEMORY",     24, 56],    
+        ["SPARK_EXECUTOR_MEMORY",   24, 56],
+        ["RECOGNITION_MEM_LIMIT",    4,  8],
+        ["RECOGNITION_MX_HEAP",      2,  6] 
+    ] 
+} 
+
+NON_ACTION_CONFIG      = ["server", 'port', 'col_name', 'config_source', 'silent_mode']
+OFFLINE_ACTIONS        = ["operational", "reporting"]   
+
+SYSCTL_SETTINGS        = ["vm.max_map_count=262144", "vm.swappiness=1"]
+SYSCTL_PATH            = "/etc/sysctl.conf"
+
+OS_AUTO                = "auto"
+OS_WINDOWS             = "windows"
+OS_LINUX               = "linux"
+SUPPORTED_OS           = [OS_AUTO, OS_WINDOWS, OS_LINUX]
+
+LINUX_DOCKER_REGISTRY  = "quay.io" 
+WIN_DOCKER_REGISTRY    = "index.docker.io" 
+PWD_START_STOP_TOKEN   = "$#$"
+
+def get_host_os():
+    return operating_system().lower()
+
+host_os = get_host_os()
+if host_os == OS_LINUX:
+    from grp import getgrnam, getgrgid
+    from pwd import getpwnam, getpwall
+    from os import setuid, getuid, geteuid
+elif host_os == OS_WINDOWS:
+    from ctypes import windll
+    
 class HTTPError(IOError):
     pass
 
@@ -186,7 +228,29 @@ class DataFormatError(Exception):
     
 class BadStateError(Exception):
     pass
+    
+class BadZipFileError(Exception):
+    pass
+    
+class CommandLineError(Exception):
+    pass
+    
+class EngineDown(Exception):
+    pass
+    
+class UnknownIssue(Exception):
+    pass
 
+if not exists(LOG_DIR):
+    makedirs(LOG_DIR)
+log = logging.getLogger(__name__)
+logging.basicConfig(
+    format = '%(asctime)s %(levelname)s: %(message)s, %(filename)s(%(lineno)d)',
+    datefmt = '%m/%d/%Y %H:%M:%S',
+    filename = join(LOG_DIR, basename(basename(sys.argv[0])).split('.')[0] + ".log"), 
+    level = logging.DEBUG
+)
+    
 def pretty_print(json):
     if type(json) is str:
         if not len(json):
@@ -194,6 +258,285 @@ def pretty_print(json):
         json = loads(json)
     print(dumps(json, indent=4))
     
+def replace_passwords(string):
+    string_to_show = string
+    string_fragments = string.split(PWD_START_STOP_TOKEN)
+    if len(string_fragments) == 3:
+        string_to_show = string_fragments[0] + "******" + string_fragments[2]
+    string_to_use = "".join(string_fragments)
+    return string_to_show, string_to_use
+
+def execute(cmd_line_str, dumpfile=None, timeout=None, continue_on_timeout=True, return_response=False):
+    stdout=PIPE
+    stderr=STDOUT
+    if dumpfile:
+        stdout=dumpfile
+        stderr=dumpfile
+    process = None
+    string_to_show, string_to_use = replace_passwords(cmd_line_str)
+    log.debug(string_to_show)
+    try:
+        process = run(string_to_use, timeout=timeout, shell=True, universal_newlines=True, stdout=stdout, stderr=stderr)
+    except TimeoutExpired:
+        log.warning(f'Command "{cmd_line_str}" timed out after {timeout} seconds.')
+        if not continue_on_timeout:
+            raise 
+    if process:
+        response = process.stdout.strip() if process.stdout else ""
+        if len(response):
+            log.debug(f"{response}".replace('\n', '\\n'))
+        if process.returncode != 0:
+            raise CommandLineError(f"Error (code: {process.returncode}): {response}")
+        if return_response:
+            return response
+    else:
+        raise UnknownIssue("No process object")
+
+def install_python_modules(modules):
+    first_time = True
+    for module in modules:
+        try:
+            __import__(module)
+        except ModuleNotFoundError:
+            if first_time:
+                if get_host_os() == OS_LINUX:
+                    execute(f"umask 022")
+                first_time = False
+                try:
+                    execute(f"{sys.executable} -m pip install --upgrade pip")
+                except:
+                    pass
+            try:
+                execute(f"{sys.executable} -m pip install {module}")  
+                __import__(module)
+            except:
+                print(f"Failed to autoamtatically install one or more of these Python modules: {', '.join(modules)}")
+                raise
+           
+install_python_modules(['requests', 'numpy', 'PyPDF2', 'psutil']) 
+import requests
+import numpy
+import PyPDF2
+import psutil
+    
+@contextlib.contextmanager
+def change_dir(dir):
+    previous_dir = getcwd()
+    chdir(dir)
+    yield
+    chdir(previous_dir)  
+
+def get_unit_adapted_byte_figure(number_of_bytes):
+    if number_of_bytes >= 1024 * 1024 * 1024 * 1024:
+        number_of_bytes /= 1024 * 1024 * 1024 * 1024
+        unit = "TB"
+    if number_of_bytes >= 1024 * 1024 * 1024:
+        number_of_bytes /= 1024 * 1024 * 1024
+        unit = "GB"
+    elif number_of_bytes >= 1024 * 1024:
+        number_of_bytes /= 1024 * 1024
+        unit = "MB"
+    elif number_of_bytes >= 1024:
+        number_of_bytes /= 1024
+        unit = "KB"
+    else:
+        return number_of_bytes, "bytes"
+    return round(number_of_bytes, 1), unit    
+    
+    
+class WebContent():
+        
+    def download(self, url, directory):
+        response = requests.get(url, allow_redirects=True)
+        if response.status_code != 200:
+            raise HTTPError(f'Downloading "{url}" failed with HTTP error code {response.status_code}')
+        filename = self._get_filename_from_response(response)
+        if not filename:
+            filename = url.split('/')[-1]
+        path = join(directory, filename)
+        with open(path, 'wb') as f:
+            f.write(response.content)
+        return path
+                
+    def _get_filename_from_response(self, response):
+        content_disposition = response.headers.get('content-disposition')
+        if content_disposition:
+            filenames = re.findall('filename=(.+)', content_disposition)
+            if len(filenames) > 0:
+                return filenames[0]
+        return None
+
+class FileHandlingTools():
+ 
+    def get_file_type(self, file_path):
+        detected_encoding = None
+        if isfile(file_path):
+            extension = splitext(file_path)[-1].lower()
+            if is_zipfile(file_path):
+                if extension == ".docx":
+                    return WORD_DOC, detected_encoding
+                elif extension == ".xlsx":
+                    return XLSX, detected_encoding
+                return ZIP_FILE, detected_encoding
+            elif is_tarfile(file_path):
+                return TAR_FILE, detected_encoding
+            else:
+                with open(file_path, 'rb') as f:
+                    start_byte_sequence = f.read(100)
+                for pattern in FILE_SIGNATURES.keys():
+                    if start_byte_sequence.startswith(pattern):
+                        if pattern in TEXT_ENCODINGS:
+                            detected_encoding = BOM_MARKS_NAMES[pattern]
+                            log.debug(f"'{file_path}' encoding auto detected to '{detected_encoding}'")
+                            start_byte_sequence = start_byte_sequence[len(pattern):]
+                            return self._get_text_format_type(start_byte_sequence, extension), detected_encoding
+                        return FILE_SIGNATURES[pattern], detected_encoding
+                return self._get_text_format_type(start_byte_sequence, extension), detected_encoding
+        return None, detected_encoding
+
+    def _get_text_format_type(self, start_byte_sequence, extension):
+        start_char_sequence = start_byte_sequence.decode('iso-8859-1')
+        org_start_char_sequence = start_char_sequence
+        for char in [' ', '\n', '\r', '\t']:
+            start_char_sequence = start_char_sequence.replace(char, '')
+        char_patterns = {
+            '{"documents":[{': AYFIE,
+            '{"query":{'     : AYFIE_RESULT,
+            '{"id":'         : JSON_LINES
+        }
+        for pattern in char_patterns.keys():
+            if start_char_sequence.startswith(pattern):
+                return char_patterns[pattern]
+            
+        if start_char_sequence.startswith('{') and extension == '.json':
+            return JSON
+        elif extension == '.txt':
+            return TXT
+        elif extension == '.csv' or extension == '.tsv':
+            try:
+                dialect = csv.Sniffer().sniff(org_start_char_sequence)
+                return CSV
+            except:
+                return None
+        return None
+        
+    def _get_output_file_path(self, input_file_path, zip_file_extension, unzip_dir):
+        return join(unzip_dir, basename(input_file_path).replace(f".{zip_file_extension}", ""))
+
+    def unzip(self, file_path, unzip_dir, file_type=None):
+        if not file_type:
+            file_type, encoding = self.get_file_type(file_path)
+        if file_type not in ZIP_FILE_TYPES:
+            return False
+        if not unzip_dir:
+            raise ValueError("No unzip directory is given")
+        self.recreate_directory(unzip_dir)
+        if file_type == ZIP_FILE:
+            with ZipFile(file_path, 'r') as z:
+                z.extractall(unzip_dir)
+        elif file_type == TAR_FILE:
+            with tarfile_open(file_path) as tar:
+                tar.extractall(unzip_dir)
+        elif file_type == GZ_FILE:
+            output_file_path = self._get_output_file_path(file_path, "gz", unzip_dir)
+            with open(output_file_path, 'wb') as f, gzip_open(file_path, 'rb') as z:
+                f.write(z.read())
+        elif file_type == BZ2_FILE:
+            output_file_path = self._get_output_file_path(file_path, "bz2", unzip_dir)
+            with open(output_file_path, 'wb') as f, open(file_path,'rb') as z:
+                f.write(decompress(z.read()))
+        elif file_type == _7Z_FILE:
+            log.info(f"Skipping '{file_path}' - 7z decompression still not implemented")
+        elif file_type == RAR_FILE:
+            log.info(f"Skipping '{file_path}' - .rar file decompression still not implemented")
+        else:
+            raise ValueError(f'Unknown zip file type "{zip_file_type}"')
+        return True
+             
+    def delete_directory(self, dir_path): 
+        tries = 0
+        while exists(dir_path):
+            if tries > 5:
+                raise IOError(f"Failed to delete directory '{dir_path}'")    
+            delete_dir_tree(dir_path)
+            tries += 1
+            sleep(5 * tries)
+
+    def recreate_directory(self, dir_path):
+        self.delete_directory(dir_path)
+        makedirs(dir_path)
+        if not exists(dir_path):
+            raise IOError("Failed to create directory '{dir_path}'") 
+
+    def get_next_file(self, root, dir_filter=None, extension_filter=None, min_size=0, max_size=0):
+        items = listdir(root)
+        files = [item for item in items if isfile(join(root, item))]
+        dirs = [item for item in items if isdir(join(root, item))]
+        for f in files:
+            file_path = join(root, f)
+            if min_size or max_size: 
+                file_size = stat(file_path).st_size
+                if min_size and file_size < min_size:
+                    continue
+                if max_size and file_size > max_size:
+                    continue
+            path_without_extension, extension = splitext(f)
+            if extension_filter:
+                if extension in extension_filter:
+                    yield file_path
+            else:
+                yield file_path
+        for dir in dirs:
+            if dir_filter:
+                if dir in dir_filter:
+                    continue
+            for f in self.get_next_file(join(root, dir), dir_filter, extension_filter, min_size, max_size):
+                yield f
+
+    def __write_fragment_to_file(self, dir_name, fragment_name, fragment_count, fragment_lines):
+        with open(join(dir_name, f"{fragment_name}_{fragment_count}"), "wb") as f:
+            f.write(''.join(fragment_lines).encode('utf-8')) 
+            
+    def split_files(self, dir_path, lines_per_fragment=0, max_fragments=0):
+        for log_file in self.get_next_file(dir_path):
+            self.split_file(log_file, lines_per_fragment, max_fragments)            
+                
+    def split_file(self, file_path, lines_per_fragment=0, max_fragments=0):
+        lines_per_fragment = int(lines_per_fragment)
+        max_fragments = int(max_fragments)
+        line_count = 0
+        fragment_count = 0
+        fragment_name = basename(file_path)
+        dir_name = dirname(file_path)
+        fragment_lines = []
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                fragment_lines.append(line)
+                if lines_per_fragment and line_count >= lines_per_fragment - 1:
+                    self.__write_fragment_to_file(dir_name, fragment_name, fragment_count, fragment_lines)                    
+                    line_count = 0
+                    fragment_lines = []
+                    fragment_count += 1
+                    if max_fragments and fragment_count >= max_fragments:
+                        return
+                else:
+                    line_count += 1
+        if line_count > 0: 
+            self.__write_fragment_to_file(dir_name, fragment_name, fragment_count, fragment_lines)
+            
+    def get_random_path(self, path, name_prefix=""):
+        if name_prefix:
+            name_prefix += "-"
+        return join(path, f"{name_prefix}{str(int(random() * 10000000))}")
+        
+    def get_absolute_path(self, path, reference_path):
+        if path:
+            if path.startswith("http://") or path.startswith("https://"):
+                return path
+            if not isabs(path):
+                return join(path_split(reference_path)[0], path)  
+        return path
+
     
 class SearchEngine:
 
@@ -340,7 +683,7 @@ class SearchEngine:
         endpoint = self._get_endpoint(path, parameters)
         log.debug(self._gen_req_log_msg(verb, endpoint, data, self.headers))
         if data and verb == "POST" and "batches" in endpoint:
-            with open("data.json", 'wb') as f:
+            with open(join(ROOT_OUTPUT_DIR, "last_batch.json"), 'wb') as f:
                 f.write(dumps(data).encode('utf-8'))
 
         tries = 0
@@ -348,6 +691,7 @@ class SearchEngine:
             if tries > MAX_CONNECTION_RETRIES:
                 break
             tries += 1
+            
             try:
                 response = request_function(endpoint, json=data, headers=self.headers)
                 break
@@ -407,6 +751,9 @@ class SearchEngine:
 
     def _wait_for_collection_to_disappear(self, col_id, timeout=120):
         sleep(1)
+        
+    def engine_is_healty(self):
+        raise NotImplementedError
               
     ######### Collection Management #########
 
@@ -644,6 +991,18 @@ class Inspector(SearchEngine):
   
     def __init__(self, server, port, api_version='v1'):
         SearchEngine.__init__(self, server, port,  f"ayfie/{api_version}", {'Content-Type':'application/hal+json'})
+        
+    def engine_is_healty(self):
+        try:
+            response = self._execute('health', HTTP_GET)
+        except HTTPError:
+            return False
+        if response:
+            if (response['collections']['healthy'] and response['elasticsearch']['healthy'] 
+                                                   and response['elasticsearch']['status'] == 'GREEN'
+                                                   and response['initialization']['healthy']):
+                return True
+        return False
 
     def _wait_for(self, wait_type, id, good_value, bad_value=None, timeout=None):
         if not wait_type in WAIT_TYPES:
@@ -828,7 +1187,19 @@ class Inspector(SearchEngine):
             if number_of_docs == 0:
                 break
             yield page
- 
+            
+    ######### Suggest #########
+
+    def get_query_suggestion(self, col_id, query, offset=None, limit=None, filter=None):
+        parameters = f"query={query}"
+        if offset != None:
+            parameters += f"&offset={offset}"
+        if limit != None:
+            parameters += f"&limit={limit}"
+        if filter:
+            parameters += f"&filter={filter}"
+        return self._execute(f'collections/{col_id}/suggestions?{parameters}', HTTP_GET)      
+            
     ######### Jobs #########
 
     def create_job(self, config):
@@ -1026,199 +1397,6 @@ class Inspector(SearchEngine):
  
     def wait_for_classifier_to_be_trained(self, classifier_name):
         self._wait_for("classifier_state", classifier_name, "TRAINED", "INVALID")
-        
-        
-class WebContent():
-        
-    def download(self, url, directory):
-        response = requests.get(url, allow_redirects=True)
-        filename = self._get_filename_from_response(response)
-        if not filename:
-            filename = url.split('/')[-1]
-        path = join(directory, filename)
-        with open(path, 'wb') as f:
-            f.write(response.content)
-        return path
-                
-    def _get_filename_from_response(self, response):
-        content_disposition = response.headers.get('content-disposition')
-        if content_disposition:
-            filenames = re.findall('filename=(.+)', content_disposition)
-            if len(filenames) > 0:
-                return filenames[0]
-        return None
-
-
-class FileHandlingTools():
- 
-    def get_file_type(self, file_path):
-        detected_encoding = None
-        if isfile(file_path):
-            extension = splitext(file_path)[-1].lower()
-            if is_zipfile(file_path):
-                if extension == ".docx":
-                    return WORD_DOC, detected_encoding
-                elif extension == ".xlsx":
-                    return XLSX, detected_encoding
-                return ZIP_FILE, detected_encoding
-            elif is_tarfile(file_path):
-                return TAR_FILE, detected_encoding
-            else:
-                with open(file_path, 'rb') as f:
-                    start_byte_sequence = f.read(100)
-                for pattern in FILE_SIGNATURES.keys():
-                    if start_byte_sequence.startswith(pattern):
-                        if pattern in TEXT_ENCODINGS:
-                            detected_encoding = BOM_MARKS_NAMES[pattern]
-                            log.debug(f"'{file_path}' encoding auto detected to '{detected_encoding}'")
-                            start_byte_sequence = start_byte_sequence[len(pattern):]
-                            return self.__get_text_format_type(start_byte_sequence, extension), detected_encoding
-                        return FILE_SIGNATURES[pattern], detected_encoding
-                return self.__get_text_format_type(start_byte_sequence, extension), detected_encoding
-        return None, detected_encoding
-
-    def __get_text_format_type(self, start_byte_sequence, extension):
-        start_char_sequence = start_byte_sequence.decode('iso-8859-1')
-        org_start_char_sequence = start_char_sequence
-        for char in [' ', '\n', '\r', '\t']:
-            start_char_sequence = start_char_sequence.replace(char, '')
-        char_patterns = {
-            '{"documents":[{': 'ayfie',
-            '{"query":{': 'ayfie_result'
-        }
-        for pattern in char_patterns.keys():
-            if start_char_sequence.startswith(pattern):
-                return char_patterns[pattern]
-            
-        if start_char_sequence.startswith('{') and extension == '.json':
-            return JSON
-        elif extension == '.txt':
-            return TXT
-        elif extension == '.csv' or extension == '.tsv':
-            try:
-                dialect = csv.Sniffer().sniff(org_start_char_sequence)
-                return CSV
-            except:
-                return None
-        return None
-        
-    def _get_output_file_path(self, input_file_path, zip_file_extension, unzip_dir):
-        return join(unzip_dir, basename(input_file_path).replace(f".{zip_file_extension}", ""))
-    
-    def unzip(self, file_type, file_path, unzip_dir):
-        if file_type not in ZIP_FILE_TYPES:
-            return False
-        if not unzip_dir:
-            raise ValueError("No unzip directory is given")
-        self.recreate_directory(unzip_dir)
-        if file_type == ZIP_FILE:
-            with ZipFile(file_path, 'r') as z:
-                z.extractall(unzip_dir)
-        elif file_type == TAR_FILE:
-            with tarfile_open(file_path) as tar:
-                tar.extractall(unzip_dir)
-        elif file_type == GZ_FILE:
-            output_file_path = self._get_output_file_path(file_path, "gz", unzip_dir)
-            with open(output_file_path, 'wb') as f, gzip_open(file_path, 'rb') as z:
-                f.write(z.read())
-        elif file_type == BZ2_FILE:
-            output_file_path = self._get_output_file_path(file_path, "bz2", unzip_dir)
-            with open(output_file_path, 'wb') as f, open(file_path,'rb') as z:
-                f.write(decompress(z.read()))
-        elif file_type == _7Z_FILE:
-            log.info(f"Skipping '{file_path}' - 7z decompression still not implemented")
-        elif file_type == RAR_FILE:
-            log.info(f"Skipping '{file_path}' - .rar file decompression still not implemented")
-            if False:  # What follows is part of future .rar file support
-                if not rar_zip_format_is_suported:
-                    raise ModuleNotFoundError('run "pip install rarfile" and install unrar executable and add to PATH')
-                rarfile.UNRAR_TOOL = UNRAR_TOOL_LINUX
-                if operating_system() == "Windows":
-                    rarfile.UNRAR_TOOL = UNRAR_TOOL_WINDOWS
-                rf = rarfile.RarFile(file_path)
-                for z in rf.infolist():
-                    output_file_path = self._get_output_file_path(z.filename, "", unzip_dir)
-                    with open(output_file_path, 'wb') as f:
-                        f.write(rf.read(z))
-        else:
-            raise ValueError(f'Unknown zip file type "{zip_file_type}"')
-        return True
-             
-    def delete_directory(self, dir_path): 
-        tries = 0
-        while exists(dir_path):
-            if tries > 5:
-                raise IOError(f"Failed to delete directory '{dir_path}'")    
-            delete_dir_tree(dir_path)
-            tries += 1
-            sleep(5 * tries)
-
-    def recreate_directory(self, dir_path):
-        self.delete_directory(dir_path)
-        makedirs(dir_path)
-        if not exists(dir_path):
-            raise IOError("Failed to create directory '{dir_path}'") 
-
-    def get_next_file(self, root, dir_filter=None, extension_filter=None, min_size=0, max_size=0):
-        items = listdir(root)
-        files = [item for item in items if isfile(join(root, item))]
-        dirs = [item for item in items if isdir(join(root, item))]
-        for f in files:
-            file_path = join(root, f)
-            if min_size or max_size: 
-                file_size = stat(file_path).st_size
-                if min_size and file_size < min_size:
-                    continue
-                if max_size and file_size > max_size:
-                    continue
-            path_without_extension, extension = splitext(f)
-            if extension_filter:
-                if extension in extension_filter:
-                    yield file_path
-            else:
-                yield file_path
-        for dir in dirs:
-            if dir_filter:
-                if dir in dir_filter:
-                    continue
-            for f in self.get_next_file(join(root, dir), dir_filter, extension_filter, min_size, max_size):
-                yield f
-
-    def __write_fragment_to_file(self, dir_name, fragment_name, fragment_count, fragment_lines):
-        with open(join(dir_name, f"{fragment_name}_{fragment_count}"), "wb") as f:
-            f.write(''.join(fragment_lines).encode('utf-8')) 
-            
-    def split_files(self, dir_path, lines_per_fragment=0, max_fragments=0):
-        for log_file in self.get_next_file(dir_path):
-            self.split_file(log_file, lines_per_fragment, max_fragments)            
-                
-    def split_file(self, file_path, lines_per_fragment=0, max_fragments=0):
-        lines_per_fragment = int(lines_per_fragment)
-        max_fragments = int(max_fragments)
-        line_count = 0
-        fragment_count = 0
-        fragment_name = basename(file_path)
-        dir_name = dirname(file_path)
-        fragment_lines = []
-        with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                fragment_lines.append(line)
-                if lines_per_fragment and line_count >= lines_per_fragment - 1:
-                    self.__write_fragment_to_file(dir_name, fragment_name, fragment_count, fragment_lines)                    
-                    line_count = 0
-                    fragment_lines = []
-                    fragment_count += 1
-                    if max_fragments and fragment_count >= max_fragments:
-                        return
-                else:
-                    line_count += 1
-        if line_count > 0: 
-            self.__write_fragment_to_file(dir_name, fragment_name, fragment_count, fragment_lines)
-            
-    def get_random_path(self, path, name_prefix=""):
-        if name_prefix:
-            name_prefix += "-"
-        return join(path, f"{name_prefix}{str(int(random() * 10000000))}")
          
 
 class DataSource():
@@ -1266,9 +1444,7 @@ class DataSource():
     def _unzip(self, file_type, file_path, unzip_dir):
         return FileHandlingTools().unzip(file_type, file_path, unzip_dir)
 
-    def _convert_pdf_to_text(self, file_path):
-        if not pdf_is_suported:
-            raise ModuleNotFoundError('run "pip install PyPDF2"')
+    def _convert_pdf_to_text(self, file_path):                  
         with open(file_path, 'rb') as f:
             pdf = PyPDF2.PdfFileReader(f)
             pages = []
@@ -1343,6 +1519,7 @@ class DataSource():
             else:
                 doc = fields
             doc["id"] = row[mappings['id']]
+            doc = self._add_preprocess_field(doc)
             yield doc
  
     def _get_document(self, file_path, auto_detected_file_type):
@@ -1513,7 +1690,7 @@ class DataSource():
         try:
             FileHandlingTools().recreate_directory(unzip_dir)
             log.debug(f"Created output directory '{unzip_dir}' for zip file '{file_path}'")
-            self._unzip(file_type, file_path, unzip_dir)
+            self._unzip(file_path, unzip_dir, file_type)
             for unzipped_file in FileHandlingTools().get_next_file(unzip_dir, None, self.config.file_extension_filter, 
                                                                    self.config.min_doc_size, self.config.max_doc_size):
                 file_type, self.detected_encoding = self._get_file_type(unzipped_file)
@@ -1585,6 +1762,14 @@ class DataSource():
             return True
         return False
         
+    def _add_preprocess_field(self, document):
+        if self.config.preprocess:
+            if self.config.preprocess in PREPROCESS_TYPES:
+                document["fields"]['preprocess'] = self.config.preprocess
+            else:
+                raise ConfigError(f"Unknown preprocess type {preprocess}")
+        return document
+                
     def _construct_doc(self, id, content):
         if self._drop_due_to_size(id, content):
             return None
@@ -1602,11 +1787,7 @@ class DataSource():
                 doc["fields"]['documentType'] = self.config.document_type
             else:
                 raise ConfigError(f"Unknown document type {document_type}")
-        if self.config.preprocess:
-            if self.config.preprocess in PREPROCESS_TYPES:
-                doc["fields"]['preprocess'] = self.config.preprocess
-            else:
-                raise ConfigError(f"Unknown preprocess type {preprocess}")
+        doc = self._add_preprocess_field(doc)
         if self.config.email_address_separator:  
             doc["fields"]['emailAddressSeparator'] = self.config.email_address_separator
         return doc
@@ -1645,6 +1826,9 @@ class SolrDataSource(DataSource):
 
         
 class EngineConnector():
+
+    def _init(self):
+        pass
     
     def __init__(self, config, data_source=None):
         self.config = config
@@ -1658,12 +1842,13 @@ class EngineConnector():
             self.engine = Elasticsearch(*args)
         else:
             raise ValueError(f"Engine {self.config.engine} is not supported")
+        self._init()
                  
     def _print(self, message, end='\n'):
         if not self.config.silent_mode:
             print(message, end=end)
             
-    def get_doc_ids(self, col_id, query="*", limit=None, random_order=False, filters=[]):
+    def get_doc_ids(self, col_id, query="", limit=None, random_order=False, filters=[]):
         if not limit:
             limit = "ALL"
         docs_per_request = 10000
@@ -1686,12 +1871,388 @@ class EngineConnector():
             shuffle(all_ids)
         return all_ids
 
-     
+        
+class Installer():
+
+    def __init__(self, url, download_dir, install_dir, docker_registry, dot_env_content=None, docker_compose_custom_content=None):
+        self.url = url
+        self.download_dir = download_dir
+        self.install_dir = install_dir
+        self.dot_env_content = dot_env_content
+        self.docker_registry = docker_registry
+        self.docker_compose_custom_content = docker_compose_custom_content
+       
+    def prerequisites(self, groups):
+        raise NotImplementedError
+        
+    def install(self):
+        raise NotImplementedError
+ 
+ 
+class InspectorInstaller(Installer):
+
+    def prerequisites(self, groups):
+        self._prepare_user(groups)
+        self._prepare_host()
+        if not self._docker_is_installed():
+            self._install_docker()
+            self._restart_server()
+        self._start_docker()       
+        self._install_docker_compose()        
+        
+    def install(self):
+        self._download_and_unzip_inspector()
+        self._create_dot_env_file()
+        self._create_docker_application_custom_file()
+        self._post_install_operations()
+
+    def _docker_is_installed(self):
+        response = execute("docker -v", return_response=True)
+        if response.startswith("Docker version"):
+            return True
+        return False
+        
+    def _install_docker(self):
+        raise NotImplementedError
+ 
+    def _create_dot_env_file(self):
+        if self.dot_env_content:
+            with change_dir(self.install_dir):
+                with open(".env", "w") as f:
+                    f.write(self.dot_env_content)
+                    
+    def _create_docker_application_custom_file(self):
+        if self.docker_compose_custom_content:
+            with change_dir(self.install_dir):
+                with open("docker-compose-custom.yml", "w") as f:
+                    f.write(self.docker_compose_custom_content)
+
+    def _download_and_unzip_inspector(self):
+        zipped_installer = WebContent().download(self.url, self.download_dir)
+        fht = FileHandlingTools()
+        if not fht.unzip(zipped_installer, self.install_dir):
+            raise BadZipFileError(f'File "{zipped_installer}" is not a zip file')
+            
+    def _post_install_operations(self):
+        raise NotImplementedError
+
+    def _user_already_exists(self, user):
+        raise NotImplementedError 
+            
+    def _group_already_exists(self, group):
+        raise NotImplementedError 
+        
+    def _add_user_to_user_groups(self, user, groups):     
+        raise NotImplementedError
+            
+    def _is_running_as_root_or_in_elevated_mode(self):
+        raise NotImplementedError
+            
+    def _prepare_user(self, groups):
+        if not self._is_running_as_root_or_in_elevated_mode():
+            raise ConfigError(f"The installation feature require that one run as root (sudo)/admin") 
+        self._add_user_to_user_groups(getuser(), groups)
+            
+    def _update_config_file(self, filepath, expression):
+        settings = [expression]
+        with open(filepath, "r") as f:
+            for line in f.read().split('\n'):
+                if line.startswith(expression.split('=')[0]):
+                    continue
+                else:
+                    settings.append(line)
+        with open(filepath, "w") as f:
+            f.write('\n'.join(settings))
+       
+    def _install_docker_compose(self, version=None):
+        raise NotImplementedError    
+
+ 
+class LinuxInspectorInstaller(InspectorInstaller):
+
+    def _prepare_host(self):
+        for expression in SYSCTL_SETTINGS:
+            self._update_config_file(SYSCTL_PATH, expression)
+        execute("sysctl -p")
+        
+    def _install_docker(self):
+        pass
+        
+    def _restart_server(self):    
+        pass
+        
+    def _start_docker(self):
+        execute("service docker start")
+        execute("systemctl enable docker")
+        
+    def _install_docker_compose(self, version=None):
+        ver = "1.24.0"
+        if version:
+            ver = version
+        link = f"https://github.com/docker/compose/releases/download/{ver}/docker-compose-$(uname -s)-$(uname -m)"
+        execute(f'curl -L "{link}" -o /usr/local/bin/docker-compose') 
+        
+    def _post_install_operations(self): 
+        with change_dir(self.install_dir):
+            for item in ["start-ayfie.sh", "stop-ayfie.sh", "/usr/local/bin/docker-compose"]: 
+                execute(f"chmod +x {item}")
+                
+    def _user_already_exists(self, user):
+        try:
+            getpwnam(user)
+            log.debug(f'User "{user}" exists')
+            return True
+        except KeyError:
+            log.debug(f'User "{user}" does not exists')
+            return False
+            
+    def _group_already_exists(self, group):
+        try:
+            getgrnam(group)
+            log.debug(f'User group "{group}" exists')
+            return True
+        except KeyError:
+            log.debug(f'User group "{group}" does not exist')
+            return False
+
+    def _add_user_to_user_groups(self, user, groups):
+        for group in groups:
+            if not self._group_already_exists(group):
+                execute(f"groupadd {group}")
+            execute(f"usermod -a -G {group} {user}") 
+
+    def _is_running_as_root_or_in_elevated_mode(self):
+        if geteuid() == 0:  
+            return True
+        else:
+            return False          
+
+            
+class WindowsInspectorInstaller(InspectorInstaller):  
+
+    def _prepare_host(self):
+        pass
+        
+    def _install_docker(self):
+        execute("powershell.exe Install-Module DockerMsftProvider -Force")
+        execute("powershell.exe Install-Package Docker -ProviderName DockerMsftProvider -Force")
+       
+    def _start_docker(self):
+        execute("powershell.exe Start-Service Docker")
+        
+    def _restart_server(self):    
+        execute("powershell.exe Restart-Computer")
+        
+    def _install_docker_compose(self, version=None):
+        execute("powershell.exe Set-ExecutionPolicy Bypass -Scope Process -Force; iex ((new-object net.webclient).DownloadString('https://chocolatey.org/install.ps1'))")
+        execute("choco install docker-compose -y")
+        
+    def _post_install_operations(self): 
+        pass
+        
+    def _user_already_exists(self, user):
+        raise NotImplementedError
+        
+    def _group_already_exists(self, group):
+        raise NotImplementedError
+        
+    def _add_user_to_user_groups(self, user, groups):
+        pass
+            
+    def _is_running_as_root_or_in_elevated_mode(self):
+        if windll.shell32.IsUserAnAdmin() != 0:  
+            return True
+        else:
+            return False   
+        
+
 class Operational(EngineConnector):
 
-    def do_operation(self):
-        raise NotImplementedError("Class Operational has yet not been implemented")
+    def _init(self):
+        if self.config.install_dir:
+            self.install_dir = self.config.install_dir
+        else:
+            try:
+                self.install_dir = self.install_dir = self._extract_version_number()
+            except ValueError:
+                self.install_dir = None
+        self.host_os = get_host_os()
+        if not self.host_os in [OS_WINDOWS, OS_LINUX]:
+            raise OSError(f"'{os}' is not a supported operation system")
+        self.docker_registry = None
+        self.script_extension = None
+        if self.host_os == OS_LINUX:
+            self.docker_registry = LINUX_DOCKER_REGISTRY
+            self.script_extension = "sh"
+        elif self.host_os == OS_WINDOWS:
+            self.docker_registry = WIN_DOCKER_REGISTRY 
+            self.script_extension = "cmd"
+        
+    def _inspector_operation(self, operation):
+        with change_dir(self.install_dir):
+            execute(join(".", f"{operation}-ayfie.{self.script_extension}"))
 
+    def _do_docker_login(self):
+        if self.config.docker_registry:
+            if not ("user" in self.config.docker_registry and "password" in self.config.docker_registry):
+                raise ValueError(f"Bad account data: {str(self.docker_registry)}")
+        user = self.config.docker_registry["user"]
+        password = PWD_START_STOP_TOKEN + self.config.docker_registry["password"] + PWD_START_STOP_TOKEN
+        execute(f'docker login -u "{user}" -p "{password}" {self.docker_registry}')
+                 
+    def start_inspector(self): 
+        self._do_docker_login()      
+        self._inspector_operation("start")
+            
+    def stop_inspector(self): 
+        self._inspector_operation("stop")
+     
+    def uninstall_inspector(self):
+        FileHandlingTools().delete_directory(self.install_dir) 
+
+    def prune_system(self): 
+        execute("docker system prune --volumes --force", timeout=60)  
+
+    def _gen_mem_limits(self):
+        main_version = self._extract_version_number().split(".")[0]
+        if not main_version in ["1", "2"]:
+            raise ValueError(f"There is no main version number '{str(main_version)}' of the ayfie Inspector")
+        mem_limits = []
+        for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
+            coefs, _, _, _, _ = numpy.polyfit([64, 128], [limit_64_ram, limit_128_ram], deg=1, full=True)
+            mem_limits.append(f"{variable}={int(round(self.config.ram_on_host * coefs[0] + coefs[1], 0))}G")
+        return "\n".join(mem_limits)
+        
+    def _retrieve_mem_limits_from_config(self, config_file_path):
+        settings = []
+        for line in open(config_file_path, "r").read().split('\n'):
+            m = match("^.*- (.+)=\$\{.+:-(.+G)|^.*mem_limit: \$\{(.+):-(.+G)\}", line)
+            if m:
+                settings.append('='.join([x for x in m.groups() if x]))
+        return list(set(settings))
+         
+    def _extract_version_number(self):
+        if self.config.version:
+            return self.config.version
+        err_msg = "Version number not provided"
+        if self.config.installer:
+            m = match("^.*([1-2]\.[0-9]+.[0-9]+).*$", self.config.installer)
+            if m:
+                return m.group(1)
+            err_msg += " and unable to extract the version from the installer url."
+        else:
+            err_msg += " and also no installer url to extract the version info from."
+        raise ValueError(err_msg)
+        
+    def _get_zip_file_os_string(self):
+        if not self.config.os in SUPPORTED_OS:
+            raise ValueError("f{self.config.os} is not a supported OS")
+        if self.config.os:
+            if self.config.os == OS_AUTO:
+                if self.host_os == OS_WINDOWS:
+                    return OS_WINDOWS
+                elif self.host_os == OS_LINUX:
+                    return ""
+                return self.config.os
+            return self.config.os
+        m = re.match(f"^.*({OS_WINDOWS}|{OS_LINUX}).*$", self.config.installer)
+        if m:
+            return m.group(1)
+        raise AutoDetectionError("Unable to obtain OS")
+        
+    def _get_installer_zip_file(self):
+        if self.config.installer:
+            return self.config.installer
+        os = self._get_zip_file_os_string()
+        os = os + "-" if os else ""
+        version = self._extract_version_number()
+        self.config.installer = f"http://docs.ayfie.com/ayfie-platform/release/ayfie-{os}installer-{version}.zip"
+        return self.config.installer
+        
+    def _administrate_env_file(self):
+        if self.config.dot_env_output_path and self.config.dot_env_input_path:
+            raise ValueError("Either the '.env' file is provided or it is generated, it cannot be both")
+        if self.config.dot_env_input_path:
+            with open(self.config.dot_env_input_path, "r") as f:
+                return f.read()
+        dot_env_file_content = f"AYFIE_PORT={self.config.port}\n"
+        delimiter = ':'
+        if self._get_zip_file_os_string() == "windows":
+            delimiter = ';'
+        if self.config.enable_frontend and get_host_os() == OS_LINUX:
+            dot_env_file_content += f"COMPOSE_FILE=docker-compose.yml{delimiter}docker-compose-frontend.yml\n"
+        dot_env_file_content += self._gen_mem_limits()
+        if self.config.dot_env_output_path:
+            with open(self.config.dot_env_output_path, "w") as f:
+                f.write(dot_env_file_content)
+        return dot_env_file_content
+ 
+    def do_pre_operations(self):
+        self._do_operations(self.config.pre_operations)
+        
+    def do_post_operations(self):
+        self._do_operations(self.config.post_operations)
+          
+    def wait_until_engine_ready(self, timeout=None):
+        waited_so_far = 0
+        pull_interval = 1
+        while not self.engine.engine_is_healty():
+            if timeout and waited_so_far > timeout:
+                raise TimeoutError("Giving up waiting for engine to become ready")
+            sleep(pull_interval)
+            waited_so_far += pull_interval
+        
+    def _do_operations(self, operations):   
+        app_down = False
+        for operation in operations:
+            if not operation in OPERATIONS:
+                raise ValueError(f'Operation "{operation}" is an unknown operation')
+        for operation in operations:
+            if operation == OP_INSTALL:
+                if self.config.engine == INSPECTOR:
+                    dot_env_file_content = self._administrate_env_file()
+                    if self.host_os == OS_LINUX:
+                        os_specific_installer = LinuxInspectorInstaller
+                    elif self.host_os == OS_WINDOWS:
+                        os_specific_installer = WindowsInspectorInstaller
+                    installer = os_specific_installer(self._get_installer_zip_file(), ".", self.install_dir, 
+                                                      self.config.docker_registry, dot_env_file_content)
+                    installer.prerequisites(["docker"])
+                    installer.install()
+                else:
+                    raise NotImplementedError("Only the Inspector is supported at this time")
+            if operation == OP_START:
+                if self.config.engine == INSPECTOR:
+                    self.start_inspector()
+                    self.wait_until_engine_ready()
+                    app_down = False
+                else:
+                    raise NotImplementedError("Only the Inspector is supported at this time")
+            if operation == OP_STOP:
+                if self.config.engine == INSPECTOR:
+                    self.stop_inspector()
+                    app_down = True
+                else:
+                    raise NotImplementedError("Only the Inspector is supported at this time")
+            if operation == OP_UNINSTALL:
+                if self.config.engine == INSPECTOR:
+                    self.uninstall_inspector()
+                    app_down = True
+                else:
+                    raise NotImplementedError("Only the Inspector is supported at this time")
+            if operation == OP_PRUNE_SYSTEM:
+                if self.config.engine == INSPECTOR:
+                    self.prune_system()
+                else:
+                    raise NotImplementedError("Only the Inspector is supported at this time")
+            if operation == OP_GEN_DOT_ENV:
+                if self.config.engine == INSPECTOR:
+                    self._administrate_env_file()
+                else:
+                    raise NotImplementedError("Only the Inspector is supported at this time")
+        if app_down == True:
+            raise EngineDown
+        
         
 class SchemaManager(EngineConnector):
 
@@ -1737,20 +2298,18 @@ class DocumentRetriever(EngineConnector):
         
     def retrieve_documents(self):
         self._init_class_global_variables()
+        self.requested_fields = self.requested_fields + ["doc_count"]
         with open(self.config.doc_retrieval_output_file, mode='w', newline='', encoding="utf-8") as f:
             csv_writer = csv.DictWriter(f, fieldnames=self.requested_fields, dialect=self.config.doc_retrieval_csv_dialect)
             if self.config.doc_retrieval_csv_header_row:
                 csv_writer.writeheader()
-            doc_count = -1
+            doc_count = 0
             for doc_batch in self._get_documents(self.config.doc_retrieval_query, self.config.doc_retrieval_filters):
                 for document in doc_batch:
-                    doc_count += 1
                     if self.config.doc_retrieval_max_docs:
                         if doc_count >= self.config.doc_retrieval_max_docs:
                             self._print(f"Aborting after having extracted {doc_count} documents as specified by parameter 'max_docs'")
                             return
-                    if doc_count and doc_count % self.config.doc_retrieval_report_frequency == 0:
-                        self._print(f"So far {doc_count} documents have been extracted")
                     row = {}
                     for field in self.requested_fields:
                         if self.search_operation:
@@ -1764,7 +2323,10 @@ class DocumentRetriever(EngineConnector):
                         else:
                             row[field] = value
                     csv_writer.writerow(row)
-        self._print(f"Done after extracting all {doc_count} documents")
+                    if doc_count & (doc_count % self.config.doc_retrieval_report_frequency == 0):
+                        self._print(f"So far {doc_count} documents have been extracted")
+                    doc_count += 1
+        self._print(f"Done after extracting {doc_count} documents")
                          
     def _get_documents(self, query="", filters=[], exlude_fields=[]):
         if self.search_operation:
@@ -1883,20 +2445,6 @@ class Feeder(EngineConnector):
         self.batch = []
         self.batch_size = 0
         
-    def _get_unit_adapted_byte_figure(self, number_of_bytes):
-        if number_of_bytes >= 1024 * 1024 * 1024:
-            number_of_bytes /= 1024 * 1024 * 1024
-            unit = "GB"
-        elif number_of_bytes >= 1024 * 1024:
-            number_of_bytes /= 1024 * 1024
-            unit = "MB"
-        elif number_of_bytes >= 1024:
-            number_of_bytes /= 1024
-            unit = "KB"
-        else:
-            return number_of_bytes, "bytes"
-        return round(number_of_bytes, 1), unit
-        
     def feed_documents(self):
         self.batch = []
         self.doc_count = 0
@@ -1937,7 +2485,7 @@ class Feeder(EngineConnector):
         finally:
             elapsed_time = int(time() - start_time)
             file_count, total_file_size = self.data_source.get_file_statistics()
-            total_file_size, unit = self._get_unit_adapted_byte_figure(total_file_size)  
+            total_file_size, unit = get_unit_adapted_byte_figure(total_file_size)  
             log_message = f"A total of {file_count} files and {total_file_size} {unit} were retrieved from disk" + log_message
             log.info(log_message)
             self._print(log_message)
@@ -2174,18 +2722,18 @@ class Classifier(EngineConnector):
         queries = {}
         all_known_categories = []
         for known_category in known_categories:
-            all_known_categories.append(f"{output_field}:{known_category}")
+            all_known_categories.append(f'{output_field}:"{known_category}"')
             all_known_categories_ored = " OR ".join(all_known_categories)
         for known_category in known_categories:
             all_other_known_categories = all_known_categories.copy()
-            all_other_known_categories.remove(f"{output_field}:{known_category}")
+            all_other_known_categories.remove(f'{output_field}:"{known_category}"')
             all_other_known_categories_ored = " OR ".join(all_other_known_categories)
         queries = {}
         for known_category in known_categories:
             queries[known_category] = {}
-            queries[known_category]["no_category"] = f"{training_field}:{known_category} AND NOT ({all_known_categories_ored}) AND {data_set_field}:verification"
+            queries[known_category]["no_category"] = f'{training_field}:"{known_category}" AND NOT ({all_known_categories_ored}) AND {data_set_field}:verification'
             for detected_category in known_categories:
-                queries[known_category][detected_category] = f"{output_field}:{detected_category} AND {training_field}:{known_category} AND {data_set_field}:verification"
+                queries[known_category][detected_category] = f'{output_field}:"{detected_category}" AND {training_field}:"{known_category}" AND {data_set_field}:verification'              
         result = {}
         for known_category in known_categories:
             result[known_category] = {}
@@ -2293,13 +2841,30 @@ class Clusterer(EngineConnector):
                 self.engine.process_collection_and_wait(col_id)
         else:
             log.info('No clustering job')
-
             
+           
 class Querier(EngineConnector):
 
     def search(self, search):
         col_id = self.engine.get_collection_id(self.config.col_name)
+        if 'suggest_only' in search and 'suggest_offset' in search:
+            if search['suggest_only'] or search['suggest_offset'] != None:
+                if search['suggest_only']:
+                    return self._get_query_suggestion(col_id, search)
+                elif search['suggest_offset'] != None:
+                    response = self._get_query_suggestion(col_id, search)
+                    try:
+                        search["query"] = response["suggestions"][0]["list"][search['suggest_offset']]["term"]
+                    except IndexError:
+                        return {}
+                    search = {k:v for k,v in search.items() if not k.startswith("suggest")}
         return self.engine.meta_search(col_id, search)
+
+    def _get_query_suggestion(self, col_id, search):
+        if not search['suggest_limit'] and type(search['suggest_offset']) is int:
+            search['suggest_limit'] = search['suggest_offset'] + 1
+        return self.engine.get_query_suggestion(col_id, search['query'], search['suggest_offset'], 
+                                                        search['suggest_limit'], search['suggest_filter'])
  
     def get_search_result_pages(self, search):
         col_id = self.engine.get_collection_id(self.config.col_name)
@@ -2350,17 +2915,10 @@ class Reporter(EngineConnector):
             else:
                 log_file_path = self.config.report_logs_source
         elif self.config.report_retrieve_logs:
-            old_path = getcwd()
-            chdir(self.config.report_retrieve_logs)
-            log_file = "inspector-logs.txt"
-            log_file_path = join(self.config.report_retrieve_logs, log_file)
-            try:
-                with open(log_file, "a") as f:
-                    call(f"docker-compose logs -t > {log_file}", shell=True, stdout=f, stderr=f)
-            except:
-                raise
-            finally:
-                chdir(old_path)
+            with change_dir(self.config.report_retrieve_logs):
+                log_file = "inspector-logs.txt"
+                execute(f"docker-compose logs -t > {log_file}")
+                log_file_path = join(self.config.report_retrieve_logs, log_file)
         else:
             return
 
@@ -2368,8 +2926,9 @@ class Reporter(EngineConnector):
             raise ValueError(f"'{log_file_path}' does not exist")
         LogAnalyzer(
             log_file_path, self.config.report_output_destination, TMP_LOG_UNPACK_DIR, 
-            self.config.report_dump_lines, self.config.report_custom_regex, 
-            self.config.report_noise_filtering).analyze()
+            self.config.report_dump_all_lines, self.config.report_dump_custom_lines,
+            self.config.report_custom_regexs, self.config.report_noise_filtering, 
+            self.config.report_max_log_lines).analyze()
 
     def __get_memory_config(self):
         print ("got here")
@@ -2421,24 +2980,64 @@ class DocumentUpdater(EngineConnector):
             if docs_update["report_time"]:
                 self._print(f"The documents update operation took {str(elapsed_time)} seconds")
 
-            
+
 class LogAnalyzer():
 
-    def __init__(self, log_file_path, output_destination, log_unpacking_dir, dump_lines=False, custom_regex=None, noise_filtering=False):
+    def __init__(self, log_file_path=None, output_destination=None, log_unpacking_dir=None, 
+                       dump_all_lines=False, dump_custom_lines=False, custom_regexs=[], 
+                       noise_filtering=False, max_lines=0):
         self.output_destination = output_destination
         self.log_file = log_file_path
-        self.dump_lines = dump_lines
-        self.custom_regex = custom_regex
+        self.dump_all_lines = dump_all_lines
+        self.dump_custom_lines = dump_custom_lines
+        self.custom_regexs = custom_regexs
         self.noise_filtering = noise_filtering
         self.log_unpacking_dir = log_unpacking_dir
         self.unzip_dir = UNZIP_DIR
+        self.max_lines = max_lines
         if not exists(log_file_path):
             raise ConfigError(f"There is no {log_file_path}")
         self.filtered_patterns = [
             "^.*RestControllerRequestLoggingAspect: triggering JobController.getJob\(\.\.\) with args:.*$",
             "^.*Performing partial update on document.*$"
         ] 
-        self.error_info = [
+        self.system_info = [ 
+            {
+                "pattern" : r"^.*jobId=([0-9]+),jobState=SCHEDULED]$",
+                "extraction": [("Scheduled jobs", 1)], 
+                "key": "scheduled jobs",
+                "accumulate": []
+            },       
+            {
+                "pattern" : r"^.*jobId=([0-9]+),jobState=RUNNING]$",
+                "extraction": [("Running jobs", 1)],               
+                "key": "started jobs",
+                "accumulate": []
+            },
+            {
+                "pattern" : r"^.*jobId=([0-9]+),jobState=SUCCEEDED]$",
+                "extraction": [("Successful jobs", 1)],               
+                "key": "successful jobs",
+                "accumulate": []
+            },
+            {
+                "pattern" : r"^.*type=[A-Z]+,.*jobId=([0-9]+),jobState=FAILED]$",
+                "extraction": [("Failed jobs", 1)],               
+                "key": "failed jobs",
+                "accumulate": []
+            },
+            {
+                "pattern" : r"^.*type=[A-Z]+_[A-Z]+,.*jobId=([0-9]+),jobState=FAILED]$",
+                "extraction": [("Failed sub-jobs", 1)],               
+                "key": "failed sub-jobs",
+                "accumulate": []
+            },
+            {
+                "pattern" : r"^.*ingestion\.service\.DefaultDocumentFeedingService: feeding in collection \".+\" a batch of ([0-9]+) documents$",
+                "extraction": [("Documents across batches", 1)],
+                "sum": [],
+                "key": "fed batches"
+            },
             {
                 "pattern" : r"^.*(20[12][0-9]-[01][0-9]-[0-9][0-9]T[012][0-9]:[0-6][0-9]:[0-9][0-9])\.[0-9]{9,9}Z .*$",
                 "extraction": [("Log start time", 1)],
@@ -2450,7 +3049,7 @@ class LogAnalyzer():
                 "occurence": "last",
                 "key": "end_date"
             },
-            {
+            {  
                 "pattern" : r"^.*free: (.*gb)\[(.*%)\].*$",
                 "extraction": [("At the start: Available disk space: ", 1), ("Available disk capacity: ", 2)],
                 "occurence": "first"
@@ -2478,7 +3077,7 @@ class LogAnalyzer():
                 "extraction": [(1, 2)]
             },
             {
-                "pattern" : r"^.*main platform.config.AyfieVersion: (.*)$",   
+                "pattern" : r"^.*main platform.config.AyfieVersion: ([^\$\{]+)$",   
                 "extraction": [("ayfie Inspector", 1)] 
             },
             {
@@ -2499,31 +3098,31 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*SPARK_EXECUTOR_MEMORY=([0-9]+G).*$",
-                "extraction": [("SPARK_EXECUTOR_MEMORY=", 1)]
+                "extraction": [("SPARK_EXECUTOR_MEMORY", 1)]
             },
             {
                 "pattern" : r"^.*SPARK_WORKER_MEMORY=([0-9]+G).*$",
-                "extraction": [("SPARK_WORKER_MEMORY=", 1)]
+                "extraction": [("SPARK_WORKER_MEMORY", 1)]
             },
             {
                 "pattern" : r"^.*API_MEM_LIMIT=([0-9]+G).*$",
-                "extraction": [("API_MEM_LIMIT=", 1)]
+                "extraction": [("API_MEM_LIMIT", 1)]
             },
             {
                 "pattern" : r"^.*ELASTICSEARCH_MEM_LIMIT=([0-9]+G).*$",
-                "extraction": [("ELASTICSEARCH_MEM_LIMIT=", 1)]
+                "extraction": [("ELASTICSEARCH_MEM_LIMIT", 1)]
             },
             {
                 "pattern" : r"^.*ELASTICSEARCH_MX_HEAP=([0-9]+G).*$",
-                "extraction": [("ELASTICSEARCH_MX_HEAP=", 1)]
+                "extraction": [("ELASTICSEARCH_MX_HEAP", 1)]
             },
             {
                 "pattern" : r"^.*RECOGNITION_MEM_LIMIT=([0-9]+G).*$",
-                "extraction": [("RECOGNITION_MEM_LIMIT=", 1)]
+                "extraction": [("RECOGNITION_MEM_LIMIT", 1)]
             },
             {
                 "pattern" : r"^.*RECOGNITION_MX_HEAP=([0-9]+G).*$",
-                "extraction": [("RECOGNITION_MX_HEAP=", 1)]
+                "extraction": [("RECOGNITION_MX_HEAP", 1)]
             }
         ]
         self.symptoms = [
@@ -2545,7 +3144,7 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*None of the configured nodes (were|are) available.*$",
-                "indication": "the host is low on disk and/or memory."
+                "indication": "that Elasticsearch and/or the host is low on memory. If that is the case, then increasing ELASTICSEARCH_MEM_LIMIT and ELASTICSEARCH_MX_HEAP and/or adding more RAM to the host, could possibly solve it."
             },
             {
                 "pattern" : r"^.*java\.lang\.OutOfMemoryError.*$",
@@ -2617,7 +3216,8 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*(jobState=FAILED|,description=Execution failed: ).*$",
-                "indication": "a job has failed. Use the given jobId to look up failure details with 'curl server:port/ayfie/v1/jobs/jobId' (replace `jobId` with the id)"
+                "indication": "a job has failed. Use the jobId(s) above to look up further failure details using 'curl server:port/ayfie/v1/jobs/jobId' after replacing `jobId` with the id of the failing sub-job (or the job in absence of any sub-job).",
+                "queue_length": 2
             },
             {
                 "pattern" : r"^.*hs_err_pid[0-9]+\.log.*$",
@@ -2632,24 +3232,54 @@ class LogAnalyzer():
                 "indication": "one has run into a hard coded mem limit that has been removed in later versions."
             }   
         ] 
-        if self.custom_regex:
+        self.query_patterns = [
+            {
+                "title": "Query logs (Api Container)",
+                "pattern": r"^.*DefaultSearchQuery\[query=(.*),highlight.*$"
+            },
+            {
+                "title": "Query logs (Suggest Container)",
+                "pattern": r"^.*suggest.service.ApproxindexSuggestService: External suggest call for \{query=\[(.*)\]\} returned with status 200.*$"
+            },
+            {
+                "title": "Query logs (Suggest Container)",
+                "pattern": r"^.*SuggestController.suggestionsGet.+, \{.*query=\[(.*)\]\}, \(GET /ayfie/v1/collections/.+/suggestions.*$"
+            },
+        ]
+        for regex in self.custom_regexs:
             self.symptoms.append({
-                "pattern" : self.custom_regex,
-                "indication": "your custom regEx produced result"
+                "pattern" : regex,
+                "indication": "custom"
             })
+            
+    def get_resource_usage(self, numbers_with_units=True):
+        statistics = {
+            "total_virtual_memory":     psutil.virtual_memory().total,
+            "available_virtual_memory": psutil.virtual_memory().available, 
+            "used_virtual_memory":      psutil.virtual_memory().used,
+            "total_disk":               psutil.disk_usage('/').total,
+            "used_disk":                psutil.disk_usage('/').used,
+            "free_disk":                psutil.disk_usage('/').free,
+        }
+        if numbers_with_units:
+            for item in statistics:
+                statistics[item] = get_unit_adapted_byte_figure(statistics[item])
+        return statistics
+        
+        
             
     def clear_counters(self):
         for symptom in self.symptoms:
             symptom["occurences"] = 0
             symptom["last_occurence_line"] = None
-            symptom["last_occurence_sample"] = None
+            symptom["last_occurence_samples"] = deque([])
         self.errors_detected = False
         self.exceptions = {}
         
     def _prepare_temp_log_directory(self, log_file, log_dir):
         fht = FileHandlingTools()
         file_type, detected_encoding = fht.get_file_type(log_file)
-        if fht.unzip(file_type, log_file, self.unzip_dir):
+        if fht.unzip(log_file, self.unzip_dir, file_type):
             fht.delete_directory(log_dir)
             copy_dir_tree(self.unzip_dir, log_dir)
         else:
@@ -2691,7 +3321,8 @@ class LogAnalyzer():
             return
                 
     def _process_encoded_log_file(self, log_file, encoding): 
-        error_info = deepcopy(self.error_info)
+        self.queries = {}
+        system_info = deepcopy(self.system_info)
         with open(log_file, "r", encoding=encoding) as f:
             if self.noise_filtering:
                 output_file = log_file + ".filtered"
@@ -2709,50 +3340,92 @@ class LogAnalyzer():
                         if not line.strip().startswith("Attaching to"):
                             raise DataFormatError(f"File '{log_file}' is not recognized as a ayfie Inspector log file")
                     self.line_count += 1
-                    for info in error_info:                    
+                    if self.max_lines and self.line_count >= self.max_lines:
+                        return
+                        
+                    for query_pattern in self.query_patterns:
+                        m = match(query_pattern["pattern"], line) 
+                        if m:
+                            if not query_pattern["title"] in self.queries:
+                                self.queries[query_pattern["title"]] = {}
+                            if not m.group(1) in self.queries[query_pattern["title"]]:
+                                self.queries[query_pattern["title"]][m.group(1)] = 0
+                            self.queries[query_pattern["title"]][m.group(1)] += 1
+                            continue
+                    for info in system_info: 
                         if "occurence" in info and info["occurence"] == "completed":
                             continue
                         m = match(info["pattern"], line)
                         if m:
                             output_line = []
+                            if "count" in info:
+                                info["count"] += 1
                             for item in info["extraction"]:
                                 item_name = item[0]
                                 item_value = item[1]
                                 if type(item_name) is int:
                                     item_name = m.group(item_name)
-                                if type(item_value) is int:
-                                    item_value = m.group(item_value)
-                                output_line.append(f"{item_name}: {item_value}")
+                                if item_value:
+                                    if type(item_value) is int:
+                                        item_value = m.group(item_value)
+                                elif "count" in info:
+                                    item_value = info["count"]
+                                else:
+                                    raise ValueError("Item_value set to None requires parameter count to be initialized")
+                                if "accumulate" in info:
+                                    info["accumulate"].append(item_value)
+                                    output_line.append(f"{item_name} ({len(info['accumulate'])}): {', '.join(info['accumulate'])}")
+                                elif "sum" in info:
+                                    info["sum"].append(int(item_value))
+                                    output_line.append(f"{item_name} ({len(info['sum'])}): {sum(info['sum'])}")
+                                else:
+                                    output_line.append(f"{item_name}: {item_value}")
                             if "key" in info:
-                                self.info_pieces["key"] = ", ".join(output_line)
+                                self.info_pieces[info["key"]] = ", ".join(output_line)
                             else:
                                 self.info_pieces[", ".join(output_line)] = False
                             if "occurence" in info and info["occurence"] == "first":
                                 info["occurence"] = "completed"                
                     for symptom in self.symptoms:
-                        m = match(symptom["pattern"], line)
-                        if m:
-                            self.errors_detected = True
-                            symptom["occurences"] += 1
-                            symptom["last_occurence_line"] = self.line_count
-                            symptom["last_occurence_sample"] = m.group(0)
-                            if self.dump_lines:
-                                print(m.group(0))
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            m = match(symptom["pattern"], line)
+                            if m:
+                                self.errors_detected = True
+                                symptom["occurences"] += 1
+                                symptom["last_occurence_line"] = self.line_count
+                                symptom["last_occurence_samples"].append(m.group(0))
+                                queue_length = 1
+                                if "queue_length" in symptom:
+                                    queue_length = symptom["queue_length"]
+                                while len(symptom["last_occurence_samples"]) > queue_length:
+                                    symptom["last_occurence_samples"].popleft()  
+                                if symptom["indication"] == 'custom':
+                                    if self.dump_custom_lines:
+                                        print(m.group(0))
+                                elif self.dump_all_lines:
+                                    print(m.group(0))
                     m = match(r"Exception", line)
                     if m:
                         if not m.group(0) in self.exceptions:
                             self.exceptions[m.group(0)] = 0
                         self.exceptions[m.group(0)] += 1
                 
-    def produce_output(self, title, data_dict):
+    def _produce_output(self, title, data_dict, key_value_pair=False, key_quotes=False):
         output = ""
         if len(data_dict) > 0:
             output = f"\n====== {title} ======\n"
             for key in data_dict.keys():
-                if data_dict[key]:
-                    output += f"{data_dict[key]}\n"
+                quotes = ""
+                if key_quotes:
+                    quotes = '"'
+                if key_value_pair:
+                    output += f"{quotes}{key}{quotes}: {data_dict[key]}\n"
                 else:
-                    output += f"{key}\n"
+                    if data_dict[key]:
+                        output += f"{data_dict[key]}\n"
+                    else:
+                        output += f"{quotes}{key}{quotes}\n"
         return output
          
     def analyze(self):
@@ -2776,14 +3449,20 @@ class LogAnalyzer():
                 is_log_file = False
             analyses_output += f'\n\n====== FILE "{log_file}" {line_info}======\n'
             if is_log_file:
-                analyses_output += self.produce_output("Time & System Information", self.info_pieces)
+                analyses_output += self._produce_output("Time, System & Operational Information", self.info_pieces)
+                for title in self.queries:
+                    analyses_output += self._produce_output(title, self.queries[title], True, True)
                 if self.errors_detected:
                     for symptom in self.symptoms:
                         if symptom["occurences"] > 0:
                             analyses_output += "\n====== Failure Indicator ======\n"
                             analyses_output += f'There are {symptom["occurences"]} occurrences (last one on line {symptom["last_occurence_line"]}) of this message:\n\n'
-                            analyses_output += f'{symptom["last_occurence_sample"]}\n\n'
-                            analyses_output += f'The message could possibly indicate that {symptom["indication"]}\n'
+                            for occurence in symptom["last_occurence_samples"]:
+                                analyses_output += f'{occurence}\n\n'
+                            if symptom["indication"] == "custom":
+                                 analyses_output += f'These are matches to custom regex "{symptom["pattern"]}"\n'
+                            else:
+                                analyses_output += f'The message could possibly indicate that {symptom["indication"]}\n'
                 else:
                     analyses_output += "\n  NO KNOWN ERRORS DETECTED"
             else:
@@ -2794,8 +3473,15 @@ class LogAnalyzer():
             else:
                 with open(self.output_destination, 'wb') as f:
                     f.write(analyses_output.encode('utf-8'))
-
                     
+    def get_diagnostic_page(self):
+        page = "<html><head></head><body>"
+        page = "<tr><table><th>SYMPTOM</th><th>DIAGNOSES</th></tr>"
+        for symptom in self.symptoms:
+            page += f"<tr><td>symptom.pattern</td><td>symptom.indication</td></tr>"
+        page += "</table><br>" 
+        return page
+            
 class JobsHandler(EngineConnector):
     
     def __start_job(self, job_type, settings, more_params={}):
@@ -3033,6 +3719,7 @@ class JobsHandler(EngineConnector):
 class Config():
 
     def __init__(self, config):
+        self.config_keys = list(config.keys())
         self.engine           = self.__get_item(config, 'engine', INSPECTOR)
         self.silent_mode      = self.__get_item(config, 'silent_mode', True)
         self.config_source    = self.__get_item(config, 'config_source', None)
@@ -3092,15 +3779,19 @@ class Config():
 
     def __init_operational(self, operational):
         self.installer                = self.__get_item(operational, 'installer', None)
-        self.operation                = self.__get_item(operational, 'operation', None)
+        self.version                  = self.__get_item(operational, 'version', None)       
+        self.os                       = self.__get_item(operational, 'os', "auto")        
+        self.pre_operations           = self.__get_item(operational, 'pre_operations', None)
+        self.post_operations          = self.__get_item(operational, 'post_operations', None)
         self.customization            = self.__get_item(operational, 'customization', None)
         self.data_dir_path            = self.__get_item(operational, 'data_dir_path', None)
-        self.dot_env_file_path        = self.__get_item(operational, 'dot_env_file_path', None)
-        self.components               = self.__get_item(operational, 'components', None)
+        self.dot_env_input_path       = self.__get_item(operational, 'dot_env_input_path', None)
+        self.dot_env_output_path      = self.__get_item(operational, 'dot_env_output_path', ".env")        
+        self.enable_frontend          = self.__get_item(operational, 'enable_frontend', True)
+        self.ram_on_host              = self.__get_item(operational, 'ram_on_host', 64)
+        self.docker_registry          = self.__get_item(operational, 'docker_registry', None)
         self.install_dir              = self.__get_item(operational, 'install_dir', None)
-        self.amount_of_RAM            = self.__get_item(operational, 'amount_of_RAM', 64)
-        self.dockerRegistry           = self.__get_item(operational, 'dockerRegistry', None)
-  
+
     def __init_schema(self, schema_changes):
         if not schema_changes:
             self.schema_changes = None
@@ -3118,11 +3809,10 @@ class Config():
             })
         if len([1 for change in self.schema_changes if not "name" in change]):
             raise ConfigError('Schema configuration requires a field name to be set')
-    
+            
     def __init_feeder(self, feeding):
         self.data_source              = self.__get_item(feeding, 'data_source', None)
-        if self.data_source and not isabs(self.data_source):
-            self.data_source = join(path_split(self.config_source)[0], self.data_source)
+        self.data_source              = FileHandlingTools().get_absolute_path(self.data_source, self.config_source)
         self.csv_mappings             = self.__get_item(feeding, 'csv_mappings', self.csv_mappings)
         self.data_type                = self.__get_item(feeding, 'data_type', AUTO)
         self.fallback_data_type       = self.__get_item(feeding, 'fallback_data_type', None)
@@ -3315,18 +4005,28 @@ class Config():
                 "scroll"             : self.__get_item(search, 'scroll', False),
                 "size"               : self.__get_item(search, 'size', 10),
                 "offset"             : self.__get_item(search, 'offset', 0),
+                "suggest_only"       : self.__get_item(search, 'suggest_only', False), 
+                "suggest_offset"     : self.__get_item(search, 'suggest_offset', None), 
+                "suggest_limit"      : self.__get_item(search, 'suggest_limit', None), 
+                "suggest_filter"     : self.__get_item(search, 'suggest_filter', None)                
             })
 
     def __init_report(self, report):
+        self.report_logs_source       = self.__get_item(report, 'logs_source', False)
+        self.report_logs_source       = FileHandlingTools().get_absolute_path(self.report_logs_source, self.config_source)
         self.report_output_destination= self.__get_item(report, 'output_destination', "terminal")
         self.report_verbose           = self.__get_item(report, 'verbose', False)
         self.report_jobs              = self.__get_item(report, 'jobs', False)
-        self.report_logs_source       = self.__get_item(report, 'logs_source', False)
         self.report_noise_filtering   = self.__get_item(report, 'noise_filtering', False)
         self.report_retrieve_logs     = self.__get_item(report, 'retrieve_logs', False)
-        self.report_dump_lines        = self.__get_item(report, 'dump_lines', False)
-        self.report_custom_regex      = self.__get_item(report, 'custom_regex', None)
+        self.report_dump_all_lines    = self.__get_item(report, 'dump_all_lines', False)
+        self.report_dump_custom_lines = self.__get_item(report, 'dump_custom_lines', False)
         self.report_jobs_overview     = self.__get_item(report, 'jobs_overview', False)
+        self.report_custom_regexs     = self.__get_item(report, 'custom_regexs', [])
+        self.report_max_log_lines     = self.__get_item(report, 'max_log_lines', None)
+        self.report_resource_usage    = self.__get_item(report, 'resource_usage', 0)        
+        if not type(self.report_custom_regexs) is list:
+            self.report_custom_regexs = [self.report_custom_regexs]
         
     def __init_regression_testing(self, regression_testing):
         self.upload_config_dir        = self.__get_item(regression_testing, 'upload_config_dir', None)
@@ -3339,7 +4039,16 @@ class Config():
         if self.progress_bar and self.engine != INSPECTOR:
             self.progress_bar = False
 
-            
+    def get_config_keys(self):
+        return [key for key in self.config_keys if not (key in NON_ACTION_CONFIG or key.lower().startswith("x"))]
+        
+    def get_offline_config_keys(self):
+        return [key for key in self.get_config_keys() if key in OFFLINE_ACTIONS]
+
+    def get_online_config_keys(self):
+        return [key for key in self.get_config_keys() if key not in OFFLINE_ACTIONS]
+
+        
 class TestExecutor():
 
     def __init__(self, config, use_master_config_settings=True):
@@ -3368,8 +4077,7 @@ class TestExecutor():
                         
         if "reporting" in config:
             if "logs_source" in config["reporting"]:
-                config["reporting"]['logs_source'] = self.__get_file_path(
-                        config_file_path, config["reporting"]['logs_source'])
+                config["reporting"]['logs_source'] = self.__get_file_path(config_file_path, config["reporting"]['logs_source'])
 
         temp_config_file = 'tmp.cfg'
         with open(temp_config_file, 'wb') as f:
@@ -3436,6 +4144,15 @@ class Admin():
         self.doc_retriever = DocumentRetriever(self.config)
         self.sampler = Sampler(self.config)
         
+    def run_post_operations(self):
+        if self.config.reporting:
+            self.reporter.do_reporting()
+        if self.config.operational and self.config.post_operations:
+            try:
+                self.operational.do_post_operations()
+            except EngineDown:
+                pass
+        
     def run_config(self):
         if self.config.regression_testing:
             if self.config.server_settings == OVERRIDE_CONFIG:
@@ -3448,8 +4165,14 @@ class Admin():
             testExecutor.run_tests()
             return
             
-        if self.config.operational:
-            self.operational.do_operation()
+        if self.config.operational and self.config.pre_operations:
+            try:
+                self.operational.do_pre_operations()
+            except EngineDown:
+                online_config_keys = self.config.get_online_config_keys()
+                if self.config.get_online_config_keys:
+                    log.info(f'"{self.config.engine}" is down, unable to execute {online_config_keys}')
+                    return
         if self.config.server != OFF_LINE:
             if self.config.data_source:
                 if self.config.prefeeding_action not in PRE_ACTIONS:
@@ -3474,10 +4197,12 @@ class Admin():
                         self.feeder.feed_documents_commit_and_process()
                 else:
                     raise ConfigError(f'Cannot feed to non-existing collection "{self.config.col_name}"')
-            else:
-                if not self.feeder.collection_exists():
+            elif not self.feeder.collection_exists():
+                if self.config.get_offline_config_keys():
+                    return self.run_post_operations()
+                else:
                     raise ConfigError(f'There is no collection "{self.config.col_name}"')
-                    
+
             if self.config.processing:
                 self.feeder.process()
             if self.config.schema_changes:
@@ -3525,33 +4250,22 @@ class Admin():
                         f.write(dumps(result, indent=4).encode('utf-8'))
                 else:    
                     msg = f'"result" must be {", ".join(RESULT_TYPES)}, "{SAVE_RESULT}<file path>" or an int'
-                    raise ValueError(msg)
-        if self.config.reporting:
-            self.reporter.do_reporting()
-            
-                  
-def run_cmd_line(cmd_line_args):
-    script_path = cmd_line_args[0]
-    script_name_with_ext = basename(script_path)
-    script_name = basename(script_name_with_ext).split('.')[0]    
+                    raise ValueError(msg)       
+        self.run_post_operations()
+ 
+ 
+def run_cmd_line(cmd_line_args): 
+    script_name = basename(cmd_line_args[0])
     if not exists(LOG_DIR):
         makedirs(LOG_DIR)
-    log_file = join(LOG_DIR, script_name + ".log")
-    logging.basicConfig(
-            format = '%(asctime)s %(levelname)s: ' +
-                     '%(message)s, %(filename)s(%(lineno)d)',
-            datefmt = '%m/%d/%Y %H:%M:%S',
-            filename = log_file,
-            level = logging.DEBUG)
-
     if len(cmd_line_args) != 2:
-        print(f'The script "{script_name_with_ext}" takes exactly 1 parameter:\n')
-        print(f'Usage:   python {script_name_with_ext} <config-file-path>')
+        print(f'The script "{script_name}" takes exactly 1 parameter:\n')
+        print(f'Usage:   {sys.executable} {script_name} <config-file-path>')
         return
     file_path = cmd_line_args[1]
     if not isfile(file_path):
         print(f'"{file_path}" is not a file:\n')
-        print(f'Usage:   python {script_name_with_ext} <config-file-path>')
+        print(f'Usage:   {sys.executable} {script_name} <config-file-path>')
         return
 
     config_file_path = cmd_line_args[1]
@@ -3572,8 +4286,11 @@ def run_cmd_line(cmd_line_args):
         admin = Admin(Config(config))
         return admin.run_config()
         
-
+            
 run_from_cmd_line = False
 if __name__ == '__main__':
     run_from_cmd_line = True
     run_cmd_line(sys.argv)
+   
+    
+ 
