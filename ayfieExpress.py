@@ -166,7 +166,8 @@ OP_STOP                = "stop"
 OP_UNINSTALL           = "uninstall"
 OP_PRUNE_SYSTEM        = "prune"
 OP_GEN_DOT_ENV         = "gen_dot_env"
-OPERATIONS             = [OP_INSTALL, OP_START, OP_STOP, OP_UNINSTALL, OP_PRUNE_SYSTEM, OP_GEN_DOT_ENV]
+OP_ENABLE_GDPR         = "enable_gdpr"
+OPERATIONS             = [OP_INSTALL, OP_START, OP_STOP, OP_UNINSTALL, OP_PRUNE_SYSTEM, OP_GEN_DOT_ENV, OP_ENABLE_GDPR]
 
 MEM_LIMITS_64_AND_128_GB_RAM = {
     "1": [
@@ -2096,10 +2097,12 @@ class Operational(EngineConnector):
         if self.config.docker_registry:
             if not ("user" in self.config.docker_registry and "password" in self.config.docker_registry):
                 raise ValueError(f"Bad account data: {str(self.docker_registry)}")
-        user = self.config.docker_registry["user"]
-        password = PWD_START_STOP_TOKEN + self.config.docker_registry["password"] + PWD_START_STOP_TOKEN
-        execute(f'docker login -u "{user}" -p "{password}" {self.docker_registry}')
-                 
+            user = self.config.docker_registry["user"]
+            password = PWD_START_STOP_TOKEN + self.config.docker_registry["password"] + PWD_START_STOP_TOKEN
+            execute(f'docker login -u "{user}" -p "{password}" {self.docker_registry}')
+        else:
+            log.warning("No docker registry user credentials")
+                     
     def start_inspector(self): 
         self._do_docker_login()      
         self._inspector_operation("start")
@@ -2169,9 +2172,7 @@ class Operational(EngineConnector):
         self.config.installer = f"http://docs.ayfie.com/ayfie-platform/release/ayfie-{os}installer-{version}.zip"
         return self.config.installer
         
-    def _administrate_env_file(self):
-        if self.config.dot_env_output_path and self.config.dot_env_input_path:
-            raise ValueError("Either the '.env' file is provided or it is generated, it cannot be both")
+    def _administrate_env_file(self, docker_compose_custom_file=None):
         if self.config.dot_env_input_path:
             with open(self.config.dot_env_input_path, "r") as f:
                 return f.read()
@@ -2179,8 +2180,12 @@ class Operational(EngineConnector):
         delimiter = ':'
         if self._get_zip_file_os_string() == "windows":
             delimiter = ';'
+        dot_env_file_content += "COMPOSE_FILE=docker-compose.yml"
         if self.config.enable_frontend and get_host_os() == OS_LINUX:
-            dot_env_file_content += f"COMPOSE_FILE=docker-compose.yml{delimiter}docker-compose-frontend.yml\n"
+            dot_env_file_content += f"{delimiter}docker-compose-frontend.yml"
+        if docker_compose_custom_file:
+            dot_env_file_content += f"{delimiter}{docker_compose_custom_file}"
+        dot_env_file_content += "\n"
         dot_env_file_content += self._gen_mem_limits()
         if self.config.dot_env_output_path:
             with open(self.config.dot_env_output_path, "w") as f:
@@ -2221,6 +2226,15 @@ class Operational(EngineConnector):
                     installer.install()
                 else:
                     raise NotImplementedError("Only the Inspector is supported at this time")
+            if operation == OP_ENABLE_GDPR:
+                with change_dir(self.install_dir):
+                    enable_gdpr_app_file = "enable_gdpr_app.yml"
+                    enable_gdpr_docker_compose_file = "enable_gdpr_docker_compose.yml"
+                    with open(enable_gdpr_app_file, "w") as f:
+                        f.write("digestion:\n  processing:\n    entityExtraction:\n      skipExtractors: []")
+                    with open(enable_gdpr_docker_compose_file, "w") as f:
+                        f.write(f"version: '2.1'\nservices:\n  api:\n    volumes:\n      - ./{enable_gdpr_app_file}:/home/dev/restapp/application-custom.yml")
+                    self._administrate_env_file(enable_gdpr_docker_compose_file)
             if operation == OP_START:
                 if self.config.engine == INSPECTOR:
                     self.start_inspector()
@@ -2247,6 +2261,8 @@ class Operational(EngineConnector):
                     raise NotImplementedError("Only the Inspector is supported at this time")
             if operation == OP_GEN_DOT_ENV:
                 if self.config.engine == INSPECTOR:
+                    if self.config.dot_env_output_path and self.config.dot_env_input_path:
+                        raise ValueError("Either the '.env' file is provided or it is generated, it cannot be both")
                     self._administrate_env_file()
                 else:
                     raise NotImplementedError("Only the Inspector is supported at this time")
