@@ -2,7 +2,7 @@ from json import loads, dumps
 from json.decoder import JSONDecodeError
 from time import sleep, time
 from os.path import join, basename, dirname, exists, isdir, isfile, splitext, split as path_split, getsize, isabs
-from os import listdir, makedirs, walk, system, stat, getcwd, chdir
+from os import listdir, makedirs, walk, system, stat, getcwd, chdir, environ
 from zipfile import is_zipfile, ZipFile
 from gzip import open as gzip_open
 from tarfile import is_tarfile, open as tarfile_open 
@@ -267,7 +267,7 @@ def replace_passwords(string):
     string_to_use = "".join(string_fragments)
     return string_to_show, string_to_use
 
-def execute(cmd_line_str, dumpfile=None, timeout=None, continue_on_timeout=True, return_response=False):
+def execute(cmd_line_str, dumpfile=None, timeout=None, continue_on_timeout=True, return_response=False, ignore_error=False):
     stdout=PIPE
     stderr=STDOUT
     if dumpfile:
@@ -286,7 +286,7 @@ def execute(cmd_line_str, dumpfile=None, timeout=None, continue_on_timeout=True,
         response = process.stdout.strip() if process.stdout else ""
         if len(response):
             log.debug(f"{response}".replace('\n', '\\n'))
-        if process.returncode != 0:
+        if process.returncode != 0 and not ignore_error:
             raise CommandLineError(f"Error (code: {process.returncode}): {response}")
         if return_response:
             return response
@@ -305,8 +305,17 @@ def install_python_modules(modules):
                 first_time = False
                 try:
                     execute(f"{sys.executable} -m pip install --upgrade pip")
-                except:
-                    pass
+                except CommandLineError as e:
+                    if not "No module named pip" in str(e):
+                        print("curl -O https://bootstrap.pypa.io/get-pip.py failed for an unexpected reasons")
+                        raise
+                    try:
+                        execute("apt update")
+                        execute("apt install python3-pip --assume-yes")
+                        execute("pip3 --version")
+                    except:
+                        print(f"Failed to install pip")
+                        raise
             try:
                 execute(f"{sys.executable} -m pip install {module}")  
                 __import__(module)
@@ -1892,12 +1901,15 @@ class Installer():
  
 class InspectorInstaller(Installer):
 
+    def _restart_server_if_required(self):
+        raise NotImplementedError
+
     def prerequisites(self, groups):
         self._prepare_user(groups)
         self._prepare_host()
         if not self._docker_is_installed():
             self._install_docker()
-            self._restart_server()
+            self._restart_server_if_required()
         self._start_docker()       
         self._install_docker_compose()        
         
@@ -1908,7 +1920,7 @@ class InspectorInstaller(Installer):
         self._post_install_operations()
 
     def _docker_is_installed(self):
-        response = execute("docker -v", return_response=True)
+        response = execute("docker -v", return_response=True, ignore_error=True)
         if response.startswith("Docker version"):
             return True
         return False
@@ -1948,11 +1960,18 @@ class InspectorInstaller(Installer):
             
     def _is_running_as_root_or_in_elevated_mode(self):
         raise NotImplementedError
-            
+        
+    def _get_actual_user(self):
+        raise NotImplementedError
+        
     def _prepare_user(self, groups):
         if not self._is_running_as_root_or_in_elevated_mode():
             raise ConfigError(f"The installation feature require that one run as root (sudo)/admin") 
-        self._add_user_to_user_groups(getuser(), groups)
+        user = getuser()
+        actual_user = self._get_actual_user()
+        if user == "root" and actual_user and len(actual_user):
+            user = actual_user
+        self._add_user_to_user_groups(user, groups)
             
     def _update_config_file(self, filepath, expression):
         settings = [expression]
@@ -1976,10 +1995,29 @@ class LinuxInspectorInstaller(InspectorInstaller):
             self._update_config_file(SYSCTL_PATH, expression)
         execute("sysctl -p")
         
-    def _install_docker(self):
-        pass
+    def _install_docker_repository(self):
+        execute("apt-get update")
+        execute("apt-get install apt-transport-https ca-certificates curl gnupg-agent software-properties-common --assume-yes")
+        execute("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -")
+        execute("apt-key fingerprint 0EBFCD88")
+        execute('add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"')
         
-    def _restart_server(self):    
+    def _install_docker(self):
+        self._install_docker_repository()
+        execute("apt-get update")
+        execute("apt-get install docker-ce docker-ce-cli containerd.io --assume-yes")
+        response = execute("apt-cache madison docker-ce", return_response=True)
+        version_string = None
+        for line in response.split("\n"):
+            m = match("docker-ce | ([\.0-9]+~ce~[-0-9]~ubuntu) | https://download.docker.com/linux/ubuntu bionic/stable amd64 Packages", line)
+            if m:
+                version_string = m.group(1)
+                break
+        if not version_string:
+            version_string= "18.06.1~ce~3-0~ubuntu"
+        execute(f"apt-get install docker-ce={version_string} docker-ce-cli={version_string} containerd.io --assume-yes")
+        
+    def _restart_server_if_required(self):    
         pass
         
     def _start_docker(self):
@@ -2021,6 +2059,9 @@ class LinuxInspectorInstaller(InspectorInstaller):
             if not self._group_already_exists(group):
                 execute(f"groupadd {group}")
             execute(f"usermod -a -G {group} {user}") 
+            
+    def _get_actual_user(self):
+        return environ['SUDO_USER']
 
     def _is_running_as_root_or_in_elevated_mode(self):
         if geteuid() == 0:  
@@ -2035,17 +2076,22 @@ class WindowsInspectorInstaller(InspectorInstaller):
         pass
         
     def _install_docker(self):
+        execute("powershell.exe Find-PackageProvider -Name 'Nuget' -ForceBootstrap -IncludeDependencies")
         execute("powershell.exe Install-Module DockerMsftProvider -Force")
         execute("powershell.exe Install-Package Docker -ProviderName DockerMsftProvider -Force")
        
     def _start_docker(self):
         execute("powershell.exe Start-Service Docker")
         
-    def _restart_server(self):    
+    def _restart_server_if_required(self): 
+        print("Restarting computer - start the same script with the same config after reboot")
         execute("powershell.exe Restart-Computer")
+        sys.exit()
         
     def _install_docker_compose(self, version=None):
-        execute("powershell.exe Set-ExecutionPolicy Bypass -Scope Process -Force; iex ((new-object net.webclient).DownloadString('https://chocolatey.org/install.ps1'))")
+        execute("powershell.exe Set-ExecutionPolicy Bypass -Scope Process -Force") 
+        execute("powershell.exe Invoke-Expression((new-object net.webclient).DownloadString('https://chocolatey.org/install.ps1'))")
+        execute("refreshenv")
         execute("choco install docker-compose -y")
         
     def _post_install_operations(self): 
@@ -2059,7 +2105,10 @@ class WindowsInspectorInstaller(InspectorInstaller):
         
     def _add_user_to_user_groups(self, user, groups):
         pass
-            
+        
+    def _get_actual_user(self):
+        return getuser()
+        
     def _is_running_as_root_or_in_elevated_mode(self):
         if windll.shell32.IsUserAnAdmin() != 0:  
             return True
@@ -2940,11 +2989,7 @@ class Reporter(EngineConnector):
 
         if not exists(log_file_path):
             raise ValueError(f"'{log_file_path}' does not exist")
-        LogAnalyzer(
-            log_file_path, self.config.report_output_destination, TMP_LOG_UNPACK_DIR, 
-            self.config.report_dump_all_lines, self.config.report_dump_custom_lines,
-            self.config.report_custom_regexs, self.config.report_noise_filtering, 
-            self.config.report_max_log_lines).analyze()
+        LogAnalyzer(self.config, log_file_path, TMP_LOG_UNPACK_DIR).analyze()
 
     def __get_memory_config(self):
         print ("got here")
@@ -2999,20 +3044,13 @@ class DocumentUpdater(EngineConnector):
 
 class LogAnalyzer():
 
-    def __init__(self, log_file_path=None, output_destination=None, log_unpacking_dir=None, 
-                       dump_all_lines=False, dump_custom_lines=False, custom_regexs=[], 
-                       noise_filtering=False, max_lines=0):
-        self.output_destination = output_destination
+    def __init__(self, config, log_file_path=None, log_unpacking_dir=None):
+        self.config = config
         self.log_file = log_file_path
-        self.dump_all_lines = dump_all_lines
-        self.dump_custom_lines = dump_custom_lines
-        self.custom_regexs = custom_regexs
-        self.noise_filtering = noise_filtering
         self.log_unpacking_dir = log_unpacking_dir
         self.unzip_dir = UNZIP_DIR
-        self.max_lines = max_lines
-        if not exists(log_file_path):
-            raise ConfigError(f"There is no {log_file_path}")
+        if not exists(self.log_file):
+            raise ConfigError(f"There is no {self.log_file}")
         self.filtered_patterns = [
             "^.*RestControllerRequestLoggingAspect: triggering JobController.getJob\(\.\.\) with args:.*$",
             "^.*Performing partial update on document.*$"
@@ -3262,13 +3300,14 @@ class LogAnalyzer():
                 "pattern": r"^.*SuggestController.suggestionsGet.+, \{.*query=\[(.*)\]\}, \(GET /ayfie/v1/collections/.+/suggestions.*$"
             },
         ]
-        for regex in self.custom_regexs:
+        self.date_pattern = "^.*\[0m (20[0-2][0-9]-[0-1][0-9]-[0-3][0-9])T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9]{9,9}Z .*$" 
+        for regex in self.config.report_custom_regexs:
             self.symptoms.append({
                 "pattern" : regex,
                 "indication": "custom"
             })
             
-    def get_resource_usage(self, numbers_with_units=True):
+    def get_resource_utilization(self, numbers_with_units=True):
         statistics = {
             "total_virtual_memory":     psutil.virtual_memory().total,
             "available_virtual_memory": psutil.virtual_memory().available, 
@@ -3281,10 +3320,8 @@ class LogAnalyzer():
             for item in statistics:
                 statistics[item] = get_unit_adapted_byte_figure(statistics[item])
         return statistics
-        
-        
-            
-    def clear_counters(self):
+  
+    def _clear_counters(self):
         for symptom in self.symptoms:
             symptom["occurences"] = 0
             symptom["last_occurence_line"] = None
@@ -3304,13 +3341,13 @@ class LogAnalyzer():
             
     def _line_filtering(self, line):
         if len(line.strip()) == 0:
-            return ""
+            return "".encode("utf-8")
         for pattern in self.filtered_patterns:
             m = match(pattern, line)
             if m:
-                return ""
-        return line
-        
+                return "".encode("utf-8")
+        return line.encode("utf-8")
+    
     def _process_log_file(self, log_file):
         if not exists(log_file):
             raise ValueError(f"Path '{log_file}' does not exists")
@@ -3335,113 +3372,156 @@ class LogAnalyzer():
                 log.debug("DataFormatError")
                 raise
             return
-                
+         
+    def _log_file_verification(self, log_file_name, line_count, line):
+        if line_count == 0:
+            if not line.strip().startswith("Attaching to"):
+                raise DataFormatError(f"File '{log_file_name}' is not recognized as a ayfie Inspector log file")
+                    
+    def _query_extraction(self, line):
+        for query_pattern in self.query_patterns:
+            m = match(query_pattern["pattern"], line) 
+            if m:
+                query = m.group(1)
+                if not query_pattern["title"] in self.queries:
+                    self.queries[query_pattern["title"]] = {}
+                item_dict = self.queries[query_pattern["title"]]
+                date = None
+                if self.config.report_queries_by_date:
+                    m = match(self.date_pattern, line)
+                    if m:
+                        date = m.group(1)
+                        if not date in self.queries[query_pattern["title"]]:
+                            self.queries[query_pattern["title"]][date] = {}
+                        item_dict = self.queries[query_pattern["title"]][date]
+                    else:
+                        raise AutoDetectionError(f"Query log line does not have a date: '{line}'")
+                if not query in item_dict:
+                    item_dict[query] = 0
+                item_dict[query] += 1
+                return True
+        return False
+
+    def _system_info_extraction(self, line): 
+        for info in self.temp_system_info: 
+            if "occurence" in info and info["occurence"] == "completed":
+                continue
+            m = match(info["pattern"], line)
+            if m:
+                output_line = []
+                if "count" in info:
+                    info["count"] += 1
+                for item in info["extraction"]:
+                    item_name = item[0]
+                    item_value = item[1]
+                    if type(item_name) is int:
+                        item_name = m.group(item_name)
+                    if item_value:
+                        if type(item_value) is int:
+                            item_value = m.group(item_value)
+                    elif "count" in info:
+                        item_value = info["count"]
+                    else:
+                        raise ValueError("Item_value set to None requires parameter count to be initialized")
+                    if "accumulate" in info:
+                        info["accumulate"].append(item_value)
+                        output_line.append(f"{item_name} ({len(info['accumulate'])}): {', '.join(info['accumulate'])}")
+                    elif "sum" in info:
+                        info["sum"].append(int(item_value))
+                        output_line.append(f"{item_name} ({len(info['sum'])}): {sum(info['sum'])}")
+                    else:
+                        output_line.append(f"{item_name}: {item_value}")
+                if "key" in info:
+                    self.info_pieces[info["key"]] = ", ".join(output_line)
+                else:
+                    self.info_pieces[", ".join(output_line)] = False
+                if "occurence" in info and info["occurence"] == "first":
+                    info["occurence"] = "completed"
+        
+    def _failure_detection(self, line):
+        line_contains_failure_indicator = False
+        for symptom in self.symptoms:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                m = match(symptom["pattern"], line)
+                if m:
+                    line_contains_failure_indicator = False
+                    self.errors_detected = True
+                    symptom["occurences"] += 1
+                    symptom["last_occurence_line"] = self.line_count
+                    symptom["last_occurence_samples"].append(m.group(0))
+                    queue_length = 1
+                    if "queue_length" in symptom:
+                        queue_length = symptom["queue_length"]
+                    while len(symptom["last_occurence_samples"]) > queue_length:
+                        symptom["last_occurence_samples"].popleft()  
+                    if symptom["indication"] == 'custom':
+                        if self.config.report_dump_custom_lines:
+                            print(m.group(0))
+                    elif self.config.report_dump_all_lines:
+                        print(m.group(0))
+        return line_contains_failure_indicator
+                        
+    def log_file_filtering_and_splitting(self, line):
+        if self.config.report_noise_filtering:
+            self.filtered_file.write(self._line_filtering(line))
+                           
     def _process_encoded_log_file(self, log_file, encoding): 
         self.queries = {}
-        system_info = deepcopy(self.system_info)
+        self.temp_system_info = deepcopy(self.system_info)
         with open(log_file, "r", encoding=encoding) as f:
-            if self.noise_filtering:
+            if self.config.report_noise_filtering:
                 output_file = log_file + ".filtered"
             else:
                 output_file = "dummy.txt"
-            with open(output_file, "w") as filtered_file:
+            with open(output_file, "w") as self.filtered_file:
                 pass
-            with open(output_file, "a") as filtered_file:
+            with open(output_file, "ab") as self.filtered_file:
                 self.line_count = 0
                 self.info_pieces = {}
                 for line in f:
-                    if self.noise_filtering:
-                        filtered_file.write(self._line_filtering(line))
-                    if self.line_count == 0:
-                        if not line.strip().startswith("Attaching to"):
-                            raise DataFormatError(f"File '{log_file}' is not recognized as a ayfie Inspector log file")
+                    self._log_file_verification(log_file, self.line_count, line)                      
                     self.line_count += 1
-                    if self.max_lines and self.line_count >= self.max_lines:
+                    self.log_file_filtering_and_splitting(line)
+                    if self.config.report_max_log_lines and self.line_count >= self.config.report_max_log_lines:
                         return
-                        
-                    for query_pattern in self.query_patterns:
-                        m = match(query_pattern["pattern"], line) 
-                        if m:
-                            if not query_pattern["title"] in self.queries:
-                                self.queries[query_pattern["title"]] = {}
-                            if not m.group(1) in self.queries[query_pattern["title"]]:
-                                self.queries[query_pattern["title"]][m.group(1)] = 0
-                            self.queries[query_pattern["title"]][m.group(1)] += 1
-                            continue
-                    for info in system_info: 
-                        if "occurence" in info and info["occurence"] == "completed":
-                            continue
-                        m = match(info["pattern"], line)
-                        if m:
-                            output_line = []
-                            if "count" in info:
-                                info["count"] += 1
-                            for item in info["extraction"]:
-                                item_name = item[0]
-                                item_value = item[1]
-                                if type(item_name) is int:
-                                    item_name = m.group(item_name)
-                                if item_value:
-                                    if type(item_value) is int:
-                                        item_value = m.group(item_value)
-                                elif "count" in info:
-                                    item_value = info["count"]
-                                else:
-                                    raise ValueError("Item_value set to None requires parameter count to be initialized")
-                                if "accumulate" in info:
-                                    info["accumulate"].append(item_value)
-                                    output_line.append(f"{item_name} ({len(info['accumulate'])}): {', '.join(info['accumulate'])}")
-                                elif "sum" in info:
-                                    info["sum"].append(int(item_value))
-                                    output_line.append(f"{item_name} ({len(info['sum'])}): {sum(info['sum'])}")
-                                else:
-                                    output_line.append(f"{item_name}: {item_value}")
-                            if "key" in info:
-                                self.info_pieces[info["key"]] = ", ".join(output_line)
-                            else:
-                                self.info_pieces[", ".join(output_line)] = False
-                            if "occurence" in info and info["occurence"] == "first":
-                                info["occurence"] = "completed"                
-                    for symptom in self.symptoms:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore")
-                            m = match(symptom["pattern"], line)
-                            if m:
-                                self.errors_detected = True
-                                symptom["occurences"] += 1
-                                symptom["last_occurence_line"] = self.line_count
-                                symptom["last_occurence_samples"].append(m.group(0))
-                                queue_length = 1
-                                if "queue_length" in symptom:
-                                    queue_length = symptom["queue_length"]
-                                while len(symptom["last_occurence_samples"]) > queue_length:
-                                    symptom["last_occurence_samples"].popleft()  
-                                if symptom["indication"] == 'custom':
-                                    if self.dump_custom_lines:
-                                        print(m.group(0))
-                                elif self.dump_all_lines:
-                                    print(m.group(0))
-                    m = match(r"Exception", line)
-                    if m:
-                        if not m.group(0) in self.exceptions:
-                            self.exceptions[m.group(0)] = 0
-                        self.exceptions[m.group(0)] += 1
-                
-    def _produce_output(self, title, data_dict, key_value_pair=False, key_quotes=False):
+                    if self._query_extraction(line):
+                        continue
+                    if self._failure_detection(line):
+                        continue
+                    self._system_info_extraction(line)
+        
+    def _filter_out_substrings(self, data_dict):
+        strings = [string.strip() for string in list(data_dict.keys())]
+        strings.sort(key=lambda string: len(string), reverse=True)
+        output = []
+        for string in strings:
+            if not any([s.startswith(string) for s in output]):
+                output.append(string)
+        new_dict = {}
+        for string in data_dict:
+            if string in output:
+                new_dict[string] = data_dict[string]
+        return new_dict
+        
+    def _produce_output(self, title, data_dict, json_dump=False):
         output = ""
         if len(data_dict) > 0:
-            output = f"\n====== {title} ======\n"
-            for key in data_dict.keys():
-                quotes = ""
-                if key_quotes:
-                    quotes = '"'
-                if key_value_pair:
-                    output += f"{quotes}{key}{quotes}: {data_dict[key]}\n"
+            output = f"\n\n====== {title} ======\n"
+            if json_dump:
+                if self.config.report_queries_by_date:
+                    for date in data_dict.keys():
+                        data_dict[date] = self._filter_out_substrings(data_dict[date])
                 else:
+                    data_dict = self._filter_out_substrings(data_dict)
+                output += dumps(data_dict, indent=3)
+            else:
+                for key in data_dict.keys():
                     if data_dict[key]:
                         output += f"{data_dict[key]}\n"
                     else:
-                        output += f"{quotes}{key}{quotes}\n"
+                        output += f"{key}\n"
+            output += "\n"
         return output
          
     def analyze(self):
@@ -3452,22 +3532,24 @@ class LogAnalyzer():
         else:
             ValueError(f"'{self.log_file}' is neither a file nor a directory")
         for log_file in FileHandlingTools().get_next_file(self.log_unpacking_dir):
-            self.clear_counters()
+            self._clear_counters()
             analyses_output = ""
             is_log_file = True
+            is_empty_file = False
             line_info = ""
             try:
                 self._process_log_file(log_file)
                 line_info = f'({self.line_count} LINES) '
                 if self.line_count == 0:
                     is_log_file = False
+                    is_empty_file = True
             except DataFormatError:
                 is_log_file = False
             analyses_output += f'\n\n====== FILE "{log_file}" {line_info}======\n'
             if is_log_file:
                 analyses_output += self._produce_output("Time, System & Operational Information", self.info_pieces)
                 for title in self.queries:
-                    analyses_output += self._produce_output(title, self.queries[title], True, True)
+                    analyses_output += self._produce_output(title, self.queries[title], True)
                 if self.errors_detected:
                     for symptom in self.symptoms:
                         if symptom["occurences"] > 0:
@@ -3481,13 +3563,15 @@ class LogAnalyzer():
                                 analyses_output += f'The message could possibly indicate that {symptom["indication"]}\n'
                 else:
                     analyses_output += "\n  NO KNOWN ERRORS DETECTED"
+            elif is_empty_file:
+                analyses_output += "\n  THE FILE DOES NOT SEEM TO HAVE ANY CONTENT"
             else:
                 analyses_output += "\n  DOES NOT SEEM TO BE AN AYFIE INSPECTOR LOG FILE"
                 
-            if self.output_destination == "terminal":
+            if self.config.report_output_destination == "terminal":
                 print(analyses_output)
             else:
-                with open(self.output_destination, 'wb') as f:
+                with open(self.config.report_ooutput_destination, 'wb') as f:
                     f.write(analyses_output.encode('utf-8'))
                     
     def get_diagnostic_page(self):
@@ -3497,7 +3581,8 @@ class LogAnalyzer():
             page += f"<tr><td>symptom.pattern</td><td>symptom.indication</td></tr>"
         page += "</table><br>" 
         return page
-            
+ 
+ 
 class JobsHandler(EngineConnector):
     
     def __start_job(self, job_type, settings, more_params={}):
@@ -4040,7 +4125,10 @@ class Config():
         self.report_jobs_overview     = self.__get_item(report, 'jobs_overview', False)
         self.report_custom_regexs     = self.__get_item(report, 'custom_regexs', [])
         self.report_max_log_lines     = self.__get_item(report, 'max_log_lines', None)
-        self.report_resource_usage    = self.__get_item(report, 'resource_usage', 0)        
+        self.report_resource_usage    = self.__get_item(report, 'resource_usage', 0)  
+        self.report_queries_by_date   = self.__get_item(report, 'queries_by_date', False) 
+        self.report_log_splitting     = self.__get_item(report, 'log_splitting', False) 
+        
         if not type(self.report_custom_regexs) is list:
             self.report_custom_regexs = [self.report_custom_regexs]
         
