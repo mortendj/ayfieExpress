@@ -10,13 +10,14 @@ from bz2 import decompress
 from codecs import BOM_UTF8, BOM_UTF16_LE, BOM_UTF16_BE, BOM_UTF32_LE, BOM_UTF32_BE
 from shutil import copy, copytree as copy_dir_tree, rmtree as delete_dir_tree
 from typing import Union, List, Optional, Tuple, Set, Dict, DefaultDict, Any
-from re import search, match, sub
+from re import search, match, sub, DOTALL
 from random import random, shuffle
 from subprocess import run, PIPE, STDOUT, TimeoutExpired
 from copy import deepcopy
 from platform import system as operating_system
 from collections import deque
 from getpass import getuser
+from datetime import date, timedelta
 import contextlib
 import logging
 import sys
@@ -51,6 +52,8 @@ TMP_LOG_UNPACK_DIR    = join(ROOT_OUTPUT_DIR, 'tempLogUnpacking')
 OFF_LINE              = "off-line"
 OVERRIDE_CONFIG       = "override_config"
 RESPECT_CONFIG        = "respect_config"
+
+YESTERDAY             = "yesterday"
 
 HTTP_GET              = 'GET'
 HTTP_PUT              = 'PUT'
@@ -204,6 +207,12 @@ LINUX_DOCKER_REGISTRY  = "quay.io"
 WIN_DOCKER_REGISTRY    = "index.docker.io" 
 PWD_START_STOP_TOKEN   = "$#$"
 
+MONITOR_INTERVAL       = 60
+MONITOR_FIFO_LENGTH    = 10
+EMAIL_ALERT            = "email"
+SLACK_ALERT            = "slack"               
+ALERT_TYPES            = [EMAIL_ALERT, SLACK_ALERT]
+
 def get_host_os():
     return operating_system().lower()
 
@@ -356,17 +365,20 @@ def get_unit_adapted_byte_figure(number_of_bytes):
     
 class WebContent():
         
-    def download(self, url, directory):
+    def download(self, url, directory=None):
         response = requests.get(url, allow_redirects=True)
         if response.status_code != 200:
             raise HTTPError(f'Downloading "{url}" failed with HTTP error code {response.status_code}')
         filename = self._get_filename_from_response(response)
         if not filename:
             filename = url.split('/')[-1]
-        path = join(directory, filename)
-        with open(path, 'wb') as f:
-            f.write(response.content)
-        return path
+        if directory:
+            path = join(directory, filename)
+            with open(path, 'wb') as f:
+                f.write(response.content)
+            return path
+        else:
+            return response.content
                 
     def _get_filename_from_response(self, response):
         content_disposition = response.headers.get('content-disposition')
@@ -550,18 +562,18 @@ class FileHandlingTools():
     
 class SearchEngine:
 
-    def __init__(self, server, port, base_endpoint, headers):
+    def __init__(self, server, port, base_endpoint, headers, user=None, password=None):
         self.server = server
         try:
             self.port = str(int(port))
         except ValueError:
             raise ValueError(f"Value '{port}' is not a valid port number")
-        self.protocol = "http"
-        if self.port == '443':
-            self.protocol = "https"
+        self._set_port(port)
         self.base_endpoint = base_endpoint
         self.headers = headers
         self.statusCodes = self._getHTTPStatusCodes()
+        self.user = user
+        self.password = password
         
     def _getHTTPStatusCodes(self):
         return {
@@ -608,7 +620,13 @@ class SearchEngine:
                 "description": "This one is not listed in ayfie literature."
             }
         }
-             
+        
+    def _set_port(self, port):
+        self.port = str(port)
+        self.protocol = "http"
+        if self.port == '443':
+            self.protocol = "https"
+        
     def _get_endpoint(self, path, parameters):
         if parameters:
              parameters = f"?{ parameters}"
@@ -687,25 +705,33 @@ class SearchEngine:
             raise HTTPError(response.text)
         return self._response_format_converter(response_obj)
         
-    def _execute(self, path, verb, data={}, parameters=""):
+    def _get_request_function_to_use(self, verb):   
+        if self.user and self.password:
+            session = requests.Session()
+            session.auth = (self.user, self.password)
+            return getattr(session, verb.lower())
+        return getattr(requests, verb.lower())
+        
+    def _execute(self, path, verb, data={}, parameters="", max_retry_attemps=MAX_CONNECTION_RETRIES):
         self._validateInputValue(verb, HTTP_VERBS)
-        request_function = getattr(requests, verb.lower())
-        endpoint = self._get_endpoint(path, parameters)
+        endpoint = self._get_endpoint(path, parameters) 
+        request_function = self._get_request_function_to_use(verb.lower())
         log.debug(self._gen_req_log_msg(verb, endpoint, data, self.headers))
         if data and verb == "POST" and "batches" in endpoint:
             with open(join(ROOT_OUTPUT_DIR, "last_batch.json"), 'wb') as f:
                 f.write(dumps(data).encode('utf-8'))
-
+                
         tries = 0
         while True:
-            if tries > MAX_CONNECTION_RETRIES:
+            if tries > max_retry_attemps:
                 break
             tries += 1
-            
             try:
                 response = request_function(endpoint, json=data, headers=self.headers)
                 break
             except requests.exceptions.ConnectionError as e:
+                if tries > max_retry_attemps:
+                    raise
                 self._log_attempt_and_go_to_sleep(tries, str(e), go_to_sleep=True)
             except MemoryError:
                 self._log_attempt_and_go_to_sleep(tries, "Out of memory - giving up!", go_to_sleep=False)
@@ -852,7 +878,7 @@ class SearchEngine:
             return True
         return False
 
-    def meta_search(self, col_id, json_query):
+    def meta_search(self, col_id, json_query, retries=MAX_CONNECTION_RETRIES):
         raise NotImplementedError
 
     def json_based_meta_concept_search(self, col_id, json_query):
@@ -935,9 +961,9 @@ class Solr(SearchEngine):
     def get_collection_id(self, col_name):
         return col_name
         
-    def meta_search(self, col_id, json_query):
+    def meta_search(self, col_id, json_query, retries=MAX_CONNECTION_RETRIES):
         print('https://lucene.apache.org/solr/guide/7_1/json-request-api.html')
-        return self._execute(f"{col_id}/select", HTTP_GET, parameters=f"q={json_query['query']}")
+        return self._execute(f"{col_id}/select", HTTP_GET, {}, f"q={json_query['query']}", retries)
  
     def ping(self):
         endpoint = f"admin/ping"
@@ -999,8 +1025,8 @@ class Elasticsearch(Solr):
         
 class Inspector(SearchEngine):
   
-    def __init__(self, server, port, api_version='v1'):
-        SearchEngine.__init__(self, server, port,  f"ayfie/{api_version}", {'Content-Type':'application/hal+json'})
+    def __init__(self, server, port, user=None, password=None, api_version='v1'):           
+        SearchEngine.__init__(self, server, port,  f"ayfie/{api_version}", {'Content-Type':'application/hal+json'}, user, password)
         
     def engine_is_healty(self):
         try:
@@ -1146,9 +1172,9 @@ class Inspector(SearchEngine):
             return True
         return False
 
-    def meta_search(self, col_id, json_query):
+    def meta_search(self, col_id, json_query, retries=MAX_CONNECTION_RETRIES):
         path = f'collections/{col_id}/search'
-        return self._execute(path, HTTP_POST, json_query)
+        return self._execute(path, HTTP_POST, json_query, "", retries)
 
     def json_based_meta_concept_search(self, col_id, json_query):
         path = f'collections/{col_id}/search/concept'
@@ -1200,7 +1226,7 @@ class Inspector(SearchEngine):
             
     ######### Suggest #########
 
-    def get_query_suggestion(self, col_id, query, offset=None, limit=None, filter=None):
+    def get_query_suggestion(self, col_id, query, offset=None, limit=None, filter=None, retries=MAX_CONNECTION_RETRIES):
         parameters = f"query={query}"
         if offset != None:
             parameters += f"&offset={offset}"
@@ -1208,7 +1234,7 @@ class Inspector(SearchEngine):
             parameters += f"&limit={limit}"
         if filter:
             parameters += f"&filter={filter}"
-        return self._execute(f'collections/{col_id}/suggestions?{parameters}', HTTP_GET)      
+        return self._execute(f'collections/{col_id}/suggestions?{parameters}', HTTP_GET, max_retry_attemps=retries)      
             
     ######### Jobs #########
 
@@ -1843,7 +1869,7 @@ class EngineConnector():
     def __init__(self, config, data_source=None):
         self.config = config
         self.data_source = data_source
-        args = [self.config.server, self.config.port, self.config.api_version]
+        args = [self.config.server, self.config.port, self.config.user, self.config.password, self.config.api_version]
         if self.config.engine == INSPECTOR:
             self.engine = Inspector(*args)
         elif self.config.engine == SOLR:
@@ -2910,26 +2936,25 @@ class Clusterer(EngineConnector):
            
 class Querier(EngineConnector):
 
-    def search(self, search):
-        col_id = self.engine.get_collection_id(self.config.col_name)
-        if 'suggest_only' in search and 'suggest_offset' in search:
-            if search['suggest_only'] or search['suggest_offset'] != None:
-                if search['suggest_only']:
-                    return self._get_query_suggestion(col_id, search)
-                elif search['suggest_offset'] != None:
-                    response = self._get_query_suggestion(col_id, search)
-                    try:
-                        search["query"] = response["suggestions"][0]["list"][search['suggest_offset']]["term"]
-                    except IndexError:
-                        return {}
-                    search = {k:v for k,v in search.items() if not k.startswith("suggest")}
-        return self.engine.meta_search(col_id, search)
+    def search(self, search, retries=MAX_CONNECTION_RETRIES, col_id=None):
+        if not col_id:
+            col_id = self.engine.get_collection_id(self.config.col_name)
+        if 'suggest_only' in search and search['suggest_only']:
+            return self.get_query_suggestion(col_id, search, retries)
+        if 'suggest_offset' in search and search['suggest_offset'] != None:
+            response = self._get_query_suggestion(col_id, search, retries)
+            try:
+                search["query"] = response["suggestions"][0]["list"][search['suggest_offset']]["term"]
+            except IndexError:
+                return {}
+            search = {k:v for k,v in search.items() if not k.startswith("suggest")}
+        return self.engine.meta_search(col_id, search, retries)
 
-    def _get_query_suggestion(self, col_id, search):
+    def get_query_suggestion(self, col_id, search, retries=MAX_CONNECTION_RETRIES):
         if not search['suggest_limit'] and type(search['suggest_offset']) is int:
             search['suggest_limit'] = search['suggest_offset'] + 1
         return self.engine.get_query_suggestion(col_id, search['query'], search['suggest_offset'], 
-                                                        search['suggest_limit'], search['suggest_filter'])
+                                                        search['suggest_limit'], search['suggest_filter'], retries)
  
     def get_search_result_pages(self, search):
         col_id = self.engine.get_collection_id(self.config.col_name)
@@ -2954,7 +2979,9 @@ class Querier(EngineConnector):
         
 class Reporter(EngineConnector): 
 
-    def __get_jobs_status(self):
+    def _get_jobs_status(self):
+        if self.config.server == OFF_LINE:
+            raise ValueError("Not possible to request job status for off-line server")
         jobs_handler = JobsHandler(self.config)
         col_id = None
         job_id = None
@@ -2970,7 +2997,7 @@ class Reporter(EngineConnector):
         main_job_only = True
         jobs_handler.print_jobs_overview(None, col_id, job_id, latest_job_only, self.config.report_verbose)
                  
-    def __get_logs_status(self):
+    def _get_logs_status(self):
         if self.config.report_logs_source and self.config.report_retrieve_logs:
             raise ValueError("Reporting options 'logs_source' and 'retrieve_logs' cannot both be set")
         if self.config.report_logs_source:
@@ -2991,14 +3018,14 @@ class Reporter(EngineConnector):
             raise ValueError(f"'{log_file_path}' does not exist")
         LogAnalyzer(self.config, log_file_path, TMP_LOG_UNPACK_DIR).analyze()
 
-    def __get_memory_config(self):
-        print ("got here")
+    def _get_memory_config(self):
+        pass
 
     def do_reporting(self):
         if self.config.report_jobs:
-            self.__get_jobs_status()
+            self._get_jobs_status()
         if self.config.report_logs_source or self.config.report_retrieve_logs:
-            self.__get_logs_status()
+            self._get_logs_status()
       
 
 class DocumentUpdater(EngineConnector):
@@ -3051,6 +3078,10 @@ class LogAnalyzer():
         self.unzip_dir = UNZIP_DIR
         if not exists(self.log_file):
             raise ConfigError(f"There is no {self.log_file}")
+        if self.config.report_log_splitting:
+            self.log_file_splitting_dir = "logsByDate"
+            if not exists(self.log_file_splitting_dir):
+                makedirs(self.log_file_splitting_dir)
         self.filtered_patterns = [
             "^.*RestControllerRequestLoggingAspect: triggering JobController.getJob\(\.\.\) with args:.*$",
             "^.*Performing partial update on document.*$"
@@ -3462,13 +3493,25 @@ class LogAnalyzer():
                         print(m.group(0))
         return line_contains_failure_indicator
                         
-    def log_file_filtering_and_splitting(self, line):
+    def _log_file_filtering_and_splitting(self, line):
         if self.config.report_noise_filtering:
             self.filtered_file.write(self._line_filtering(line))
-                           
+        if self.config.report_log_splitting:
+            m = match(self.date_pattern, line)
+            if m:
+                date = m.group(1)
+                if self.config.report_log_split_filter:
+                    if not date in self.config.report_log_split_filter:
+                        return
+                filepath = join(self.log_file_splitting_dir, date + ".log")
+                if not filepath in self.file_handle_lookup:
+                    self.file_handle_lookup[filepath] = open(filepath, "ab")
+                self.file_handle_lookup[filepath].write(line.encode("utf-8"))
+                     
     def _process_encoded_log_file(self, log_file, encoding): 
         self.queries = {}
         self.temp_system_info = deepcopy(self.system_info)
+        self.file_handle_lookup = {}
         with open(log_file, "r", encoding=encoding) as f:
             if self.config.report_noise_filtering:
                 output_file = log_file + ".filtered"
@@ -3482,14 +3525,17 @@ class LogAnalyzer():
                 for line in f:
                     self._log_file_verification(log_file, self.line_count, line)                      
                     self.line_count += 1
-                    self.log_file_filtering_and_splitting(line)
+                    self._log_file_filtering_and_splitting(line)
                     if self.config.report_max_log_lines and self.line_count >= self.config.report_max_log_lines:
                         return
-                    if self._query_extraction(line):
-                        continue
+                    if self.config.report_queries:
+                        if self._query_extraction(line):
+                            continue
                     if self._failure_detection(line):
                         continue
                     self._system_info_extraction(line)
+        for file in self.file_handle_lookup:
+            self.file_handle_lookup[file].close()
         
     def _filter_out_substrings(self, data_dict):
         strings = [string.strip() for string in list(data_dict.keys())]
@@ -3582,7 +3628,172 @@ class LogAnalyzer():
         page += "</table><br>" 
         return page
  
- 
+class Monitoring(EngineConnector):
+
+    def _send_slack_alert(self, message, web_hooks):
+        for web_hook in web_hooks:
+            requests.post(web_hook, data=dumps({"text":message}))
+            
+    def _send_email_alert(self, message, recipients):
+        for recipient in recipients:
+            print("Email message:")
+            print(recipient)
+            print(message)
+
+    def _terminal_alert(self, message):
+        print("Terminal message:")
+        print(message)
+
+    def _send_alert(self, message, alerts):
+        if not len(alerts):
+            self._terminal_alert(message)
+        else:
+            for alert_type in alerts:
+                if alert_type == EMAIL_ALERT:
+                    self._send_email_alert(message, alerts[alert_type])
+                elif alert_type == SLACK_ALERT:
+                    self._send_slack_alert(message, alerts[alert_type])
+                else:
+                    raise ValueError(f"'{alert_type}' is not a known alert type") 
+        
+    def _system_is_up(self, monitoring):
+        if int((sum(monitoring["monitor_fifo"]) / MONITOR_FIFO_LENGTH) * 100) < monitoring["min_score"]:
+            return False
+        else:
+            return True
+        
+    def _get_page(self, monitoring):
+        return WebContent().download(monitoring["endpoint"])
+        
+    def _page_is_ok(self, result, monitoring):
+        m = match(monitoring["regex"], result.decode(monitoring["encoding"]), DOTALL)
+        if m:
+            return True
+        else:
+            return False
+            
+    def _get_search_result(self, monitoring):
+        config = {
+            "engine":      self.config.engine,
+            "server":      monitoring["server"],
+            "port":        monitoring["port"],
+            "api_version": self.config.api_version,
+            "user":        self.config.user,
+            "password":    self.config.password
+        }
+        querier = Querier(Config(config))
+        return querier.search(monitoring["search"], retries=0, col_id=monitoring["col_id"]) 
+        
+    def _search_result_is_ok(self, result, monitoring):
+        if int(result["meta"]["totalDocuments"]) >=  int(monitoring["min_docs"]):
+            return True
+        else:
+            return False
+            
+    def _search_suggest_is_ok(self, result, monitoring):
+        if int(result["count"]) >=  int(monitoring["min_docs"]):
+            return True
+        else:
+            return False
+            
+    def _alert_if_failure(self, monitoring, result_obtaining_func, result_verification_func):
+        result = None
+        try:
+            result = result_obtaining_func(monitoring)
+        except HTTPError as e:
+            monitoring["monitor_fifo"].append(0)
+        except requests.exceptions.ConnectionError:
+            monitoring["monitor_fifo"].append(0)
+        if result:  
+            if result_verification_func(result, monitoring):
+                monitoring["monitor_fifo"].append(1)
+            else:
+                monitoring["monitor_fifo"].append(0)
+        monitoring["monitor_fifo"].popleft()
+        print(f'{monitoring["server"]}:{monitoring["port"]} - {"query" if monitoring["query"] else "suggest"}')
+        print(monitoring["monitor_fifo"])
+        print  
+        
+        collection = monitoring["col_id"]
+        server = monitoring["server"]
+        port = monitoring["port"]
+        action = "obtain suggestions for"
+        if monitoring["query"]:
+            action = "query"
+        if self._system_is_up(monitoring):
+            if not monitoring["system_up"]:
+                monitoring["system_up"] = True
+                message = f'WORKING AGAIN: Now able to {action} {self.config.engine} collection "{collection}" at "{server}:{port}"'
+                if monitoring["endpoint"]:
+                    message = f'WORKING AGAIN: Now able to dowlload {monitoring["endpoint"]} successfully'
+                self._send_alert(message, monitoring["alerts"]) 
+        else:
+            if monitoring["system_up"]:
+                monitoring["system_up"] = False
+                message = f'FAILURE: Unable to {action} {self.config.engine} collection "{collection}" at "{server}:{port}"'
+                if monitoring["endpoint"]:
+                    message = f'FAILURE: Unable to download {monitoring["endpoint"]} successfully'
+                self._send_alert(message, monitoring["alerts"])
+
+    def _alert_if_failing_query(self, search, monitoring):
+        monitoring["search"] = search
+        self._alert_if_failure(monitoring, self._get_search_result, self._search_result_is_ok)  
+
+    def _alert_if_failing_suggest(self, search, monitoring):
+        monitoring["search"] = search
+        self._alert_if_failure(monitoring, self._get_search_result, self._search_suggest_is_ok)               
+                
+    def _alert_if_failing_page(self, monitoring):
+        self._alert_if_failure(monitoring, self._get_page, self._page_is_ok)
+        
+    def monitor(self):
+        print("Entering infinite monitoring loop - use CTRL-C to break out")
+        monitor_fifo = []
+        duplicates = []
+        for i in range(MONITOR_FIFO_LENGTH):
+            monitor_fifo.append(1)
+        for monitoring in self.config.monitorings:
+            monitoring["monitor_fifo"] = deque(monitor_fifo) 
+            monitoring["system_up"] = True
+            if not monitoring["col_id"]:
+                monitoring["col_id"] = self.config.col_name
+            if not monitoring["server"]:
+                monitoring["server"] = self.config.server
+            if not monitoring["port"]:
+                monitoring["port"] = self.config.port
+            if not monitoring["user"]:
+                monitoring["user"] = self.config.user
+            if not monitoring["password"]:
+                monitoring["password"] = self.config.password               
+            if monitoring["query"] and monitoring["suggest"]:
+                duplicate = deepcopy(monitoring)
+                duplicate["suggest"] = False
+                duplicates.append(duplicate)
+                monitoring["query"] = False
+        self.config.monitorings += duplicates
+        while True:
+            for monitoring in self.config.monitorings:
+                if monitoring["query"]:
+                    self._alert_if_failing_query({
+                        "query" : "",
+                        "size": 0
+                    }, monitoring)
+                if monitoring["suggest"]:
+                    self._alert_if_failing_suggest({
+                        "query" : "jo",
+                        "size": 0,
+                        "suggest_only": True,
+                        "suggest_limit": 1,
+                        "suggest_offset": 0,
+                        "suggest_limit": None,
+                        "suggest_filter": None
+                   }, monitoring)
+                if monitoring["endpoint"]:
+                    self._alert_if_failing_page(monitoring)
+            print()
+            sleep(MONITOR_INTERVAL)
+            
+
 class JobsHandler(EngineConnector):
     
     def __start_job(self, job_type, settings, more_params={}):
@@ -3822,6 +4033,8 @@ class Config():
     def __init__(self, config):
         self.config_keys = list(config.keys())
         self.engine           = self.__get_item(config, 'engine', INSPECTOR)
+        self.user             = self.__get_item(config, 'user', None)
+        self.password         = self.__get_item(config, 'password', None) 
         self.silent_mode      = self.__get_item(config, 'silent_mode', True)
         self.config_source    = self.__get_item(config, 'config_source', None)
         self.server           = self.__get_item(config, 'server', '127.0.0.1')
@@ -3853,6 +4066,8 @@ class Config():
         self.__init_search(self.searches)
         self.reporting        = self.__get_item(config, 'reporting', False)
         self.__init_report(self.reporting)
+        self.monitoring       = self.__get_item(config, 'monitoring', False)
+        self.__init_monitoring(self.monitoring)
         self.regression_testing = self.__get_item(config, 'regression_testing', False)
         self.__init_regression_testing(self.regression_testing)
         self.__inputDataValidation()
@@ -4126,11 +4341,45 @@ class Config():
         self.report_custom_regexs     = self.__get_item(report, 'custom_regexs', [])
         self.report_max_log_lines     = self.__get_item(report, 'max_log_lines', None)
         self.report_resource_usage    = self.__get_item(report, 'resource_usage', 0)  
+        self.report_queries           = self.__get_item(report, 'report_queries', False)
         self.report_queries_by_date   = self.__get_item(report, 'queries_by_date', False) 
-        self.report_log_splitting     = self.__get_item(report, 'log_splitting', False) 
-        
+        self.report_log_splitting     = self.__get_item(report, 'log_splitting', False)
+        self.report_log_split_filter  = self.__get_item(report, 'log_splitting_filter', False)     
+        if self.report_log_split_filter:
+            if type(self.report_log_split_filter) is str:
+                self.report_log_split_filter = [self.report_log_split_filter]
+            yesterday = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
+            self.report_log_split_filter = [yesterday if date == YESTERDAY else date for date in self.report_log_split_filter]
         if not type(self.report_custom_regexs) is list:
             self.report_custom_regexs = [self.report_custom_regexs]
+            
+    def __init_monitoring(self, monitorings):
+        if not monitorings:
+            self.monitorings = []
+            return  
+        self.monitorings = []
+        if not type(monitorings) is list:
+            monitorings = [monitorings]
+        for monitoring in monitorings:
+            self.monitorings.append({
+                "endpoint"           : self.__get_item(monitoring, 'endpoint', None),
+                "encoding"           : self.__get_item(monitoring, 'encoding', "utf-8"),
+                "regex"              : self.__get_item(monitoring, 'regex', "^.*$"),
+                "query"              : self.__get_item(monitoring, 'query', None),
+                "suggest"            : self.__get_item(monitoring, 'suggest', None),
+                "col_id"             : self.__get_item(monitoring, 'col_id', None),
+                "server"             : self.__get_item(monitoring, 'server', None),
+                "port"               : self.__get_item(monitoring, 'port', None),  
+                "user"               : self.__get_item(monitoring, 'user', None),
+                "password"           : self.__get_item(monitoring, 'password', None),                   
+                "min_docs"           : self.__get_item(monitoring, 'min_docs', 0),
+                "min_score"          : self.__get_item(monitoring, 'min_score', 50),
+                "alerts"             : self.__get_item(monitoring, 'alerts', [])                
+            })
+            for monitoring in self.monitorings:
+                for alert_type in monitoring["alerts"]:
+                    if not alert_type in ALERT_TYPES:
+                        raise ValueError(f"'{alert_type}' is not a supported altert type")
         
     def __init_regression_testing(self, regression_testing):
         self.upload_config_dir        = self.__get_item(regression_testing, 'upload_config_dir', None)
@@ -4247,6 +4496,7 @@ class Admin():
         self.classifier = Classifier(self.config)
         self.doc_retriever = DocumentRetriever(self.config)
         self.sampler = Sampler(self.config)
+        self.monitoring = Monitoring(self.config)
         
     def run_post_operations(self):
         if self.config.reporting:
@@ -4354,10 +4604,12 @@ class Admin():
                         f.write(dumps(result, indent=4).encode('utf-8'))
                 else:    
                     msg = f'"result" must be {", ".join(RESULT_TYPES)}, "{SAVE_RESULT}<file path>" or an int'
-                    raise ValueError(msg)       
+                    raise ValueError(msg)
         self.run_post_operations()
+        if self.config.monitorings:
+            self.monitoring.monitor()
  
- 
+
 def run_cmd_line(cmd_line_args): 
     script_name = basename(cmd_line_args[0])
     if not exists(LOG_DIR):
