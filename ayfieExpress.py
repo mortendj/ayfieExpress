@@ -1,6 +1,7 @@
 from json import loads, dumps
 from json.decoder import JSONDecodeError
 from time import sleep, time
+from datetime import datetime, date, timedelta
 from os.path import join, basename, dirname, exists, isdir, isfile, splitext, split as path_split, getsize, isabs
 from os import listdir, makedirs, walk, system, stat, getcwd, chdir, environ
 from zipfile import is_zipfile, ZipFile
@@ -17,7 +18,7 @@ from copy import deepcopy
 from platform import system as operating_system
 from collections import deque
 from getpass import getuser
-from datetime import date, timedelta
+from inspect import signature
 import contextlib
 import logging
 import sys
@@ -40,7 +41,7 @@ INSPECTOR             = "inspector"
 SOLR                  = "solr"
 ELASTICSEARCH         = "elasticsearch"
 
-MAX_LOG_ENTRY_SIZE    = 1000
+MAX_LOG_ENTRY_SIZE    = 2048
 
 ROOT_OUTPUT_DIR       = 'ayfieExpress_output'
 UNZIP_DIR             = join(ROOT_OUTPUT_DIR, 'unzipDir')
@@ -210,8 +211,11 @@ PWD_START_STOP_TOKEN   = "$#$"
 MONITOR_INTERVAL       = 60
 MONITOR_FIFO_LENGTH    = 10
 EMAIL_ALERT            = "email"
-SLACK_ALERT            = "slack"               
-ALERT_TYPES            = [EMAIL_ALERT, SLACK_ALERT]
+SLACK_ALERT            = "slack"   
+TERMINAL_ALERT         = "terminal"          
+ALERT_TYPES            = [TERMINAL_ALERT, EMAIL_ALERT, SLACK_ALERT]
+
+TERMINAL_OUTPUT        = "terminal"
 
 def get_host_os():
     return operating_system().lower()
@@ -562,6 +566,14 @@ class FileHandlingTools():
     
 class SearchEngine:
 
+    @classmethod
+    def get_function_signatures(self):
+        signatures = []
+        for method_name in dir(self):
+            if method_name[0] != '_' and callable(getattr(self, method_name)):
+                signatures.append(str(method_name + str(signature(getattr(self, method_name)))))
+        return signatures
+
     def __init__(self, server, port, base_endpoint, headers, user=None, password=None):
         self.server = server
         try:
@@ -788,7 +800,7 @@ class SearchEngine:
     def _wait_for_collection_to_disappear(self, col_id, timeout=120):
         sleep(1)
         
-    def engine_is_healty(self):
+    def engine_is_healthy(self):
         raise NotImplementedError
               
     ######### Collection Management #########
@@ -1028,7 +1040,7 @@ class Inspector(SearchEngine):
     def __init__(self, server, port, user=None, password=None, api_version='v1'):           
         SearchEngine.__init__(self, server, port,  f"ayfie/{api_version}", {'Content-Type':'application/hal+json'}, user, password)
         
-    def engine_is_healty(self):
+    def engine_is_healthy(self):
         try:
             response = self._execute('health', HTTP_GET)
         except HTTPError:
@@ -1444,7 +1456,7 @@ class DataSource():
         if self.config.data_source == None:
             raise ValueError(f"Parameter 'data_source' is mandatory (but it can point to an empty source)")
         if self.config.data_source.startswith('http'):
-            FileHandlingTools().recreate_directory(DOWNLOAD_DIR)
+            FileHandlingTools.recreate_directory(DOWNLOAD_DIR)
             self.config.data_source = WebContent().download(self.config.data_source, DOWNLOAD_DIR)         
         if not exists(self.config.data_source):
             raise ValueError(f"There is no file or directory called '{self.config.data_source}'")
@@ -1462,6 +1474,7 @@ class DataSource():
         self.unzip_dir = unzip_dir
         self.total_retrieved_file_count = 0
         self.total_retrieved_file_size = 0
+        self.sequential_number = 1000000
         
     def _init(self):
         self.doc_fields_key = "fields"
@@ -1547,14 +1560,22 @@ class DataSource():
         if not mappings:
             raise ConfigError("Configuration lacks a csv mapping table")
         for row in csv.DictReader(csv_file, **format):
-            fields = {**{k:row[v] for k,v in mappings["fields"].items() if not type(v) is list},
-                      **{k:[row[v[0]]] for k,v in mappings["fields"].items() if type(v) is list}}
+            new_row = {}
+            for k,v in mappings["fields"].items():
+                values = v
+                if not type(v) is list:
+                    values = [v]
+                new_row[k] = "\n".join([row[x] for x in values])
+            fields = {}
+            for k,v in mappings["fields"].items():
+                fields[k] = new_row[k]
             doc = {}
             if self.doc_fields_key:
                 doc[self.doc_fields_key] = fields
             else:
                 doc = fields
-            doc["id"] = row[mappings['id']]
+            doc["id"] = row[mappings['id']] if mappings['id'] else "seq-" + str(self.sequential_number)
+            self.sequential_number += 1
             doc = self._add_preprocess_field(doc)
             yield doc
  
@@ -2198,7 +2219,10 @@ class Operational(EngineConnector):
         mem_limits = []
         for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
             coefs, _, _, _, _ = numpy.polyfit([64, 128], [limit_64_ram, limit_128_ram], deg=1, full=True)
-            mem_limits.append(f"{variable}={int(round(self.config.ram_on_host * coefs[0] + coefs[1], 0))}G")
+            mem_limit = int(round(self.config.ram_on_host * coefs[0] + coefs[1], 0))
+            if mem_limit < 1:
+                mem_limit = 1
+            mem_limits.append(f"{variable}={mem_limit}G")
         return "\n".join(mem_limits)
         
     def _retrieve_mem_limits_from_config(self, config_file_path):
@@ -2276,7 +2300,7 @@ class Operational(EngineConnector):
     def wait_until_engine_ready(self, timeout=None):
         waited_so_far = 0
         pull_interval = 1
-        while not self.engine.engine_is_healty():
+        while not self.engine.engine_is_healthy():
             if timeout and waited_so_far > timeout:
                 raise TimeoutError("Giving up waiting for engine to become ready")
             sleep(pull_interval)
@@ -3076,6 +3100,7 @@ class LogAnalyzer():
         self.log_file = log_file_path
         self.log_unpacking_dir = log_unpacking_dir
         self.unzip_dir = UNZIP_DIR
+        self.queries = {}
         if not exists(self.log_file):
             raise ConfigError(f"There is no {self.log_file}")
         if self.config.report_log_splitting:
@@ -3106,13 +3131,13 @@ class LogAnalyzer():
                 "accumulate": []
             },
             {
-                "pattern" : r"^.*type=[A-Z]+,.*jobId=([0-9]+),jobState=FAILED]$",
+                "pattern" : r"^.*type=[A-Z]+,.*jobId=([0-9]+),jobState=FAILED\]$",
                 "extraction": [("Failed jobs", 1)],               
                 "key": "failed jobs",
                 "accumulate": []
             },
             {
-                "pattern" : r"^.*type=[A-Z]+_[A-Z]+,.*jobId=([0-9]+),jobState=FAILED]$",
+                "pattern" : r"^.*type=[A-Z]+_[_A-Z]+,.*jobId=([0-9]+),jobState=FAILED\]$",
                 "extraction": [("Failed sub-jobs", 1)],               
                 "key": "failed sub-jobs",
                 "accumulate": []
@@ -3162,7 +3187,7 @@ class LogAnalyzer():
                 "extraction": [(1, 2)]
             },
             {
-                "pattern" : r"^.*main platform.config.AyfieVersion: ([^\$\{]+)$",   
+                "pattern" : r"^.*main platform.config.AyfieVersion: (Version: .* Buildinfo: .*)$",   
                 "extraction": [("ayfie Inspector", 1)] 
             },
             {
@@ -3292,7 +3317,7 @@ class LogAnalyzer():
                 "indication": "the system is low on disk and Elasticsearch has write protecting the index to prevent possible index corruption."
             },
             {
-                "pattern" : r"^.*java.io.IOException: No space left on device.*$",
+                "pattern" : r"^.*java.io.IOException: (No space left on device|Cannot allocate memory).*$",
                 "indication": "that one is out of disk space."
             },
             {
@@ -3358,7 +3383,6 @@ class LogAnalyzer():
             symptom["last_occurence_line"] = None
             symptom["last_occurence_samples"] = deque([])
         self.errors_detected = False
-        self.exceptions = {}
         
     def _prepare_temp_log_directory(self, log_file, log_dir):
         fht = FileHandlingTools()
@@ -3456,14 +3480,16 @@ class LogAnalyzer():
                         raise ValueError("Item_value set to None requires parameter count to be initialized")
                     if "accumulate" in info:
                         info["accumulate"].append(item_value)
-                        output_line.append(f"{item_name} ({len(info['accumulate'])}): {', '.join(info['accumulate'])}")
                     elif "sum" in info:
                         info["sum"].append(int(item_value))
                         output_line.append(f"{item_name} ({len(info['sum'])}): {sum(info['sum'])}")
                     else:
                         output_line.append(f"{item_name}: {item_value}")
                 if "key" in info:
-                    self.info_pieces[info["key"]] = ", ".join(output_line)
+                    if "accumulate" in info:
+                        self.info_pieces[info["key"]] = info["accumulate"]
+                    elif len(output_line):
+                        self.info_pieces[info["key"]] = output_line[-1]
                 else:
                     self.info_pieces[", ".join(output_line)] = False
                 if "occurence" in info and info["occurence"] == "first":
@@ -3500,16 +3526,17 @@ class LogAnalyzer():
             m = match(self.date_pattern, line)
             if m:
                 date = m.group(1)
-                if self.config.report_log_split_filter:
-                    if not date in self.config.report_log_split_filter:
+                if self.config.report_log_split_date_filter:
+                    if not date in self.config.report_log_split_date_filter:
                         return
                 filepath = join(self.log_file_splitting_dir, date + ".log")
                 if not filepath in self.file_handle_lookup:
                     self.file_handle_lookup[filepath] = open(filepath, "ab")
                 self.file_handle_lookup[filepath].write(line.encode("utf-8"))
                      
-    def _process_encoded_log_file(self, log_file, encoding): 
-        self.queries = {}
+    def _process_encoded_log_file(self, log_file, encoding):
+        if self.config.report_query_statistic_per_file:
+            self.queries = {}
         self.temp_system_info = deepcopy(self.system_info)
         self.file_handle_lookup = {}
         with open(log_file, "r", encoding=encoding) as f:
@@ -3550,11 +3577,20 @@ class LogAnalyzer():
                 new_dict[string] = data_dict[string]
         return new_dict
         
-    def _produce_output(self, title, data_dict, json_dump=False):
+    def _produce_output(self, title, data_dict, format, delimiter=';'):
         output = ""
         if len(data_dict) > 0:
             output = f"\n\n====== {title} ======\n"
-            if json_dump:
+            if format == "single_value":
+                for key in data_dict.keys():
+                    if data_dict[key]:
+                        output += f"{data_dict[key]}\n"
+                    else:
+                        output += f"{key}\n"
+            elif format == CSV:  
+                for key in data_dict.keys():
+                    output += f"{key}{delimiter}{data_dict[key]}\n"           
+            elif format == JSON:
                 if self.config.report_queries_by_date:
                     for date in data_dict.keys():
                         data_dict[date] = self._filter_out_substrings(data_dict[date])
@@ -3562,13 +3598,49 @@ class LogAnalyzer():
                     data_dict = self._filter_out_substrings(data_dict)
                 output += dumps(data_dict, indent=3)
             else:
-                for key in data_dict.keys():
-                    if data_dict[key]:
-                        output += f"{data_dict[key]}\n"
-                    else:
-                        output += f"{key}\n"
+                raise ValueError("'{format}' is an unknown format")
             output += "\n"
         return output
+        
+    def _format_item_output_string(self, data_dict, key):
+        if key in data_dict:
+            if data_dict[key] == []:
+                del data_dict[key]
+            else:
+                data_dict[key] = f"{key} ({len(data_dict[key])}): {', '.join(data_dict[key])}" 
+            
+    def _prepare_item_output(self, data_dict, key, starting_set, end_set):
+        data_dict[key] = [x for x in starting_set if x not in end_set]
+        self._format_item_output_string(data_dict, key)
+        
+    def _get_data_dict_entry(self, data_dict, key):
+        if key in data_dict:
+            return data_dict[key]
+        return []
+        
+    def _post_processing_statistics(self, data_dict):
+        failed_jobs = self._get_data_dict_entry(data_dict, "failed jobs")
+        successful_jobs = self._get_data_dict_entry(data_dict, "successful jobs")
+        failed_sub_jobs = self._get_data_dict_entry(data_dict, "failed sub-jobs")
+        scheduled_jobs = self._get_data_dict_entry(data_dict, "scheduled jobs")
+        started_jobs = self._get_data_dict_entry(data_dict, "started jobs")
+        terminated_jobs = failed_jobs + successful_jobs + failed_sub_jobs
+        self._prepare_item_output(data_dict, "non-run scheduled jobs", scheduled_jobs, started_jobs + terminated_jobs)
+        self._prepare_item_output(data_dict, "non-finished jobs", started_jobs, terminated_jobs)
+        self._format_item_output_string(data_dict, "failed jobs") 
+        self._format_item_output_string(data_dict, "failed sub-jobs") 
+        for key in ["scheduled jobs", "started jobs", "successful jobs"]:
+            if self.config.report_show_all_job_ids:
+                self._format_item_output_string(data_dict, key) 
+            elif key in data_dict:
+                del data_dict[key]
+            
+    def _dump_analyses_output(self, analyses_output):
+        if self.config.report_output_destination == TERMINAL_OUTPUT:
+            print(analyses_output)
+        else:
+            with open(self.config.report_output_destination, 'wb') as f:
+                f.write(analyses_output.encode('utf-8'))
          
     def analyze(self):
         if isfile(self.log_file):
@@ -3577,25 +3649,27 @@ class LogAnalyzer():
             self.log_unpacking_dir = self.log_file
         else:
             ValueError(f"'{self.log_file}' is neither a file nor a directory")
+        analyses_output = ""
         for log_file in FileHandlingTools().get_next_file(self.log_unpacking_dir):
             self._clear_counters()
-            analyses_output = ""
             is_log_file = True
             is_empty_file = False
-            line_info = ""
+            number_of_line_info = ""
             try:
                 self._process_log_file(log_file)
-                line_info = f'({self.line_count} LINES) '
+                self._post_processing_statistics(self.info_pieces)
+                number_of_line_info = f'({self.line_count} LINES) '
                 if self.line_count == 0:
                     is_log_file = False
                     is_empty_file = True
             except DataFormatError:
                 is_log_file = False
-            analyses_output += f'\n\n====== FILE "{log_file}" {line_info}======\n'
+            analyses_output += f'\n\n====== FILE "{log_file}" {number_of_line_info}======\n'
             if is_log_file:
-                analyses_output += self._produce_output("Time, System & Operational Information", self.info_pieces)
-                for title in self.queries:
-                    analyses_output += self._produce_output(title, self.queries[title], True)
+                analyses_output += self._produce_output("Time, System & Operational Information", self.info_pieces, "single_value")
+                if self.config.report_query_statistic_per_file:
+                    for title in self.queries:
+                        analyses_output += self._produce_output(title, self.queries[title], self.config.report_query_statistic_format)
                 if self.errors_detected:
                     for symptom in self.symptoms:
                         if symptom["occurences"] > 0:
@@ -3613,13 +3687,14 @@ class LogAnalyzer():
                 analyses_output += "\n  THE FILE DOES NOT SEEM TO HAVE ANY CONTENT"
             else:
                 analyses_output += "\n  DOES NOT SEEM TO BE AN AYFIE INSPECTOR LOG FILE"
+               
+        if not self.config.report_query_statistic_per_file:
+            analyses_output += "\n\n====== DATA FROM ACROSS VARIOUS FILES ======"
+            for title in self.queries:
+                analyses_output += self._produce_output(title, self.queries[title], self.config.report_query_statistic_format)
                 
-            if self.config.report_output_destination == "terminal":
-                print(analyses_output)
-            else:
-                with open(self.config.report_ooutput_destination, 'wb') as f:
-                    f.write(analyses_output.encode('utf-8'))
-                    
+        self._dump_analyses_output(analyses_output)
+                                 
     def get_diagnostic_page(self):
         page = "<html><head></head><body>"
         page = "<tr><table><th>SYMPTOM</th><th>DIAGNOSES</th></tr>"
@@ -3635,13 +3710,9 @@ class Monitoring(EngineConnector):
             requests.post(web_hook, data=dumps({"text":message}))
             
     def _send_email_alert(self, message, recipients):
-        for recipient in recipients:
-            print("Email message:")
-            print(recipient)
-            print(message)
+        raise NotImplementedError("Email alerting has still not been implemented")
 
-    def _terminal_alert(self, message):
-        print("Terminal message:")
+    def _make_terminal_alert(self, message):
         print(message)
 
     def _send_alert(self, message, alerts):
@@ -3649,7 +3720,9 @@ class Monitoring(EngineConnector):
             self._terminal_alert(message)
         else:
             for alert_type in alerts:
-                if alert_type == EMAIL_ALERT:
+                if alert_type == TERMINAL_ALERT:
+                    self._make_terminal_alert(message)
+                elif alert_type == EMAIL_ALERT:
                     self._send_email_alert(message, alerts[alert_type])
                 elif alert_type == SLACK_ALERT:
                     self._send_slack_alert(message, alerts[alert_type])
@@ -3691,7 +3764,7 @@ class Monitoring(EngineConnector):
             return False
             
     def _search_suggest_is_ok(self, result, monitoring):
-        if int(result["count"]) >=  int(monitoring["min_docs"]):
+        if int(result["count"]) >= int(monitoring["min_docs"]):
             return True
         else:
             return False
@@ -3710,13 +3783,18 @@ class Monitoring(EngineConnector):
             else:
                 monitoring["monitor_fifo"].append(0)
         monitoring["monitor_fifo"].popleft()
-        print(f'{monitoring["server"]}:{monitoring["port"]} - {"query" if monitoring["query"] else "suggest"}')
-        print(monitoring["monitor_fifo"])
-        print  
         
         collection = monitoring["col_id"]
         server = monitoring["server"]
         port = monitoring["port"]
+        
+        if monitoring["endpoint"]:
+            print(monitoring["endpoint"])
+        else:
+            print(f'{"query" if monitoring["query"] else "suggest"} for {collection} @ {server}:{port}')
+        print(monitoring["monitor_fifo"])
+        print  
+        
         action = "obtain suggestions for"
         if monitoring["query"]:
             action = "query"
@@ -3747,7 +3825,7 @@ class Monitoring(EngineConnector):
         self._alert_if_failure(monitoring, self._get_page, self._page_is_ok)
         
     def monitor(self):
-        print("Entering infinite monitoring loop - use CTRL-C to break out")
+        print("Entering infinite monitoring loop")
         monitor_fifo = []
         duplicates = []
         for i in range(MONITOR_FIFO_LENGTH):
@@ -4330,7 +4408,7 @@ class Config():
     def __init_report(self, report):
         self.report_logs_source       = self.__get_item(report, 'logs_source', False)
         self.report_logs_source       = FileHandlingTools().get_absolute_path(self.report_logs_source, self.config_source)
-        self.report_output_destination= self.__get_item(report, 'output_destination', "terminal")
+        self.report_output_destination= self.__get_item(report, 'output_destination', TERMINAL_OUTPUT)
         self.report_verbose           = self.__get_item(report, 'verbose', False)
         self.report_jobs              = self.__get_item(report, 'jobs', False)
         self.report_noise_filtering   = self.__get_item(report, 'noise_filtering', False)
@@ -4338,18 +4416,21 @@ class Config():
         self.report_dump_all_lines    = self.__get_item(report, 'dump_all_lines', False)
         self.report_dump_custom_lines = self.__get_item(report, 'dump_custom_lines', False)
         self.report_jobs_overview     = self.__get_item(report, 'jobs_overview', False)
+        self.report_show_all_job_ids  = self.__get_item(report, 'show_all_job_ids', False)
         self.report_custom_regexs     = self.__get_item(report, 'custom_regexs', [])
         self.report_max_log_lines     = self.__get_item(report, 'max_log_lines', None)
         self.report_resource_usage    = self.__get_item(report, 'resource_usage', 0)  
         self.report_queries           = self.__get_item(report, 'report_queries', False)
-        self.report_queries_by_date   = self.__get_item(report, 'queries_by_date', False) 
+        self.report_queries_by_date   = self.__get_item(report, 'queries_by_date', False)       
         self.report_log_splitting     = self.__get_item(report, 'log_splitting', False)
-        self.report_log_split_filter  = self.__get_item(report, 'log_splitting_filter', False)     
-        if self.report_log_split_filter:
-            if type(self.report_log_split_filter) is str:
-                self.report_log_split_filter = [self.report_log_split_filter]
+        self.report_log_split_date_filter = self.__get_item(report, 'log_split_date_filter', False) 
+        self.report_query_statistic_format = self.__get_item(report, 'query_statistic_format', CSV) 
+        self.report_query_statistic_per_file = self.__get_item(report, 'query_statistic_per_file', True)          
+        if self.report_log_split_date_filter:
+            if type(self.report_log_split_date_filter) is str:
+                self.report_log_split_date_filter = [self.report_log_split_date_filter]
             yesterday = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
-            self.report_log_split_filter = [yesterday if date == YESTERDAY else date for date in self.report_log_split_filter]
+            self.report_log_split_date_filter = [yesterday if date == YESTERDAY else date for date in self.report_log_split_date_filter]
         if not type(self.report_custom_regexs) is list:
             self.report_custom_regexs = [self.report_custom_regexs]
             
@@ -4374,7 +4455,7 @@ class Config():
                 "password"           : self.__get_item(monitoring, 'password', None),                   
                 "min_docs"           : self.__get_item(monitoring, 'min_docs', 0),
                 "min_score"          : self.__get_item(monitoring, 'min_score', 50),
-                "alerts"             : self.__get_item(monitoring, 'alerts', [])                
+                "alerts"             : self.__get_item(monitoring, 'alerts', []),
             })
             for monitoring in self.monitorings:
                 for alert_type in monitoring["alerts"]:
@@ -4642,11 +4723,7 @@ def run_cmd_line(cmd_line_args):
         admin = Admin(Config(config))
         return admin.run_config()
         
-            
 run_from_cmd_line = False
 if __name__ == '__main__':
     run_from_cmd_line = True
     run_cmd_line(sys.argv)
-   
-    
- 
