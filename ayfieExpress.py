@@ -2327,13 +2327,19 @@ class Operational(EngineConnector):
                     raise NotImplementedError("Only the Inspector is supported at this time")
             if operation == OP_ENABLE_GDPR:
                 with change_dir(self.install_dir):
-                    enable_gdpr_app_file = "enable_gdpr_app.yml"
-                    enable_gdpr_docker_compose_file = "enable_gdpr_docker_compose.yml"
-                    with open(enable_gdpr_app_file, "w") as f:
-                        f.write("digestion:\n  processing:\n    entityExtraction:\n      skipExtractors: []")
-                    with open(enable_gdpr_docker_compose_file, "w") as f:
-                        f.write(f"version: '2.1'\nservices:\n  api:\n    volumes:\n      - ./{enable_gdpr_app_file}:/home/dev/restapp/application-custom.yml")
-                    self._administrate_env_file(enable_gdpr_docker_compose_file)
+                    application_pii_yml_filename = "application-pii.yml"
+                    version = self._extract_version_number()
+                    application_pii_yml_content = ""
+                    if 10 * int(version.split(".")[0]) + int(version.split(".")[1]) >= 21:
+                        with open(application_pii_yml_filename + ".template", "r") as f:
+                            application_pii_yml_content = f.read()
+                    application_pii_yml_content += "\n\ndigestion:\n  processing:\n    entityExtraction:\n      skipExtractors: []"
+                    enable_pii_docker_compose_file = "docker-compose-pii.yml"
+                    with open(application_pii_yml_filename, "w") as f:
+                        f.write(application_pii_yml_content)
+                    with open(enable_pii_docker_compose_file, "w") as f:
+                        f.write(f"version: '2.1'\nservices:\n  api:\n    volumes:\n      - ./{application_pii_yml_filename}:/home/dev/restapp/application-custom.yml")
+                    self._administrate_env_file(enable_pii_docker_compose_file)  
             if operation == OP_START:
                 if self.config.engine == INSPECTOR:
                     self.start_inspector()
@@ -2964,7 +2970,7 @@ class Querier(EngineConnector):
         if not col_id:
             col_id = self.engine.get_collection_id(self.config.col_name)
         if 'suggest_only' in search and search['suggest_only']:
-            return self.get_query_suggestion(col_id, search, retries)
+            return self._get_query_suggestion(col_id, search, retries)
         if 'suggest_offset' in search and search['suggest_offset'] != None:
             response = self._get_query_suggestion(col_id, search, retries)
             try:
@@ -2974,7 +2980,7 @@ class Querier(EngineConnector):
             search = {k:v for k,v in search.items() if not k.startswith("suggest")}
         return self.engine.meta_search(col_id, search, retries)
 
-    def get_query_suggestion(self, col_id, search, retries=MAX_CONNECTION_RETRIES):
+    def _get_query_suggestion(self, col_id, search, retries=MAX_CONNECTION_RETRIES):
         if not search['suggest_limit'] and type(search['suggest_offset']) is int:
             search['suggest_limit'] = search['suggest_offset'] + 1
         return self.engine.get_query_suggestion(col_id, search['query'], search['suggest_offset'], 
@@ -3187,7 +3193,7 @@ class LogAnalyzer():
                 "extraction": [(1, 2)]
             },
             {
-                "pattern" : r"^.*main platform.config.AyfieVersion: (Version: .* Buildinfo: .*)$",   
+                "pattern" : r"^.*main platform.config.AyfieVersion: (Version: .* Buildinfo: [^\$]*)\n$",   
                 "extraction": [("ayfie Inspector", 1)] 
             },
             {
