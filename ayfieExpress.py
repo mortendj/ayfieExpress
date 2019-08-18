@@ -54,6 +54,8 @@ OFF_LINE              = "off-line"
 OVERRIDE_CONFIG       = "override_config"
 RESPECT_CONFIG        = "respect_config"
 
+QUERY_API_LOGS        = "Query logs (Api Container)"
+QUERY_SUGGEST_LOGS    = "Query logs (Suggest Container)"
 YESTERDAY             = "yesterday"
 
 HTTP_GET              = 'GET'
@@ -189,7 +191,8 @@ MEM_LIMITS_64_AND_128_GB_RAM = {
         ["SPARK_WORKER_MEMORY",     24, 56],    
         ["SPARK_EXECUTOR_MEMORY",   24, 56],
         ["RECOGNITION_MEM_LIMIT",    4,  8],
-        ["RECOGNITION_MX_HEAP",      2,  6] 
+        ["SUGGEST_MX_HEAP",          6,  6],
+        ["SUGGEST_MEM_LIMIT",        7,  7],
     ] 
 } 
 
@@ -216,6 +219,8 @@ TERMINAL_ALERT         = "terminal"
 ALERT_TYPES            = [TERMINAL_ALERT, EMAIL_ALERT, SLACK_ALERT]
 
 TERMINAL_OUTPUT        = "terminal"
+SILENCED_OUTPUT        = "silent"
+
 
 def get_host_os():
     return operating_system().lower()
@@ -1565,7 +1570,10 @@ class DataSource():
                 values = v
                 if not type(v) is list:
                     values = [v]
-                new_row[k] = "\n".join([row[x] for x in values])
+                if self.config.include_headers_in_data:
+                    new_row[k] = "\n".join([row[x] + " " + x for x in values])
+                else:
+                    new_row[k] = "\n".join([row[x] for x in values])
             fields = {}
             for k,v in mappings["fields"].items():
                 fields[k] = new_row[k]
@@ -2210,18 +2218,33 @@ class Operational(EngineConnector):
         FileHandlingTools().delete_directory(self.install_dir) 
 
     def prune_system(self): 
-        execute("docker system prune --volumes --force", timeout=60)  
+        execute("docker system prune --volumes --force", timeout=60)    
+
+    def _get_mem_limit(self, limit_64_ram, limit_128_ram, ram_on_host):
+        coefs, _, _, _, _ = numpy.polyfit([64, 128], [limit_64_ram, limit_128_ram], deg=1, full=True)
+        mem_limit = int(round(ram_on_host * coefs[0] + coefs[1]))
+        if mem_limit < self.minimum_ram_allocation:
+            mem_limit = self.minimum_ram_allocation
+        return mem_limit
 
     def _gen_mem_limits(self):
         main_version = self._extract_version_number().split(".")[0]
         if not main_version in ["1", "2"]:
             raise ValueError(f"There is no main version number '{str(main_version)}' of the ayfie Inspector")
+        self.minimum_ram_allocation = 1
+        freed_up_ram = 0
+        if self.config.no_suggest_index:
+            for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
+                if variable == "SUGGEST_MEM_LIMIT":
+                    freed_up_ram = self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host)
+                    freed_up_ram -= self.minimum_ram_allocation
+                    break
         mem_limits = []
         for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
-            coefs, _, _, _, _ = numpy.polyfit([64, 128], [limit_64_ram, limit_128_ram], deg=1, full=True)
-            mem_limit = int(round(self.config.ram_on_host * coefs[0] + coefs[1], 0))
-            if mem_limit < 1:
-                mem_limit = 1
+            if self.config.no_suggest_index and "SUGGEST" in variable:
+                mem_limit = self.minimum_ram_allocation
+            else:
+                mem_limit =  self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host + freed_up_ram)
             mem_limits.append(f"{variable}={mem_limit}G")
         return "\n".join(mem_limits)
         
@@ -3110,9 +3133,8 @@ class LogAnalyzer():
         if not exists(self.log_file):
             raise ConfigError(f"There is no {self.log_file}")
         if self.config.report_log_splitting:
-            self.log_file_splitting_dir = "logsByDate"
-            if not exists(self.log_file_splitting_dir):
-                makedirs(self.log_file_splitting_dir)
+            if not exists(self.config.report_log_splitting_dir):
+                makedirs(self.config.report_log_splitting_dir)
         self.filtered_patterns = [
             "^.*RestControllerRequestLoggingAspect: triggering JobController.getJob\(\.\.\) with args:.*$",
             "^.*Performing partial update on document.*$"
@@ -3167,12 +3189,12 @@ class LogAnalyzer():
             },
             {  
                 "pattern" : r"^.*free: (.*gb)\[(.*%)\].*$",
-                "extraction": [("At the start: Available disk space: ", 1), ("Available disk capacity: ", 2)],
+                "extraction": [("First disk space report", 1), ("First disk capacity report", 2)],
                 "occurence": "first"
             }, 
             {
                 "pattern" : r"^.*free: (.*gb)\[(.*%)\].*$",
-                "extraction": [("At the end: Available disk space: ", 1), ("Available disk capacity: ", 2)],
+                "extraction": [("Last disk space report", 1), ("Last disk capacity report", 2)],
                 "occurence": "last",
                 "key": "disk_space"
             },
@@ -3350,15 +3372,15 @@ class LogAnalyzer():
         ] 
         self.query_patterns = [
             {
-                "title": "Query logs (Api Container)",
+                "title": QUERY_API_LOGS, 
                 "pattern": r"^.*DefaultSearchQuery\[query=(.*),highlight.*$"
             },
             {
-                "title": "Query logs (Suggest Container)",
+                "title": QUERY_SUGGEST_LOGS,
                 "pattern": r"^.*suggest.service.ApproxindexSuggestService: External suggest call for \{query=\[(.*)\]\} returned with status 200.*$"
             },
             {
-                "title": "Query logs (Suggest Container)",
+                "title": QUERY_SUGGEST_LOGS,
                 "pattern": r"^.*SuggestController.suggestionsGet.+, \{.*query=\[(.*)\]\}, \(GET /ayfie/v1/collections/.+/suggestions.*$"
             },
         ]
@@ -3423,7 +3445,7 @@ class LogAnalyzer():
                 encodings = [detected_encoding] + encodings
         log.debug(f"Ordered encoding list: {str(encodings)}")
         for encoding in encodings:
-            log.debug(f"Now decoding with encoding '{encoding}'")
+            log.debug(f"Now decoding file '{log_file}' using encoding '{encoding}'")
             try:
                 self._process_encoded_log_file(log_file, encoding)
             except UnicodeDecodeError:
@@ -3438,12 +3460,18 @@ class LogAnalyzer():
         if line_count == 0:
             if not line.strip().startswith("Attaching to"):
                 raise DataFormatError(f"File '{log_file_name}' is not recognized as a ayfie Inspector log file")
-                    
+                     
     def _query_extraction(self, line):
         for query_pattern in self.query_patterns:
             m = match(query_pattern["pattern"], line) 
             if m:
                 query = m.group(1)
+                if self.config.report_remove_query_part:
+                    m = match(self.config.report_remove_query_part, query)
+                    query_part_to_remove = ""
+                    if m:
+                        query_part_to_remove = m.group(0)
+                    query = query.replace(query_part_to_remove, "")
                 if not query_pattern["title"] in self.queries:
                     self.queries[query_pattern["title"]] = {}
                 item_dict = self.queries[query_pattern["title"]]
@@ -3494,8 +3522,8 @@ class LogAnalyzer():
                 if "key" in info:
                     if "accumulate" in info:
                         self.info_pieces[info["key"]] = info["accumulate"]
-                    elif len(output_line):
-                        self.info_pieces[info["key"]] = output_line[-1]
+                    elif output_line:
+                        self.info_pieces[info["key"]] = " ".join(output_line)
                 else:
                     self.info_pieces[", ".join(output_line)] = False
                 if "occurence" in info and info["occurence"] == "first":
@@ -3535,7 +3563,7 @@ class LogAnalyzer():
                 if self.config.report_log_split_date_filter:
                     if not date in self.config.report_log_split_date_filter:
                         return
-                filepath = join(self.log_file_splitting_dir, date + ".log")
+                filepath = join(self.config.report_log_splitting_dir, date + ".log")
                 if not filepath in self.file_handle_lookup:
                     self.file_handle_lookup[filepath] = open(filepath, "ab")
                 self.file_handle_lookup[filepath].write(line.encode("utf-8"))
@@ -3583,10 +3611,11 @@ class LogAnalyzer():
                 new_dict[string] = data_dict[string]
         return new_dict
         
-    def _produce_output(self, title, data_dict, format, delimiter=';'):
+    def _produce_output(self, title, data_dict, format, delimiter=';'):       
         output = ""
         if len(data_dict) > 0:
-            output = f"\n\n====== {title} ======\n"
+            if title:
+                output = f"\n\n====== {title} ======\n"
             if format == "single_value":
                 for key in data_dict.keys():
                     if data_dict[key]:
@@ -3641,12 +3670,21 @@ class LogAnalyzer():
             elif key in data_dict:
                 del data_dict[key]
             
-    def _dump_analyses_output(self, analyses_output):
+    def _dump_output(self, output, output_type=None):
         if self.config.report_output_destination == TERMINAL_OUTPUT:
-            print(analyses_output)
+            print(output)
+        elif self.config.report_output_destination == SILENCED_OUTPUT:
+            return
         else:
-            with open(self.config.report_output_destination, 'wb') as f:
-                f.write(analyses_output.encode('utf-8'))
+            filename = self.config.report_output_destination
+            if output_type == QUERY_API_LOGS:
+                filename += ".query"
+            elif output_type == QUERY_SUGGEST_LOGS: 
+                filename += ".suggest"
+            else:
+                filename += ".txt" 
+            with open(filename, 'wb') as f:
+                f.write(output.encode('utf-8'))
          
     def analyze(self):
         if isfile(self.log_file):
@@ -3656,6 +3694,8 @@ class LogAnalyzer():
         else:
             ValueError(f"'{self.log_file}' is neither a file nor a directory")
         analyses_output = ""
+        query_statistics_output = ""
+        query_suggest_output = ""
         for log_file in FileHandlingTools().get_next_file(self.log_unpacking_dir):
             self._clear_counters()
             is_log_file = True
@@ -3675,7 +3715,8 @@ class LogAnalyzer():
                 analyses_output += self._produce_output("Time, System & Operational Information", self.info_pieces, "single_value")
                 if self.config.report_query_statistic_per_file:
                     for title in self.queries:
-                        analyses_output += self._produce_output(title, self.queries[title], self.config.report_query_statistic_format)
+                        output = self._produce_output(None, self.queries[title], self.config.report_query_statistic_format)
+                        self._dump_output(output, title)
                 if self.errors_detected:
                     for symptom in self.symptoms:
                         if symptom["occurences"] > 0:
@@ -3695,12 +3736,11 @@ class LogAnalyzer():
                 analyses_output += "\n  DOES NOT SEEM TO BE AN AYFIE INSPECTOR LOG FILE"
                
         if not self.config.report_query_statistic_per_file:
-            analyses_output += "\n\n====== DATA FROM ACROSS VARIOUS FILES ======"
             for title in self.queries:
-                analyses_output += self._produce_output(title, self.queries[title], self.config.report_query_statistic_format)
-                
-        self._dump_analyses_output(analyses_output)
-                                 
+                output = self._produce_output(None, self.queries[title], self.config.report_query_statistic_format)
+                self._dump_output(output, title)
+        self._dump_output(analyses_output)
+                      
     def get_diagnostic_page(self):
         page = "<html><head></head><body>"
         page = "<tr><table><th>SYMPTOM</th><th>DIAGNOSES</th></tr>"
@@ -4189,6 +4229,7 @@ class Config():
         self.dot_env_output_path      = self.__get_item(operational, 'dot_env_output_path', ".env")        
         self.enable_frontend          = self.__get_item(operational, 'enable_frontend', True)
         self.ram_on_host              = self.__get_item(operational, 'ram_on_host', 64)
+        self.no_suggest_index         = self.__get_item(operational, 'no_suggest_index', False)
         self.docker_registry          = self.__get_item(operational, 'docker_registry', None)
         self.install_dir              = self.__get_item(operational, 'install_dir', None)
 
@@ -4214,6 +4255,7 @@ class Config():
         self.data_source              = self.__get_item(feeding, 'data_source', None)
         self.data_source              = FileHandlingTools().get_absolute_path(self.data_source, self.config_source)
         self.csv_mappings             = self.__get_item(feeding, 'csv_mappings', self.csv_mappings)
+        self.include_headers_in_data  = self.__get_item(feeding, 'include_headers_in_data', False)
         self.data_type                = self.__get_item(feeding, 'data_type', AUTO)
         self.fallback_data_type       = self.__get_item(feeding, 'fallback_data_type', None)
         self.prefeeding_action        = self.__get_item(feeding, 'prefeeding_action', NO_ACTION)
@@ -4427,8 +4469,10 @@ class Config():
         self.report_max_log_lines     = self.__get_item(report, 'max_log_lines', None)
         self.report_resource_usage    = self.__get_item(report, 'resource_usage', 0)  
         self.report_queries           = self.__get_item(report, 'report_queries', False)
-        self.report_queries_by_date   = self.__get_item(report, 'queries_by_date', False)       
+        self.report_queries_by_date   = self.__get_item(report, 'queries_by_date', False)
+        self.report_remove_query_part = self.__get_item(report, 'remove_query_part', None)       
         self.report_log_splitting     = self.__get_item(report, 'log_splitting', False)
+        self.report_log_splitting_dir = self.__get_item(report, 'log_splitting_dir', "split_log_files")
         self.report_log_split_date_filter = self.__get_item(report, 'log_split_date_filter', False) 
         self.report_query_statistic_format = self.__get_item(report, 'query_statistic_format', CSV) 
         self.report_query_statistic_per_file = self.__get_item(report, 'query_statistic_per_file', True)          
