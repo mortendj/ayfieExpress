@@ -2062,16 +2062,24 @@ class LinuxInspectorInstaller(InspectorInstaller):
         self._install_docker_repository()
         execute("apt-get update")
         execute("apt-get install docker-ce docker-ce-cli containerd.io --assume-yes")
-        response = execute("apt-cache madison docker-ce", return_response=True)
-        log.debug(response)
         version_string = None
-        for line in response.split("\n"):
-            m = match("docker-ce | (.*) | https://download.docker.com/linux/ubuntu bionic/stable amd64 Packages", line)
-            if m:
-                version_string = m.group(1)
+        attempt_count = 0
+        while not version_string:
+            attempt_count += 1
+            response = execute("apt-cache madison docker-ce", return_response=True)
+            log.debug(response)
+            for line in response.split("\n"):
+                m = match("docker-ce | (.*) | https://download.docker.com/linux/ubuntu bionic/stable amd64 Packages", line)
+                if m:
+                    version_string = m.group(1)
+                    break
+            if version_string:
                 break
-        if not version_string:
-            raise AutoDetectionError("Not able to auto detect information about available Docker versions. Set Docker version manually via config.")
+            if attempt_count > 3:
+                raise AutoDetectionError("Not able to auto detect information about available Docker versions.")
+            pause = attempt_count * 20
+            log.debug(f"Failed to obtain the docker version, will try again in {pause} seconds")
+            sleep(pause)
         execute(f"apt-get install docker-ce={version_string} docker-ce-cli={version_string} containerd.io --assume-yes")
         
     def _restart_server_if_required(self):    
