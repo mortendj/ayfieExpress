@@ -2066,12 +2066,12 @@ class LinuxInspectorInstaller(InspectorInstaller):
         log.debug(response)
         version_string = None
         for line in response.split("\n"):
-            m = match("docker-ce | ([\.0-9]+~ce~[-0-9]~ubuntu) | https://download.docker.com/linux/ubuntu bionic/stable amd64 Packages", line)
+            m = match("docker-ce | (.*) | https://download.docker.com/linux/ubuntu bionic/stable amd64 Packages", line)
             if m:
                 version_string = m.group(1)
                 break
         if not version_string:
-            version_string= "18.06.1~ce~3-0~ubuntu"
+            raise AutoDetectionError("Not able to auto detect information about available Docker versions. Set Docker version manually via config.")
         execute(f"apt-get install docker-ce={version_string} docker-ce-cli={version_string} containerd.io --assume-yes")
         
     def _restart_server_if_required(self):    
@@ -2259,7 +2259,19 @@ class Operational(EngineConnector):
             if m:
                 settings.append('='.join([x for x in m.groups() if x]))
         return list(set(settings))
-         
+        
+    def _is_earlier_version(self, earlier_version, later_version):
+        earlier_version = earlier_version.split('.')
+        later_version = later_version.split('.')
+        for version_number in [earlier_version, later_version]:
+            if len(version_number) != 3:
+                version = ".".join(version_number)
+                raise DataFormatError(f"The string '{version}' is not a valid version number")
+        for position in range(len(earlier_version)):
+            if int(earlier_version[position]) < int(later_version[position]):
+                return True
+        return False
+                
     def _extract_version_number(self):
         if self.config.version:
             return self.config.version
@@ -2354,10 +2366,10 @@ class Operational(EngineConnector):
                     raise NotImplementedError("Only the Inspector is supported at this time")
             if operation == OP_ENABLE_GDPR:
                 with change_dir(self.install_dir):
-                    application_pii_yml_filename = "application-pii.yml"
                     version = self._extract_version_number()
+                    application_pii_yml_filename = "application-pii.yml"
                     application_pii_yml_content = ""
-                    if 10 * int(version.split(".")[0]) + int(version.split(".")[1]) >= 21:
+                    if not self._is_earlier_version(version, "2.1.0"):
                         with open(application_pii_yml_filename + ".template", "r") as f:
                             application_pii_yml_content = f.read()
                     application_pii_yml_content += "\n\ndigestion:\n  processing:\n    entityExtraction:\n      skipExtractors: []"
