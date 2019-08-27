@@ -43,7 +43,7 @@ ELASTICSEARCH         = "elasticsearch"
 
 MAX_LOG_ENTRY_SIZE    = 2048
 
-ROOT_OUTPUT_DIR       = 'ayfieExpress_output'
+ROOT_OUTPUT_DIR       = f'{__file__}_output'
 UNZIP_DIR             = join(ROOT_OUTPUT_DIR, 'unzipDir')
 DATA_DIR              = join(ROOT_OUTPUT_DIR, 'dataDir')
 LOG_DIR               = join(ROOT_OUTPUT_DIR, 'log')
@@ -317,6 +317,7 @@ def install_python_modules(modules):
         try:
             __import__(module)
         except ModuleNotFoundError:
+            print(f"Python module '{module}' not installed. Installing now..")
             if first_time:
                 if get_host_os() == OS_LINUX:
                     execute(f"umask 022")
@@ -338,7 +339,7 @@ def install_python_modules(modules):
                 execute(f"{sys.executable} -m pip install {module}")  
                 __import__(module)
             except:
-                print(f"Failed to autoamtatically install one or more of these Python modules: {', '.join(modules)}")
+                print(f"Failed to automatatically install one or more of these Python modules: {', '.join(modules)}")
                 raise
            
 install_python_modules(['requests', 'numpy', 'PyPDF2', 'psutil']) 
@@ -2062,6 +2063,7 @@ class LinuxInspectorInstaller(InspectorInstaller):
         execute("apt-get update")
         execute("apt-get install docker-ce docker-ce-cli containerd.io --assume-yes")
         response = execute("apt-cache madison docker-ce", return_response=True)
+        log.debug(response)
         version_string = None
         for line in response.split("\n"):
             m = match("docker-ce | ([\.0-9]+~ce~[-0-9]~ubuntu) | https://download.docker.com/linux/ubuntu bionic/stable amd64 Packages", line)
@@ -2134,6 +2136,8 @@ class WindowsInspectorInstaller(InspectorInstaller):
         execute("powershell.exe Find-PackageProvider -Name 'Nuget' -ForceBootstrap -IncludeDependencies")
         execute("powershell.exe Install-Module DockerMsftProvider -Force")
         execute("powershell.exe Install-Package Docker -ProviderName DockerMsftProvider -Force")
+        
+        Microsoft.PowerShell.Archive\
        
     def _start_docker(self):
         execute("powershell.exe Start-Service Docker")
@@ -3287,7 +3291,11 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*java\.lang\.OutOfMemoryError.*$",
                 "indication": "the JVM has run out of memory."
-            },            
+            },  
+            {
+                "pattern" : r"^.*java\.lang\.IllegalStateException: unread block data.*$",
+                "indication": "the JVM has run out of memory."
+            },           
             {
                 "pattern" : r"^.*all nodes failed.*$",
                 "indication": "we have come across what before used to be referred to as 'slow disk' errors, but that we now know are more nuanced than that (will be updated)"
@@ -3302,7 +3310,7 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*index read-only / allow delete \(api\).*$",
-                "indication": "the system is low on disk and Elasticsearch has write protecting the index to prevent possible index corruption."
+                "indication": "the system is low on disk and Elasticsearch has write protecting the index to prevent possible index corruption. Check out http://docs.ayfie.com/ayfie-platform/documentation/api.html#_cleanup_after_disk_full for how to recover."
             },
             {
                 "pattern" : r"^.*low disk watermark \[[0-9]+%\] exceeded.*$",
@@ -3342,7 +3350,7 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*all indices on this node will be marked read-only.*$",
-                "indication": "the system is low on disk and Elasticsearch has write protecting the index to prevent possible index corruption."
+                "indication": "the system is low on disk and Elasticsearch has write protecting the index to prevent possible index corruption. Check out http://docs.ayfie.com/ayfie-platform/documentation/api.html#_cleanup_after_disk_full for how to recover."
             },
             {
                 "pattern" : r"^.*java.io.IOException: (No space left on device|Cannot allocate memory).*$",
