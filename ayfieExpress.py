@@ -11,7 +11,7 @@ from bz2 import decompress
 from codecs import BOM_UTF8, BOM_UTF16_LE, BOM_UTF16_BE, BOM_UTF32_LE, BOM_UTF32_BE
 from shutil import copy, copytree as copy_dir_tree, rmtree as delete_dir_tree
 from typing import Union, List, Optional, Tuple, Set, Dict, DefaultDict, Any
-from re import search, match, sub, DOTALL
+from re import search, match, sub, DOTALL, compile
 from random import random, shuffle
 from subprocess import run, PIPE, STDOUT, TimeoutExpired
 from copy import deepcopy
@@ -54,6 +54,7 @@ OFF_LINE              = "off-line"
 OVERRIDE_CONFIG       = "override_config"
 RESPECT_CONFIG        = "respect_config"
 
+LOG_FILE_START_STRING = "Attaching to"
 QUERY_API_LOGS        = "Query logs (Api Container)"
 QUERY_SUGGEST_LOGS    = "Query logs (Suggest Container)"
 YESTERDAY             = "yesterday"
@@ -3382,7 +3383,7 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*(jobState=FAILED|,description=Execution failed: ).*$",
-                "indication": "a job has failed. Use the jobId(s) above to look up further failure details using 'curl server:port/ayfie/v1/jobs/jobId' after replacing `jobId` with the id of the failing sub-job (or the job in absence of any sub-job).",
+                "indication": "a job has failed. Use the jobId(s) above to look up further failure details using 'curl <server>:<port>/ayfie/v1/jobs/<jobId>?verbose=true' after replacing <jobId> with the id of the failing sub-job (or the job in absence of any sub-job).",
                 "queue_length": 2
             },
             {
@@ -3396,8 +3397,35 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*Total size of serialized results.+bigger than spark.driver.maxResultSize.*$",
                 "indication": "one has run into a hard coded mem limit that has been removed in later versions."
-            }   
-        ] 
+            },
+            {
+                "pattern" : r"^.*requirement failed: The vocabulary size should be > 0.*$",
+                "indication": "a classifier training job has failed due to there not being any tagged documents in the training set or that there were not sufficient entities and/or tokens in the tagged documents to do the training."
+            },
+            {
+                "pattern" : r"^.*numHashTables given invalid value.*$",
+                "indication": "bad or errounous job parameter values have been used for near dupe detection. For instance, if the parameter 'minimalSimilarity' were to be set to let's say '0.9' instead of '90.0', that could in some circumstance cause this message."
+            },
+            {
+                "pattern" : r"^.*ayfie\.platform\.digestion\.jobs\.clustering\.joining\.LSHSimilarityAttributeJoiner\.join\(LSHSimilarityAttributeJoiner\.java:.*$",
+                "indication": "the not cusotmer documented parameter 'hashtable' value needs to be reduced high."
+            },   
+            {
+                "pattern" : r"^.*RecognizeDictionaryWriter: Failed to create recognition dictionary!$",
+                "indication": "the dictionay write operation failed. This is a known issue for large collection that was fixed in 2.1.0 of Inspector."
+            },
+            {
+                "pattern" : r"^.*I/O error on POST request for \"[^ ]+\": Read timed out;.*$",
+                "indication": "the Spark read or write operation timed out."
+            } 
+        ]
+        for regex in self.config.report_custom_regexs:
+            self.symptoms.append({
+                "pattern" : regex,
+                "indication": "custom"
+            })        
+        for symptom in self.symptoms:
+            symptom["compiled_pattern"] = compile(symptom["pattern"])
         self.query_patterns = [
             {
                 "title": QUERY_API_LOGS, 
@@ -3412,12 +3440,9 @@ class LogAnalyzer():
                 "pattern": r"^.*SuggestController.suggestionsGet.+, \{.*query=\[(.*)\]\}, \(GET /ayfie/v1/collections/.+/suggestions.*$"
             },
         ]
-        self.date_pattern = "^.*\[0m (20[0-2][0-9]-[0-1][0-9]-[0-3][0-9])T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9]{9,9}Z .*$" 
-        for regex in self.config.report_custom_regexs:
-            self.symptoms.append({
-                "pattern" : regex,
-                "indication": "custom"
-            })
+        for query_pattern in self.query_patterns:
+            query_pattern["compiled_pattern"] = compile(query_pattern["pattern"])
+        self.compiled_date_pattern = compile("^.*\[0m (20[0-2][0-9]-[0-1][0-9]-[0-3][0-9])T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9]{9,9}Z .*$")
             
     def get_resource_utilization(self, numbers_with_units=True):
         statistics = {
@@ -3485,21 +3510,23 @@ class LogAnalyzer():
             return
          
     def _log_file_verification(self, log_file_name, line_count, line):
-        if line_count == 0:
-            if not line.strip().startswith("Attaching to"):
+        if line_count == 0 and not self.config.report_skip_format_test:
+            if not line.strip().startswith(LOG_FILE_START_STRING):
                 raise DataFormatError(f"File '{log_file_name}' is not recognized as a ayfie Inspector log file")
                      
     def _query_extraction(self, line):
         for query_pattern in self.query_patterns:
-            m = match(query_pattern["pattern"], line) 
+            m = query_pattern["compiled_pattern"].match(line) 
             if m:
                 query = m.group(1)
                 if self.config.report_remove_query_part:
-                    m = match(self.config.report_remove_query_part, query)
-                    query_part_to_remove = ""
-                    if m:
-                        query_part_to_remove = m.group(0)
-                    query = query.replace(query_part_to_remove, "")
+                    hit = False
+                    for query_part in self.config.report_remove_query_part:
+                        m = match(query_part, query)
+                        if m:
+                            query = query.replace(m.group(1), "")
+                        else:
+                            break
                 if not query_pattern["title"] in self.queries:
                     self.queries[query_pattern["title"]] = {}
                 item_dict = self.queries[query_pattern["title"]]
@@ -3523,7 +3550,7 @@ class LogAnalyzer():
         for info in self.temp_system_info: 
             if "occurence" in info and info["occurence"] == "completed":
                 continue
-            m = match(info["pattern"], line)
+            m = info["compiled_pattern"].match(line)
             if m:
                 output_line = []
                 if "count" in info:
@@ -3562,7 +3589,7 @@ class LogAnalyzer():
         for symptom in self.symptoms:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                m = match(symptom["pattern"], line)
+                m = symptom["compiled_pattern"].match(line)
                 if m:
                     line_contains_failure_indicator = False
                     self.errors_detected = True
@@ -3594,12 +3621,16 @@ class LogAnalyzer():
                 filepath = join(self.config.report_log_splitting_dir, date + ".log")
                 if not filepath in self.file_handle_lookup:
                     self.file_handle_lookup[filepath] = open(filepath, "ab")
+                    start_line = LOG_FILE_START_STRING + "\n"
+                    self.file_handle_lookup[filepath].write(start_line.encode("utf-8"))
                 self.file_handle_lookup[filepath].write(line.encode("utf-8"))
                      
     def _process_encoded_log_file(self, log_file, encoding):
         if self.config.report_query_statistic_per_file:
             self.queries = {}
         self.temp_system_info = deepcopy(self.system_info)
+        for info in self.temp_system_info:
+            info["compiled_pattern"] = compile(info["pattern"])
         self.file_handle_lookup = {}
         with open(log_file, "r", encoding=encoding) as f:
             if self.config.report_noise_filtering:
@@ -3612,7 +3643,7 @@ class LogAnalyzer():
                 self.line_count = 0
                 self.info_pieces = {}
                 for line in f:
-                    self._log_file_verification(log_file, self.line_count, line)                      
+                    self._log_file_verification(log_file, self.line_count, line) 
                     self.line_count += 1
                     self._log_file_filtering_and_splitting(line)
                     if self.config.report_max_log_lines and self.line_count >= self.config.report_max_log_lines:
@@ -3639,7 +3670,7 @@ class LogAnalyzer():
                 new_dict[string] = data_dict[string]
         return new_dict
         
-    def _produce_output(self, title, data_dict, format, delimiter=';'):       
+    def _produce_output(self, title, data_dict, format, delimiter=';'): 
         output = ""
         if len(data_dict) > 0:
             if title:
@@ -3698,7 +3729,7 @@ class LogAnalyzer():
             elif key in data_dict:
                 del data_dict[key]
             
-    def _dump_output(self, output, output_type=None):
+    def _dump_output(self, output, output_type=None): 
         if self.config.report_output_destination == TERMINAL_OUTPUT:
             print(output)
         elif self.config.report_output_destination == SILENCED_OUTPUT:
@@ -3762,7 +3793,7 @@ class LogAnalyzer():
                 analyses_output += "\n  THE FILE DOES NOT SEEM TO HAVE ANY CONTENT"
             else:
                 analyses_output += "\n  DOES NOT SEEM TO BE AN AYFIE INSPECTOR LOG FILE"
-               
+        
         if not self.config.report_query_statistic_per_file:
             for title in self.queries:
                 output = self._produce_output(None, self.queries[title], self.config.report_query_statistic_format)
@@ -4233,7 +4264,7 @@ class Config():
 
     def __get_item(self, config, item, default):
         if config:
-            if item in config and (config[item] or type(config[item]) in [bool, int]):
+            if item in config and (config[item] or type(config[item]) in [bool, int, float]):
                 return config[item]
         return default
 
@@ -4386,7 +4417,7 @@ class Config():
             self.classifications.append({
                 "name"              : self.__get_item(classification, 'name', None),
                 "training_field"    : self.__get_item(classification, 'trainingClassesField', 'trainingClass'),
-                "min_score"         : self.__get_item(classification, 'minScore', 0.6),
+                "min_score"         : self.__get_item(classification, 'minScore', 0.66666),
                 "num_results"       : self.__get_item(classification, 'numResults', 1),
                 "training_filters"  : self.__get_item(classification, 'training_filters', []),
                 "execution_filters" : self.__get_item(classification, 'execution_filters', []),
@@ -4394,7 +4425,7 @@ class Config():
                 "k-fold"            : self.__get_item(classification, 'k-fold', None),
                 "test_output_file"  : self.__get_item(classification, 'test_output_file', "test_output_file.html")
             })
-        
+
     def __init_documents_updates(self, documents_updates):
         self.docs_updates = []
         if not type(documents_updates) is list:
@@ -4483,6 +4514,7 @@ class Config():
 
     def __init_report(self, report):
         self.report_logs_source       = self.__get_item(report, 'logs_source', False)
+        self.report_skip_format_test  = self.__get_item(report, 'skip_format_test', False)
         self.report_logs_source       = FileHandlingTools().get_absolute_path(self.report_logs_source, self.config_source)
         self.report_output_destination= self.__get_item(report, 'output_destination', TERMINAL_OUTPUT)
         self.report_verbose           = self.__get_item(report, 'verbose', False)
@@ -4498,7 +4530,10 @@ class Config():
         self.report_resource_usage    = self.__get_item(report, 'resource_usage', 0)  
         self.report_queries           = self.__get_item(report, 'report_queries', False)
         self.report_queries_by_date   = self.__get_item(report, 'queries_by_date', False)
-        self.report_remove_query_part = self.__get_item(report, 'remove_query_part', None)       
+        self.report_remove_query_part = self.__get_item(report, 'remove_query_part', None)
+        if self.report_remove_query_part:
+            if not type(self.report_remove_query_part) is list:
+                self.report_remove_query_part = [self.report_remove_query_part]            
         self.report_log_splitting     = self.__get_item(report, 'log_splitting', False)
         self.report_log_splitting_dir = self.__get_item(report, 'log_splitting_dir', "split_log_files")
         self.report_log_split_date_filter = self.__get_item(report, 'log_split_date_filter', False) 
