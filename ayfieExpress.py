@@ -19,6 +19,8 @@ from platform import system as operating_system
 from collections import deque
 from getpass import getuser
 from inspect import signature
+from paramiko import SSHClient, AutoAddPolicy
+from scp import SCPClient
 import contextlib
 import logging
 import sys
@@ -174,7 +176,9 @@ OP_UNINSTALL           = "uninstall"
 OP_PRUNE_SYSTEM        = "prune"
 OP_GEN_DOT_ENV         = "gen_dot_env"
 OP_ENABLE_GDPR         = "enable_gdpr"
-OPERATIONS             = [OP_INSTALL, OP_START, OP_STOP, OP_UNINSTALL, OP_PRUNE_SYSTEM, OP_GEN_DOT_ENV, OP_ENABLE_GDPR]
+OP_COPY_FROM_REMOTE    = "copy_from_remote"
+OP_COPY_TO_REMOTE      = "copy_to_remote"
+OPERATIONS             = [OP_INSTALL, OP_START, OP_STOP, OP_UNINSTALL, OP_PRUNE_SYSTEM, OP_GEN_DOT_ENV, OP_ENABLE_GDPR, OP_COPY_FROM_REMOTE, OP_COPY_TO_REMOTE]
 
 MEM_LIMITS_64_AND_128_GB_RAM = {
     "1": [
@@ -2181,8 +2185,37 @@ class WindowsInspectorInstaller(InspectorInstaller):
         if windll.shell32.IsUserAnAdmin() != 0:  
             return True
         else:
-            return False   
-        
+            return False
+
+class RemoteServer():
+
+    def __init__(self, server, username, port=22):
+        self.ssh = SSHClient()
+        self.ssh.load_system_host_keys()
+        self.ssh.set_missing_host_key_policy(AutoAddPolicy())
+        params = {
+            "hostname": server,
+            "username": username,
+            "port": port
+        }
+        self.ssh.connect(**params)
+
+    def _execute_command(self, command):
+        stdin, stdout, stderr = self.ssh.exec_command(command)
+        return stdout.read()
+
+    def find_files(self, start_directory, file_pattern):
+        response = self._execute_command(f'find {start_directory} -name "{file_pattern}"')
+        return [ line.decode('utf-8') for line in response.splitlines()]
+
+    def copy_file_from_remote(self, from_path, to_path):
+        with SCPClient(self.ssh.get_transport()) as scp:
+            scp.get(from_path, to_path)
+
+    def copy_file_to_remote(self, from_path, to_path):
+        with SCPClient(self.ssh.get_transport()) as scp:
+            scp.put(from_path, to_path)
+            
 
 class Operational(EngineConnector):
 
@@ -2205,6 +2238,29 @@ class Operational(EngineConnector):
         elif self.host_os == OS_WINDOWS:
             self.docker_registry = WIN_DOCKER_REGISTRY 
             self.script_extension = "cmd"
+
+    def _remote_file_copy(self, copy_config, direction):
+        server = copy_config["server"]
+        remote_server = RemoteServer(server, copy_config["user"])
+        if direction == "from_remote":
+            file_paths = remote_server.find_files(copy_config["remote_dir"], copy_config["filename_pattern"])
+        elif direction == "to_remote":
+            raise NotImplementedError("Copying from local to remote server has not yet been implemented")
+            if self.host_os == OS_WINDOWS:
+                file_paths = []
+            else:
+                file_paths = []
+        else:
+            raise ValueError(f"Function parameter 'direction' cannot take the value '{direction}'")
+        for file_path in file_paths:
+            local_path = copy_config["local_dir"] + "/" + basename(file_path)
+            remote_path = copy_config["remote_dir"]+ "/" + basename(file_path)
+            if direction == "from_remote":
+                print(f"Copying '{remote_path}' froms server '{server}' to local host as '{local_path}'")
+                remote_server.copy_file_from_remote(remote_path, local_path)
+            else:
+                print(f"Copying '{local_path}' to server '{server}' to as '{remote_path}'")
+                remote_server.copy_file_to_remote(local_path, remote_path)
         
     def _inspector_operation(self, operation):
         with change_dir(self.install_dir):
@@ -2360,6 +2416,10 @@ class Operational(EngineConnector):
             if not operation in OPERATIONS:
                 raise ValueError(f'Operation "{operation}" is an unknown operation')
         for operation in operations:
+            if operation == OP_COPY_FROM_REMOTE:
+                self._remote_file_copy(self.config.copy_from_remote, "from_remote")
+            if operation == OP_COPY_TO_REMOTE:
+                self._remote_file_copy(self.config.copy_to_remote, "to_remote")
             if operation == OP_INSTALL:
                 if self.config.engine == INSPECTOR:
                     dot_env_file_content = self._administrate_env_file()
@@ -3417,7 +3477,7 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*I/O error on POST request for \"[^ ]+\": Read timed out;.*$",
                 "indication": "the Spark read or write operation timed out."
-            } 
+            }  
         ]
         for regex in self.config.report_custom_regexs:
             self.symptoms.append({
@@ -4291,6 +4351,7 @@ class Config():
         self.no_suggest_index         = self.__get_item(operational, 'no_suggest_index', False)
         self.docker_registry          = self.__get_item(operational, 'docker_registry', None)
         self.install_dir              = self.__get_item(operational, 'install_dir', None)
+        self.copy_from_remote         = self.__get_item(operational, 'copy_from_remote', None)
 
     def __init_schema(self, schema_changes):
         if not schema_changes:
