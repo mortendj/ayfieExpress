@@ -19,8 +19,6 @@ from platform import system as operating_system
 from collections import deque
 from getpass import getuser
 from inspect import signature
-from paramiko import SSHClient, AutoAddPolicy
-from scp import SCPClient
 import contextlib
 import logging
 import sys
@@ -347,11 +345,13 @@ def install_python_modules(modules):
                 print(f"Failed to automatatically install one or more of these Python modules: {', '.join(modules)}")
                 raise
            
-install_python_modules(['requests', 'numpy', 'PyPDF2', 'psutil']) 
+install_python_modules(['requests', 'numpy', 'PyPDF2', 'psutil', 'paramiko', 'scp']) 
 import requests
 import numpy
 import PyPDF2
 import psutil
+import paramiko
+import scp
     
 @contextlib.contextmanager
 def change_dir(dir):
@@ -2190,9 +2190,9 @@ class WindowsInspectorInstaller(InspectorInstaller):
 class RemoteServer():
 
     def __init__(self, server, username, port=22):
-        self.ssh = SSHClient()
+        self.ssh = paramiko.SSHClient()
         self.ssh.load_system_host_keys()
-        self.ssh.set_missing_host_key_policy(AutoAddPolicy())
+        self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         params = {
             "hostname": server,
             "username": username,
@@ -2209,11 +2209,11 @@ class RemoteServer():
         return [ line.decode('utf-8') for line in response.splitlines()]
 
     def copy_file_from_remote(self, from_path, to_path):
-        with SCPClient(self.ssh.get_transport()) as scp:
+        with scp.SCPClient(self.ssh.get_transport()) as scp:
             scp.get(from_path, to_path)
 
     def copy_file_to_remote(self, from_path, to_path):
-        with SCPClient(self.ssh.get_transport()) as scp:
+        with scp.SCPClient(self.ssh.get_transport()) as scp:
             scp.put(from_path, to_path)
             
 
