@@ -178,6 +178,16 @@ OP_COPY_FROM_REMOTE    = "copy_from_remote"
 OP_COPY_TO_REMOTE      = "copy_to_remote"
 OPERATIONS             = [OP_INSTALL, OP_START, OP_STOP, OP_UNINSTALL, OP_PRUNE_SYSTEM, OP_GEN_DOT_ENV, OP_ENABLE_GDPR, OP_COPY_FROM_REMOTE, OP_COPY_TO_REMOTE]
 
+DOCKER_COMPOSE_FILE          = "docker-compose.yml"
+DOCKER_COMPOSE_CUSTOM_FILE   = "docker-compose-custom.yml"
+DOCKER_COMPOSE_PII_FILE      = "docker-compose-pii.yml"
+DOCKER_COMPOSE_METRICS_FILE  = "docker-compose-metrics.yml"
+DOCKER_COMPOSE_FRONTEND_FILE = "docker-compose-frontend.yml"
+APPL_PII_FILE                = "application-pii.yml"
+APPL_PII_TEMPLATE_FILE       = "application-pii.yml.template"
+
+ELASTICSEARCH_MAX_MEM_LIMIT  = 26
+ELASTICSEARCH_MAX_MX_HEAP    = 16
 MEM_LIMITS_64_AND_128_GB_RAM = {
     "1": [
         ["AYFIE_MEM_LIMIT",         42, 84],
@@ -194,10 +204,12 @@ MEM_LIMITS_64_AND_128_GB_RAM = {
         ["SPARK_WORKER_MEMORY",     24, 56],    
         ["SPARK_EXECUTOR_MEMORY",   24, 56],
         ["RECOGNITION_MEM_LIMIT",    4,  8],
+        ["RECOGNITION_MX_HEAP",      2,  6],
         ["SUGGEST_MX_HEAP",          6,  6],
         ["SUGGEST_MEM_LIMIT",        7,  7],
     ] 
 } 
+
 
 NON_ACTION_CONFIG      = ["server", 'port', 'col_name', 'config_source', 'silent_mode']
 OFFLINE_ACTIONS        = ["operational", "reporting"]   
@@ -320,7 +332,7 @@ def install_python_modules(modules):
         try:
             __import__(module)
         except ModuleNotFoundError:
-            print(f"Python module '{module}' not installed. Installing now..")
+            print(f"Python module '{module}' not installed. Installing now...")
             if first_time:
                 if get_host_os() == OS_LINUX:
                     execute(f"umask 022")
@@ -947,7 +959,7 @@ class SearchEngine:
         
 class Solr(SearchEngine):
 
-    def __init__(self, server, port, api_version=None):
+    def __init__(self, server, port, user=None, password=None, api_version=None): 
         SearchEngine.__init__(self, server, port, "solr", {"Content-Type":"application/json"})
          
     def _response_format_converter(self, response_obj):
@@ -985,7 +997,7 @@ class Solr(SearchEngine):
         return col_name
         
     def meta_search(self, col_id, json_query, retries=MAX_CONNECTION_RETRIES):
-        print('https://lucene.apache.org/solr/guide/7_1/json-request-api.html')
+        print('Info for later implementation: https://lucene.apache.org/solr/guide/7_1/json-request-api.html')
         return self._execute(f"{col_id}/select", HTTP_GET, {}, f"q={json_query['query']}", retries)
  
     def ping(self):
@@ -1008,7 +1020,7 @@ class Solr(SearchEngine):
         
 class Elasticsearch(Solr):
 
-    def __init__(self, server, port, api_version=None):
+    def __init__(self, server, port, user=None, password=None, api_version=None):
         SearchEngine.__init__(self, server, port, "", {"Content-Type":"application/json"})
         
     def _get_response_object(self, response, verb, endpoint):
@@ -1914,6 +1926,11 @@ class EngineConnector():
         else:
             raise ValueError(f"Engine {self.config.engine} is not supported")
         self._init()
+        
+    def _report_time(self, operation, elapsed_second):        
+        message = f"The {operation} operation took {str(elapsed_second)} seconds"
+        log.info(message)
+        self._print(message)
                  
     def _print(self, message, end='\n'):
         if not self.config.silent_mode:
@@ -1945,69 +1962,108 @@ class EngineConnector():
         
 class Installer():
 
-    def __init__(self, url, download_dir, install_dir, docker_registry, dot_env_content=None, docker_compose_custom_content=None):
-        self.url = url
+    def __init__(self, installer_url, download_dir, install_dir, simulation=False, silent_installation=False):
+        self.installer_url = installer_url
         self.download_dir = download_dir
         self.install_dir = install_dir
-        self.dot_env_content = dot_env_content
-        self.docker_registry = docker_registry
-        self.docker_compose_custom_content = docker_compose_custom_content
+        self.simulation = simulation
+        self.silent_installation = silent_installation
+        
+    def print(self, message):
+        if not self.silent_installation:
+            print(message)
+        
+    def _download_and_unzip_installer(self):
+        zipped_installer = WebContent().download(self.installer_url, self.download_dir)
+        fht = FileHandlingTools()
+        if not fht.unzip(zipped_installer, self.install_dir):
+            raise BadZipFileError(f'File "{zipped_installer}" is not a zip file')
        
     def prerequisites(self, groups):
         raise NotImplementedError
         
     def install(self):
         raise NotImplementedError
- 
- 
+        
+    def _add_custom_files(self, custom_files):
+        for from_file in custom_files:
+            destination_file = join(self.install_dir, from_file)
+            if exists(destination_file):
+                continue
+            if exists(from_file): 
+                copy(from_file, destination_file)
+            else:
+                raise FileNotFoundError(f"Could not find '{from_file}' or '{destination_file}'")
+            
+
 class InspectorInstaller(Installer):
+
+    def __init__(self, installer_url, download_dir, install_dir, docker_registry, docker_compose_yml_files=[], dot_env_file_path=None, simulation=False):
+        super().__init__(installer_url, download_dir, install_dir, simulation)
+        self.dot_env_file_path = dot_env_file_path
+        self.docker_registry = docker_registry
+        self.docker_compose_yml_files = docker_compose_yml_files
 
     def _restart_server_if_required(self):
         raise NotImplementedError
 
     def prerequisites(self, groups):
+        self.print("Preparing user and host...")
         self._prepare_user(groups)
         self._prepare_host()
-        if not self._docker_is_installed():
+        if self._docker_is_installed():
+            self.print("Docker already installed...")
+        else:
+            self.print("Installing docker...")
             self._install_docker()
             self._restart_server_if_required()
-        self._start_docker()       
-        self._install_docker_compose()        
+        self.print("Starting docker...")
+        self._start_docker()    
+        if self._docker_compose_is_installed():
+            self.print("Docker-compose already installed...")
+        else:
+            self.print("Installing docker-compose...")
+            self._install_docker_compose()        
         
     def install(self):
-        self._download_and_unzip_inspector()
-        self._create_dot_env_file()
-        self._create_docker_application_custom_file()
-        self._post_install_operations()
-
+        self.print("Downloading and unzipping installer...")
+        self._download_and_unzip_installer()
+        
+    def customize(self):
+        self.print("Adding custom files (if any)...")
+        custom_files = []
+        for custom_file in self.docker_compose_yml_files:
+            custom_files.append(custom_file)
+        if self.dot_env_file_path:
+            custom_files.append(self.dot_env_file_path)
+        self._add_custom_files(custom_files)
+       
+    def post_install_operations(self):
+        self.print("If there are to be any Docker image downloads, then they would normally come now...")
+        
     def _docker_is_installed(self):
+        if self.simulation:
+            return True
         response = execute("docker -v", return_response=True, ignore_error=True)
         if response.startswith("Docker version"):
             return True
         return False
         
+    def _docker_compose_is_installed(self):
+        if self.simulation:
+            return True
+        response = execute("docker-compose -v", return_response=True, ignore_error=True)
+        if response.startswith("docker-compose version"):
+            return True
+        return False
+        
     def _install_docker(self):
         raise NotImplementedError
- 
-    def _create_dot_env_file(self):
-        if self.dot_env_content:
-            with change_dir(self.install_dir):
-                with open(".env", "w") as f:
-                    f.write(self.dot_env_content)
-                    
-    def _create_docker_application_custom_file(self):
-        if self.docker_compose_custom_content:
-            with change_dir(self.install_dir):
-                with open("docker-compose-custom.yml", "w") as f:
-                    f.write(self.docker_compose_custom_content)
 
-    def _download_and_unzip_inspector(self):
-        zipped_installer = WebContent().download(self.url, self.download_dir)
-        fht = FileHandlingTools()
-        if not fht.unzip(zipped_installer, self.install_dir):
-            raise BadZipFileError(f'File "{zipped_installer}" is not a zip file')
+    def uninstall_docker(self):
+        raise NotImplementedError
             
-    def _post_install_operations(self):
+    def _uninstall_docker(self):
         raise NotImplementedError
 
     def _user_already_exists(self, user):
@@ -2028,10 +2084,12 @@ class InspectorInstaller(Installer):
     def _prepare_user(self, groups):
         if not self._is_running_as_root_or_in_elevated_mode():
             raise ConfigError(f"The installation feature require that one run as root (sudo)/admin") 
-        user = getuser()
+        formal_user = getuser()
         actual_user = self._get_actual_user()
-        if user == "root" and actual_user and len(actual_user):
+        user = formal_user
+        if formal_user == "root" and actual_user and len(actual_user):
             user = actual_user
+        log.info(f"Formal user: '{formal_user}', Actual user: '{actual_user}', User: '{user}'")
         self._add_user_to_user_groups(user, groups)
             
     def _update_config_file(self, filepath, expression):
@@ -2062,30 +2120,27 @@ class LinuxInspectorInstaller(InspectorInstaller):
         execute("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -")
         execute("apt-key fingerprint 0EBFCD88")
         execute('add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"')
-        
+
     def _install_docker(self):
         self._install_docker_repository()
         execute("apt-get update")
         execute("apt-get install docker-ce docker-ce-cli containerd.io --assume-yes")
         version_string = None
-        attempt_count = 0
-        while not version_string:
-            attempt_count += 1
-            response = execute("apt-cache madison docker-ce", return_response=True)
-            log.debug(response)
-            for line in response.split("\n"):
-                m = match("docker-ce | (.*) | https://download.docker.com/linux/ubuntu bionic/stable amd64 Packages", line)
-                if m:
-                    version_string = m.group(1)
-                    break
-            if version_string:
+        response = execute("apt-cache madison docker-ce", return_response=True)
+        log.debug(response)
+        for line in response.split("\n"):
+            m = match("^docker-ce \| (.*) \| https://download.docker.com/linux/ubuntu bionic/stable amd64 Packages$", line.strip())
+            if m:
+                version_string = m.group(1)
                 break
-            if attempt_count > 3:
-                raise AutoDetectionError("Not able to auto detect information about available Docker versions.")
-            pause = attempt_count * 20
-            log.debug(f"Failed to obtain the docker version, will try again in {pause} seconds")
-            sleep(pause)
+        if not version_string:
+            raise AutoDetectionError("Not able to auto detect information about available Docker versions.")
         execute(f"apt-get install docker-ce={version_string} docker-ce-cli={version_string} containerd.io --assume-yes")
+        
+    def uninstall_docker(self):
+        self.print("Uninstalling docker...")
+        execute(f"apt-get purge -y docker-engine docker docker.io docker-ce")
+        execute(f"apt-get autoremove -y --purge docker-engine docker docker.io docker-ce")
         
     def _restart_server_if_required(self):    
         pass
@@ -2101,10 +2156,12 @@ class LinuxInspectorInstaller(InspectorInstaller):
         link = f"https://github.com/docker/compose/releases/download/{ver}/docker-compose-$(uname -s)-$(uname -m)"
         execute(f'curl -L "{link}" -o /usr/local/bin/docker-compose') 
         
-    def _post_install_operations(self): 
+    def post_install_operations(self): 
+        self.print("Making scripts executable...")
         with change_dir(self.install_dir):
             for item in ["start-ayfie.sh", "stop-ayfie.sh", "/usr/local/bin/docker-compose"]: 
                 execute(f"chmod +x {item}")
+        self.print("If there are to be any Docker image downloads, then they would normally come now...")
                 
     def _user_already_exists(self, user):
         try:
@@ -2127,8 +2184,12 @@ class LinuxInspectorInstaller(InspectorInstaller):
     def _add_user_to_user_groups(self, user, groups):
         for group in groups:
             if not self._group_already_exists(group):
-                execute(f"groupadd {group}")
-            execute(f"usermod -a -G {group} {user}") 
+                cmd = f"groupadd {group}"
+                log.debug(f'Creating group: "{cmd}"')
+                execute(cmd)
+            cmd = f"usermod -a -G {group} {user}"
+            log.debug(f'Adding member to group: "{cmd}"')
+            execute(cmd) 
             
     def _get_actual_user(self):
         return environ['SUDO_USER']
@@ -2149,25 +2210,23 @@ class WindowsInspectorInstaller(InspectorInstaller):
         execute("powershell.exe Find-PackageProvider -Name 'Nuget' -ForceBootstrap -IncludeDependencies")
         execute("powershell.exe Install-Module DockerMsftProvider -Force")
         execute("powershell.exe Install-Package Docker -ProviderName DockerMsftProvider -Force")
-        
-        Microsoft.PowerShell.Archive\
        
     def _start_docker(self):
-        execute("powershell.exe Start-Service Docker")
+        if self.simulation:
+            print("Simulating Docker start up")
+        else:    
+            execute("powershell.exe Start-Service Docker")
         
-    def _restart_server_if_required(self): 
-        print("Restarting computer - start the same script with the same config after reboot")
+    def _restart_server_if_required(self):
         execute("powershell.exe Restart-Computer")
         sys.exit()
         
     def _install_docker_compose(self, version=None):
-        execute("powershell.exe Set-ExecutionPolicy Bypass -Scope Process -Force") 
-        execute("powershell.exe Invoke-Expression((new-object net.webclient).DownloadString('https://chocolatey.org/install.ps1'))")
-        execute("refreshenv")
-        execute("choco install docker-compose -y")
-        
-    def _post_install_operations(self): 
-        pass
+        if not self.simulation:
+            execute("powershell.exe Set-ExecutionPolicy Bypass -Scope Process -Force") 
+            execute("powershell.exe Invoke-Expression((new-object net.webclient).DownloadString('https://chocolatey.org/install.ps1'))")
+            execute("refreshenv")
+            execute("choco install docker-compose -y")
         
     def _user_already_exists(self, user):
         raise NotImplementedError
@@ -2176,7 +2235,8 @@ class WindowsInspectorInstaller(InspectorInstaller):
         raise NotImplementedError
         
     def _add_user_to_user_groups(self, user, groups):
-        pass
+        groups_str = '","'.join(groups)
+        log.debug(f'Adding user "{user}" to the groups "{groups_str}" is skipped on Windows')
         
     def _get_actual_user(self):
         return getuser()
@@ -2209,12 +2269,12 @@ class RemoteServer():
         return [ line.decode('utf-8') for line in response.splitlines()]
 
     def copy_file_from_remote(self, from_path, to_path):
-        with scp.SCPClient(self.ssh.get_transport()) as scp:
-            scp.get(from_path, to_path)
+        with scp.SCPClient(self.ssh.get_transport()) as scp_client:
+            scp_client.get(from_path, to_path)
 
     def copy_file_to_remote(self, from_path, to_path):
-        with scp.SCPClient(self.ssh.get_transport()) as scp:
-            scp.put(from_path, to_path)
+        with scp.SCPClient(self.ssh.get_transport()) as scp_client:
+            scp_client.put(from_path, to_path)
             
 
 class Operational(EngineConnector):
@@ -2238,6 +2298,11 @@ class Operational(EngineConnector):
         elif self.host_os == OS_WINDOWS:
             self.docker_registry = WIN_DOCKER_REGISTRY 
             self.script_extension = "cmd"
+        self.docker_compose_custom_files = self.config.docker_compose_yml_files
+        if self.config.enable_frontend and (get_host_os() == OS_LINUX or self.config.os == OS_LINUX):
+            if not DOCKER_COMPOSE_FRONTEND_FILE in self.docker_compose_custom_files:
+                self.docker_compose_custom_files.append(DOCKER_COMPOSE_FRONTEND_FILE)
+        self.gdpr_enabled = False
 
     def _remote_file_copy(self, copy_config, direction):
         server = copy_config["server"]
@@ -2302,18 +2367,25 @@ class Operational(EngineConnector):
             raise ValueError(f"There is no main version number '{str(main_version)}' of the ayfie Inspector")
         self.minimum_ram_allocation = 1
         freed_up_ram = 0
-        if self.config.no_suggest_index:
-            for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
-                if variable == "SUGGEST_MEM_LIMIT":
-                    freed_up_ram = self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host)
-                    freed_up_ram -= self.minimum_ram_allocation
-                    break
+        for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
+            if variable == "SUGGEST_MEM_LIMIT" and self.config.no_suggest_index:
+                freed_up_ram += self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host)
+                freed_up_ram -= self.minimum_ram_allocation
+            if variable == "ELASTICSEARCH_MEM_LIMIT":
+                mem_limit = self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host)
+                if mem_limit > ELASTICSEARCH_MAX_MEM_LIMIT:
+                    freed_up_ram += mem_limit - ELASTICSEARCH_MAX_MEM_LIMIT
+                
         mem_limits = []
         for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
             if self.config.no_suggest_index and "SUGGEST" in variable:
                 mem_limit = self.minimum_ram_allocation
             else:
-                mem_limit =  self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host + freed_up_ram)
+                mem_limit = self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host + freed_up_ram)
+                if variable == "ELASTICSEARCH_MEM_LIMIT" and mem_limit > ELASTICSEARCH_MAX_MEM_LIMIT:
+                    mem_limit = ELASTICSEARCH_MAX_MEM_LIMIT
+                if variable == "ELASTICSEARCH_MX_HEAP" and mem_limit > ELASTICSEARCH_MAX_MX_HEAP:
+                    mem_limit = ELASTICSEARCH_MAX_MX_HEAP
             mem_limits.append(f"{variable}={mem_limit}G")
         return "\n".join(mem_limits)
         
@@ -2360,6 +2432,8 @@ class Operational(EngineConnector):
                 elif self.host_os == OS_LINUX:
                     return ""
                 return self.config.os
+            if self.config.os == OS_LINUX:
+                return ""
             return self.config.os
         m = re.match(f"^.*({OS_WINDOWS}|{OS_LINUX}).*$", self.config.installer)
         if m:
@@ -2369,32 +2443,33 @@ class Operational(EngineConnector):
     def _get_installer_zip_file(self):
         if self.config.installer:
             return self.config.installer
-        os = self._get_zip_file_os_string()
-        os = os + "-" if os else ""
+        os_string = self._get_zip_file_os_string()
+        if os_string:
+           os_string += "-"
         version = self._extract_version_number()
-        self.config.installer = f"http://docs.ayfie.com/ayfie-platform/release/ayfie-{os}installer-{version}.zip"
+        self.config.installer = f"http://docs.ayfie.com/ayfie-platform/release/ayfie-{os_string}installer-{version}.zip"
         return self.config.installer
         
-    def _administrate_env_file(self, docker_compose_custom_file=None):
+    def _administrate_env_file(self):
         if self.config.dot_env_input_path:
-            with open(self.config.dot_env_input_path, "r") as f:
-                return f.read()
-        dot_env_file_content = f"AYFIE_PORT={self.config.port}\n"
-        delimiter = ':'
-        if self._get_zip_file_os_string() == "windows":
-            delimiter = ';'
-        dot_env_file_content += "COMPOSE_FILE=docker-compose.yml"
-        if self.config.enable_frontend and get_host_os() == OS_LINUX:
-            dot_env_file_content += f"{delimiter}docker-compose-frontend.yml"
-        if docker_compose_custom_file:
-            dot_env_file_content += f"{delimiter}{docker_compose_custom_file}"
-        dot_env_file_content += "\n"
-        dot_env_file_content += self._gen_mem_limits()
-        if self.config.dot_env_output_path:
-            with open(self.config.dot_env_output_path, "w") as f:
-                f.write(dot_env_file_content)
-        return dot_env_file_content
- 
+            return self.config.dot_env_input_path
+        else:
+            dot_env_file_content = f"AYFIE_PORT={self.config.port}\n"
+            if self._get_zip_file_os_string() == "windows":
+                delimiter = ';'
+            else:
+                delimiter = ':'
+            if self.docker_compose_custom_files: 
+                dot_env_file_content += "COMPOSE_FILE=" 
+                dot_env_file_content += delimiter.join(self.docker_compose_custom_files)      
+                dot_env_file_content += "\n"
+            dot_env_file_content += self._gen_mem_limits()
+            if self.config.dot_env_output_path:
+                with open(self.config.dot_env_output_path, "w") as f:
+                    f.write(dot_env_file_content)
+                return self.config.dot_env_output_path
+            return None
+                
     def do_pre_operations(self):
         self._do_operations(self.config.pre_operations)
         
@@ -2409,6 +2484,25 @@ class Operational(EngineConnector):
                 raise TimeoutError("Giving up waiting for engine to become ready")
             sleep(pull_interval)
             waited_so_far += pull_interval
+            
+    def _enable_gdpr(self):  
+        if self.gdpr_enabled:
+            return
+        with change_dir(self.install_dir):
+            version = self._extract_version_number()
+            application_pii_yml_filename = APPL_PII_FILE
+            application_pii_yml_content = "version: '2.1'\n"
+            if not self._is_earlier_version(version, "2.1.0"):
+                with open(APPL_PII_TEMPLATE_FILE, "rb") as f:
+                    application_pii_yml_content += f.read().decode("utf-8")
+            application_pii_yml_content += "\n\ndigestion:\n  processing:\n    entityExtraction:\n      skipExtractors: []"
+            enable_pii_docker_compose_file = DOCKER_COMPOSE_PII_FILE
+            with open(application_pii_yml_filename, "wb") as f:
+                f.write(application_pii_yml_content.encode("utf-8"))
+            with open(enable_pii_docker_compose_file, "w") as f:
+                f.write(f"version: '2.1'\nservices:\n  api:\n    volumes:\n      - ./{application_pii_yml_filename}:/home/dev/restapp/application-custom.yml")
+            self.docker_compose_custom_files.append(enable_pii_docker_compose_file)
+        self.gdpr_enabled = True
         
     def _do_operations(self, operations):   
         app_down = False
@@ -2422,36 +2516,30 @@ class Operational(EngineConnector):
                 self._remote_file_copy(self.config.copy_to_remote, "to_remote")
             if operation == OP_INSTALL:
                 if self.config.engine == INSPECTOR:
-                    dot_env_file_content = self._administrate_env_file()
+                    dot_env_file_path = self._administrate_env_file()
                     if self.host_os == OS_LINUX:
                         os_specific_installer = LinuxInspectorInstaller
                     elif self.host_os == OS_WINDOWS:
                         os_specific_installer = WindowsInspectorInstaller
-                    installer = os_specific_installer(self._get_installer_zip_file(), ".", self.install_dir, 
-                                                      self.config.docker_registry, dot_env_file_content)
+                    installer = os_specific_installer(self._get_installer_zip_file(), ".", self.install_dir, self.config.docker_registry,
+                                                      self.docker_compose_custom_files, dot_env_file_path, self.config.simulation)
                     installer.prerequisites(["docker"])
                     installer.install()
+                    if OP_ENABLE_GDPR in operations:
+                        self._enable_gdpr()
+                    installer.customize()
+                    installer.post_install_operations()
                 else:
                     raise NotImplementedError("Only the Inspector is supported at this time")
             if operation == OP_ENABLE_GDPR:
-                with change_dir(self.install_dir):
-                    version = self._extract_version_number()
-                    application_pii_yml_filename = "application-pii.yml"
-                    application_pii_yml_content = ""
-                    if not self._is_earlier_version(version, "2.1.0"):
-                        with open(application_pii_yml_filename + ".template", "r") as f:
-                            application_pii_yml_content = f.read()
-                    application_pii_yml_content += "\n\ndigestion:\n  processing:\n    entityExtraction:\n      skipExtractors: []"
-                    enable_pii_docker_compose_file = "docker-compose-pii.yml"
-                    with open(application_pii_yml_filename, "w") as f:
-                        f.write(application_pii_yml_content)
-                    with open(enable_pii_docker_compose_file, "w") as f:
-                        f.write(f"version: '2.1'\nservices:\n  api:\n    volumes:\n      - ./{application_pii_yml_filename}:/home/dev/restapp/application-custom.yml")
-                    self._administrate_env_file(enable_pii_docker_compose_file)  
+                self._enable_gdpr()
+                self._administrate_env_file()  
             if operation == OP_START:
                 if self.config.engine == INSPECTOR:
                     self.start_inspector()
+                    log.debug("Waiting for engine to be up and ready")
                     self.wait_until_engine_ready()
+                    log.info("Search engine up and ready")
                     app_down = False
                 else:
                     raise NotImplementedError("Only the Inspector is supported at this time")
@@ -2612,6 +2700,8 @@ class Feeder(EngineConnector):
         self.engine.delete_all_collections_and_wait()
 
     def create_collection_if_not_exists(self):
+        if not self.config.col_name:
+            raise ValueError(f"Parameter value '{str(self.config.col_name)}' is not a valid collection name")
         if not self.engine.exists_collection_with_name(self.config.col_name):
             log.info(f'Creating collection "{self.config.col_name}"')
             col_id = self.config.col_name
@@ -2719,18 +2809,25 @@ class Feeder(EngineConnector):
             log.info(log_message)
             self._print(log_message)
         return elapsed_time
-        
+         
     def process(self):
+        report_time = False
+        if type(self.config.processing) is dict and 'report_time' in self.config.processing and self.config.processing['report_time']:
+            report_time = True
+            del self.config.processing['report_time']
         if self.config.progress_bar:
-            return JobsHandler(self.config).job_processesing("PROCESSING", self.config.processing)
+            processing_time = JobsHandler(self.config).job_processesing("PROCESSING", self.config.processing)
         else:
             col_id = self.engine.get_collection_id(self.config.col_name)
-            self.engine.process_collection_and_wait(col_id)
-        
+            processing_time = self.engine.process_collection_and_wait(col_id, self.config.processing)
+        if report_time:
+            self._report_time("processing", str(processing_time))
+        return processing_time
+            
     def feed_documents_and_commit(self):
         feeding_time = self.feed_documents()
         if self.config.feeding_report_time:
-            self._print(f"The feeding operation took {str(feeding_time)} seconds")
+            self._report_time("feeding", str(feeding_time))
         if self.config.feeding_disabled:
             log.info(f'No commit or processing as feeding is disabled')
             return
@@ -2750,7 +2847,7 @@ class Feeder(EngineConnector):
         else:
             processing_time = self.process()
             if self.config.feeding_report_time:
-                self._print(f"The processing operation took {str(processing_time)} seconds")
+                self._report_time("processing", str(processing_time))
             log.info(f'Done processing')
 
 
@@ -3038,12 +3135,12 @@ class Sampler(EngineConnector):
         if self.config.sampling:
             col_id = self.engine.get_collection_id(self.config.col_name)
             job_id = self.engine.start_sampling(col_id, self.config.sampling)
-            elapsed_time = JobsHandler(self.config).track_job(job_id, "SAMPLING")
+            sampling_time = JobsHandler(self.config).track_job(job_id, "SAMPLING")
             job_report = self.engine.get_job(job_id)
             if not "sample" in job_report:
                 raise DataFormatError('No "sample" item in job output')
             if self.config.sampling_report_time:
-                self._print(f"The sampling operation took {str(elapsed_time)} seconds")
+                self._report_time("sampling", str(sampling_time))
             return [doc["id"] for doc in job_report["sample"]]
         else:
             log.info('No sampling job')
@@ -3065,13 +3162,14 @@ class Clusterer(EngineConnector):
             if self.config.clustering:
                 config["settings"] = {"clustering": self.config.clustering}
             if self.config.progress_bar:
-                return JobsHandler(self.config).job_processesing("CLUSTERING", config)
+                clustering_time = JobsHandler(self.config).job_processesing("CLUSTERING", config)
             else:
-                self.engine.process_collection_and_wait(col_id)
+                clustering_time = self.engine.process_collection_and_wait(col_id, config)
+            self._report_time("clustering", clustering_time)     
         else:
-            log.info('No clustering job')
+            log.info('No clustering job')  
             
-           
+       
 class Querier(EngineConnector):
 
     def search(self, search, retries=MAX_CONNECTION_RETRIES, col_id=None):
@@ -3202,9 +3300,11 @@ class DocumentUpdater(EngineConnector):
                 limit = docs_update["numb_of_docs_to_update"]
                 filters = [{"field":"_id", "value": self.__get_doc_ids(query, limit)}]
             docs_update["filters"] = filters
-            elapsed_time = self.__update_documents_by_query(docs_update)
+            document_update_time = self.__update_documents_by_query(docs_update)
             if docs_update["report_time"]:
-                self._print(f"The documents update operation took {str(elapsed_time)} seconds")
+                self._report_time("document update", str(document_update_time))
+                log.info(message)
+                self._print(message)
 
 
 class LogAnalyzer():
@@ -4086,7 +4186,7 @@ class JobsHandler(EngineConnector):
 
     def job_processesing(self, job_type, settings, more_params={}):
         job_id = self.__start_job(job_type, settings, more_params)
-        self.track_job(job_id, job_type)
+        return self.track_job(job_id, job_type)
         
     def __job_reporting_output_line(self, job, prefix, end="\n", tick=None):
         rotator = " "
@@ -4338,11 +4438,12 @@ class Config():
 
     def __init_operational(self, operational):
         self.installer                = self.__get_item(operational, 'installer', None)
+        self.simulation               = self.__get_item(operational, 'simulation', False)
         self.version                  = self.__get_item(operational, 'version', None)       
-        self.os                       = self.__get_item(operational, 'os', "auto")        
+        self.os                       = self.__get_item(operational, 'os', "auto")      
         self.pre_operations           = self.__get_item(operational, 'pre_operations', None)
         self.post_operations          = self.__get_item(operational, 'post_operations', None)
-        self.customization            = self.__get_item(operational, 'customization', None)
+        self.docker_compose_yml_files = self.__get_item(operational, 'docker_compose_yml_files', [])
         self.data_dir_path            = self.__get_item(operational, 'data_dir_path', None)
         self.dot_env_input_path       = self.__get_item(operational, 'dot_env_input_path', None)
         self.dot_env_output_path      = self.__get_item(operational, 'dot_env_output_path', ".env")        
@@ -4782,6 +4883,7 @@ class Admin():
                 if self.config.get_online_config_keys:
                     log.info(f'"{self.config.engine}" is down, unable to execute {online_config_keys}')
                     return
+                    
         if self.config.server != OFF_LINE:
             if self.config.data_source:
                 if self.config.prefeeding_action not in PRE_ACTIONS:
