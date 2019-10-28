@@ -2336,7 +2336,8 @@ class Operational(EngineConnector):
                 
         # Semi hard coded fix until Inspector comes with a Windows frontend
         if self.host_os == OS_WINDOWS:
-            self.docker_compose_custom_files.remove(DOCKER_COMPOSE_FRONTEND_FILE)
+            if DOCKER_COMPOSE_FRONTEND_FILE in self.docker_compose_custom_files:
+                self.docker_compose_custom_files.remove(DOCKER_COMPOSE_FRONTEND_FILE)
             
         self.gdpr_enabled = False
 
