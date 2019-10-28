@@ -210,7 +210,6 @@ MEM_LIMITS_64_AND_128_GB_RAM = {
     ] 
 } 
 
-
 NON_ACTION_CONFIG      = ["server", 'port', 'col_name', 'config_source', 'silent_mode']
 OFFLINE_ACTIONS        = ["operational", "reporting"]   
 
@@ -247,6 +246,8 @@ if host_os == OS_LINUX:
     from os import setuid, getuid, geteuid
 elif host_os == OS_WINDOWS:
     from ctypes import windll
+else:
+    raise OSError(f"'{host_os}' is not a supported OS'") 
     
 class HTTPError(IOError):
     pass
@@ -1990,7 +1991,7 @@ class Installer():
             destination_file = join(self.install_dir, from_file)
             if exists(destination_file):
                 continue
-            if exists(from_file): 
+            if exists(from_file):
                 copy(from_file, destination_file)
             else:
                 raise FileNotFoundError(f"Could not find '{from_file}' or '{destination_file}'")
@@ -1998,16 +1999,22 @@ class Installer():
 
 class InspectorInstaller(Installer):
 
-    def __init__(self, installer_url, download_dir, install_dir, docker_registry, docker_compose_yml_files=[], dot_env_file_path=None, simulation=False):
+    def __init__(self, installer_url, download_dir, install_dir, docker_registry, docker_compose_yml_files=[], 
+                                                   files_to_copy=[], dot_env_file_path=None, simulation=False):
         super().__init__(installer_url, download_dir, install_dir, simulation)
         self.dot_env_file_path = dot_env_file_path
         self.docker_registry = docker_registry
         self.docker_compose_yml_files = docker_compose_yml_files
-
+        self.files_to_copy = files_to_copy
+        
     def _restart_server_if_required(self):
-        raise NotImplementedError
+        pass
+        
+    def _choco_is_required(self):
+        return False
 
     def prerequisites(self, groups):
+        self.restart_might_be_required = False
         self.print("Preparing user and host...")
         self._prepare_user(groups)
         self._prepare_host()
@@ -2016,18 +2023,32 @@ class InspectorInstaller(Installer):
         else:
             self.print("Installing docker...")
             self._install_docker()
-            self._restart_server_if_required()
-        self.print("Starting docker...")
-        self._start_docker()    
+            self.restart_might_be_required = True
         if self._docker_compose_is_installed():
             self.print("Docker-compose already installed...")
         else:
+            if self._choco_is_required():
+                if self._choco_is_installed():
+                    self.print("Choco already installed...")
+                else:
+                    self.print("Installing choco...")
+                    self._install_choco()
+                    self.restart_might_be_required = True
+        if not self._docker_compose_is_installed():
+            if self.restart_might_be_required:
+                self._restart_server_if_required()
             self.print("Installing docker-compose...")
-            self._install_docker_compose()        
+            self._install_docker_compose()       
+        self.print("Starting docker...")
+        self._start_docker()    
         
     def install(self):
         self.print("Downloading and unzipping installer...")
         self._download_and_unzip_installer()
+        if self.files_to_copy:
+            self.print("Copying in custom files...")
+            for file_to_copy in self.files_to_copy:
+                copy(file_to_copy, self.install_dir)
         
     def customize(self):
         self.print("Adding custom files (if any)...")
@@ -2039,7 +2060,7 @@ class InspectorInstaller(Installer):
         self._add_custom_files(custom_files)
        
     def post_install_operations(self):
-        self.print("If there are to be any Docker image downloads, then they would normally come now...")
+        pass
         
     def _docker_is_installed(self):
         if self.simulation:
@@ -2142,9 +2163,6 @@ class LinuxInspectorInstaller(InspectorInstaller):
         execute(f"apt-get purge -y docker-engine docker docker.io docker-ce")
         execute(f"apt-get autoremove -y --purge docker-engine docker docker.io docker-ce")
         
-    def _restart_server_if_required(self):    
-        pass
-        
     def _start_docker(self):
         execute("service docker start")
         execute("systemctl enable docker")
@@ -2161,7 +2179,6 @@ class LinuxInspectorInstaller(InspectorInstaller):
         with change_dir(self.install_dir):
             for item in ["start-ayfie.sh", "stop-ayfie.sh", "/usr/local/bin/docker-compose"]: 
                 execute(f"chmod +x {item}")
-        self.print("If there are to be any Docker image downloads, then they would normally come now...")
                 
     def _user_already_exists(self, user):
         try:
@@ -2218,6 +2235,7 @@ class WindowsInspectorInstaller(InspectorInstaller):
             execute("powershell.exe Start-Service Docker")
         
     def _restart_server_if_required(self):
+        input("Press Enter to do a required restart. Once back up again, run the same command line again.")
         execute("powershell.exe Restart-Computer")
         sys.exit()
         
@@ -2225,8 +2243,21 @@ class WindowsInspectorInstaller(InspectorInstaller):
         if not self.simulation:
             execute("powershell.exe Set-ExecutionPolicy Bypass -Scope Process -Force") 
             execute("powershell.exe Invoke-Expression((new-object net.webclient).DownloadString('https://chocolatey.org/install.ps1'))")
-            execute("refreshenv")
             execute("choco install docker-compose -y")
+            
+    def _choco_is_required(self):
+        return True
+            
+    def _choco_is_installed(self):
+        if self.simulation:
+            return True
+        response = execute("choco -v", return_response=True, ignore_error=True)
+        if response.startswith("0."):
+            return True
+        return False   
+
+    def _install_choco(self):
+        execute('powershell.exe -NoProfile -InputFormat None -ExecutionPolicy Bypass -Command "iex ((New-Object System.Net.WebClient).DownloadString(\'https://chocolatey.org/install.ps1\'))" && SET "PATH=%PATH%;%ALLUSERSPROFILE%\chocolatey\bin"')
         
     def _user_already_exists(self, user):
         raise NotImplementedError
@@ -2302,6 +2333,11 @@ class Operational(EngineConnector):
         if self.config.enable_frontend and (get_host_os() == OS_LINUX or self.config.os == OS_LINUX):
             if not DOCKER_COMPOSE_FRONTEND_FILE in self.docker_compose_custom_files:
                 self.docker_compose_custom_files.append(DOCKER_COMPOSE_FRONTEND_FILE)
+                
+        # Semi hard coded fix until Inspector comes with a Windows frontend
+        if self.host_os == OS_WINDOWS:
+            self.docker_compose_custom_files.remove(DOCKER_COMPOSE_FRONTEND_FILE)
+            
         self.gdpr_enabled = False
 
     def _remote_file_copy(self, copy_config, direction):
@@ -2332,12 +2368,22 @@ class Operational(EngineConnector):
             execute(join(".", f"{operation}-ayfie.{self.script_extension}"))
 
     def _do_docker_login(self):
-        if self.config.docker_registry:
-            if not ("user" in self.config.docker_registry and "password" in self.config.docker_registry):
-                raise ValueError(f"Bad account data: {str(self.docker_registry)}")
-            user = self.config.docker_registry["user"]
-            password = PWD_START_STOP_TOKEN + self.config.docker_registry["password"] + PWD_START_STOP_TOKEN
-            execute(f'docker login -u "{user}" -p "{password}" {self.docker_registry}')
+        if not self.config.docker_registry:
+            log.warning("No docker registry user credentials")
+            return
+        if len(self.config.docker_registry) == 1:
+            if not "os" in self.config.docker_registry[0]:
+                self.config.docker_registry[0]["os"] = self._get_concluded_os() 
+        for docker_registry in self.config.docker_registry:
+            for item in ["user", "password", "os"]:
+                if not item in docker_registry:
+                    raise ValueError(f"Bad account data: {str(docker_registry)}")
+            if docker_registry["os"] == self._get_concluded_os():
+                user = docker_registry["user"]
+                password = PWD_START_STOP_TOKEN + docker_registry["password"] + PWD_START_STOP_TOKEN
+                string = f'docker login -u "{user}" -p "{password}" {self.docker_registry}'
+                execute(f'docker login -u "{user}" -p "{password}" {self.docker_registry}')
+                break
         else:
             log.warning("No docker registry user credentials")
                      
@@ -2421,24 +2467,31 @@ class Operational(EngineConnector):
         else:
             err_msg += " and also no installer url to extract the version info from."
         raise ValueError(err_msg)
-        
-    def _get_zip_file_os_string(self):
+  
+    def _get_concluded_os(self):
         if not self.config.os in SUPPORTED_OS:
             raise ValueError("f{self.config.os} is not a supported OS")
         if self.config.os:
             if self.config.os == OS_AUTO:
-                if self.host_os == OS_WINDOWS:
-                    return OS_WINDOWS
-                elif self.host_os == OS_LINUX:
-                    return ""
+                if self.config.installer:
+                    m = match(f"^.*ayfie-({OS_WINDOWS}|)(|-)installer.*.zip$", self.config.installer)
+                    if m:
+                        if m.group(1) == "":
+                            return OS_LINUX
+                        return m.group(1)
+                elif self.host_os in [OS_WINDOWS, OS_LINUX]:
+                    return self.host_os
+                else:
+                    raise OSError(f"'{self.host_os}' is not a supported OS'")
+            else:
                 return self.config.os
-            if self.config.os == OS_LINUX:
-                return ""
-            return self.config.os
-        m = re.match(f"^.*({OS_WINDOWS}|{OS_LINUX}).*$", self.config.installer)
-        if m:
-            return m.group(1)
         raise AutoDetectionError("Unable to obtain OS")
+        
+    def _get_zip_file_os_string(self):
+        concluded_os = self._get_concluded_os()
+        if concluded_os == OS_LINUX:
+            return ""
+        return concluded_os
         
     def _get_installer_zip_file(self):
         if self.config.installer:
@@ -2522,7 +2575,8 @@ class Operational(EngineConnector):
                     elif self.host_os == OS_WINDOWS:
                         os_specific_installer = WindowsInspectorInstaller
                     installer = os_specific_installer(self._get_installer_zip_file(), ".", self.install_dir, self.config.docker_registry,
-                                                      self.docker_compose_custom_files, dot_env_file_path, self.config.simulation)
+                                                      self.docker_compose_custom_files, self.config.copy_to_install_dir, 
+                                                      dot_env_file_path, self.config.simulation)
                     installer.prerequisites(["docker"])
                     installer.install()
                     if OP_ENABLE_GDPR in operations:
@@ -2536,6 +2590,7 @@ class Operational(EngineConnector):
                 self._administrate_env_file()  
             if operation == OP_START:
                 if self.config.engine == INSPECTOR:
+                    print("If this is the first time the ayfie Inspector is started, then this will take quite some time....")
                     self.start_inspector()
                     log.debug("Waiting for engine to be up and ready")
                     self.wait_until_engine_ready()
@@ -4450,9 +4505,14 @@ class Config():
         self.enable_frontend          = self.__get_item(operational, 'enable_frontend', True)
         self.ram_on_host              = self.__get_item(operational, 'ram_on_host', 64)
         self.no_suggest_index         = self.__get_item(operational, 'no_suggest_index', False)
-        self.docker_registry          = self.__get_item(operational, 'docker_registry', None)
         self.install_dir              = self.__get_item(operational, 'install_dir', None)
+        self.copy_to_install_dir      = self.__get_item(operational, 'copy_to_install_dir', [])
         self.copy_from_remote         = self.__get_item(operational, 'copy_from_remote', None)
+        self.docker_registry          = self.__get_item(operational, 'docker_registry', None)
+        if not self.docker_registry:
+            return 
+        if not type(self.docker_registry) is list:
+            self.docker_registry = [self.docker_registry]
 
     def __init_schema(self, schema_changes):
         if not schema_changes:
