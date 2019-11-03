@@ -174,16 +174,19 @@ OP_UNINSTALL           = "uninstall"
 OP_PRUNE_SYSTEM        = "prune"
 OP_GEN_DOT_ENV         = "gen_dot_env"
 OP_ENABLE_GDPR         = "enable_gdpr"
+OP_ENABLE_ET           = "enable_email_threading"
 OP_COPY_FROM_REMOTE    = "copy_from_remote"
 OP_COPY_TO_REMOTE      = "copy_to_remote"
-OPERATIONS             = [OP_INSTALL, OP_START, OP_STOP, OP_UNINSTALL, OP_PRUNE_SYSTEM, OP_GEN_DOT_ENV, OP_ENABLE_GDPR, OP_COPY_FROM_REMOTE, OP_COPY_TO_REMOTE]
+OPERATIONS             = [
+    OP_INSTALL, OP_START, OP_STOP, OP_UNINSTALL, OP_PRUNE_SYSTEM, OP_GEN_DOT_ENV, OP_ENABLE_GDPR, 
+    OP_ENABLE_ET, OP_COPY_FROM_REMOTE, OP_COPY_TO_REMOTE
+]
 
 DOCKER_COMPOSE_FILE          = "docker-compose.yml"
 DOCKER_COMPOSE_CUSTOM_FILE   = "docker-compose-custom.yml"
-DOCKER_COMPOSE_PII_FILE      = "docker-compose-pii.yml"
 DOCKER_COMPOSE_METRICS_FILE  = "docker-compose-metrics.yml"
 DOCKER_COMPOSE_FRONTEND_FILE = "docker-compose-frontend.yml"
-APPL_PII_FILE                = "application-pii.yml"
+APPLICATION_CUSTOM_FILE      = "application-custom.yml"
 APPL_PII_TEMPLATE_FILE       = "application-pii.yml.template"
 
 ELASTICSEARCH_MAX_MEM_LIMIT  = 26
@@ -330,6 +333,10 @@ def execute(cmd_line_str, dumpfile=None, timeout=None, continue_on_timeout=True,
 def install_python_modules(modules):
     first_time = True
     for module in modules:
+        if ":" in module:
+            package, module = module.split(":")
+        else:
+            package = module
         try:
             __import__(module)
         except ModuleNotFoundError:
@@ -352,19 +359,20 @@ def install_python_modules(modules):
                         print(f"Failed to install pip")
                         raise
             try:
-                execute(f"{sys.executable} -m pip install {module}")  
+                execute(f"{sys.executable} -m pip install {package}")  
                 __import__(module)
             except:
-                print(f"Failed to automatatically install one or more of these Python modules: {', '.join(modules)}")
+                print(f"Failed to automatatically install '{package}'")
                 raise
            
-install_python_modules(['requests', 'numpy', 'PyPDF2', 'psutil', 'paramiko', 'scp']) 
+install_python_modules(['requests', 'numpy', 'PyPDF2', 'psutil', 'paramiko', 'scp', 'PyYAML:yaml']) 
 import requests
 import numpy
 import PyPDF2
 import psutil
 import paramiko
 import scp
+import yaml
     
 @contextlib.contextmanager
 def change_dir(dir):
@@ -2340,6 +2348,9 @@ class Operational(EngineConnector):
                 self.docker_compose_custom_files.remove(DOCKER_COMPOSE_FRONTEND_FILE)
             
         self.gdpr_enabled = False
+        self.email_treading_enabled = False
+        self.application_custom_file_content = ""
+        self.yml_content_as_json = {}
 
     def _remote_file_copy(self, copy_config, direction):
         server = copy_config["server"]
@@ -2382,8 +2393,10 @@ class Operational(EngineConnector):
             if docker_registry["os"] == self._get_concluded_os():
                 user = docker_registry["user"]
                 password = PWD_START_STOP_TOKEN + docker_registry["password"] + PWD_START_STOP_TOKEN
-                string = f'docker login -u "{user}" -p "{password}" {self.docker_registry}'
-                execute(f'docker login -u "{user}" -p "{password}" {self.docker_registry}')
+                if self.config.simulation:
+                    print(f'docker login -u "{user}" -p "{password}" {self.docker_registry}')
+                else:
+                    execute(f'docker login -u "{user}" -p "{password}" {self.docker_registry}')
                 break
         else:
             log.warning("No docker registry user credentials")
@@ -2513,9 +2526,9 @@ class Operational(EngineConnector):
                 delimiter = ';'
             else:
                 delimiter = ':'
-            if self.docker_compose_custom_files: 
+            if self.docker_compose_custom_files:
                 dot_env_file_content += "COMPOSE_FILE=" 
-                dot_env_file_content += delimiter.join(self.docker_compose_custom_files)      
+                dot_env_file_content += delimiter.join(self.docker_compose_custom_files)                
                 dot_env_file_content += "\n"
             dot_env_file_content += self._gen_mem_limits()
             if self.config.dot_env_output_path:
@@ -2539,24 +2552,79 @@ class Operational(EngineConnector):
             sleep(pull_interval)
             waited_so_far += pull_interval
             
-    def _enable_gdpr(self):  
+    def _merge_yaml_dict_structures(self, existing, addition, path=None):
+        if path is None: 
+            path = []
+        for key in addition:
+            if key in existing:
+                if isinstance(existing[key], dict) and isinstance(addition[key], dict):
+                    self._merge_yaml_dict_structures(existing[key], addition[key], path + [str(key)])
+                elif existing[key] == addition[key]:
+                    pass
+                else:
+                    raise Exception('Conflict at %s' % '.'.join(path + [str(key)]))
+            else:
+                existing[key] = addition[key]
+        return existing
+        
+    def _write_yml_to_file(self, content_as_json, filename):
+        with change_dir(self.install_dir):
+            with open(filename, "wb") as f:
+                f.write(("version: '2.1'\n" + yaml.dump(content_as_json, default_flow_style=False)).encode("utf-8"))
+                
+    def _gen_application_custom_file(self, new_yml_content_as_json):
+        self.yml_content_as_json = self._merge_yaml_dict_structures(self.yml_content_as_json, new_yml_content_as_json)
+        self._write_yml_to_file(self.yml_content_as_json, APPLICATION_CUSTOM_FILE)
+        with open(DOCKER_COMPOSE_CUSTOM_FILE, "w") as f:
+            f.write(f"version: '2.1'\nservices:\n  api:\n    volumes:\n      - ./{APPLICATION_CUSTOM_FILE}:/home/dev/restapp/application-custom.yml")
+        self.docker_compose_custom_files.append(DOCKER_COMPOSE_CUSTOM_FILE)
+
+    def _configure_skip_extractors(self, skipExtractors):
+        return {
+            "digestion": {
+                "processing": {
+                    "entityExtraction": {
+                        "skipExtractors": skipExtractors
+                    }
+                }
+            }
+        }
+        
+    def _configure_email_treading(self, skipCloneEvaluation, skipMailEvaluation, mailTreadEvaluation):
+        return {
+            "digestion": {
+                "processing": {
+                    "cloneEvaluation": {
+                        "skip": skipCloneEvaluation
+                    },
+                    "mailEvaluation": {
+                        "skip": skipMailEvaluation
+                    },
+                    "mailThreadEvaluation": {
+                        "skip": mailTreadEvaluation
+                    }
+                }
+            }
+        }
+        
+    def _enable_gdpr(self): 
         if self.gdpr_enabled:
             return
+        version = self._extract_version_number()
+        yaml_as_json = {}
         with change_dir(self.install_dir):
-            version = self._extract_version_number()
-            application_pii_yml_filename = APPL_PII_FILE
-            application_pii_yml_content = "version: '2.1'\n"
             if not self._is_earlier_version(version, "2.1.0"):
                 with open(APPL_PII_TEMPLATE_FILE, "rb") as f:
-                    application_pii_yml_content += f.read().decode("utf-8")
-            application_pii_yml_content += "\n\ndigestion:\n  processing:\n    entityExtraction:\n      skipExtractors: []"
-            enable_pii_docker_compose_file = DOCKER_COMPOSE_PII_FILE
-            with open(application_pii_yml_filename, "wb") as f:
-                f.write(application_pii_yml_content.encode("utf-8"))
-            with open(enable_pii_docker_compose_file, "w") as f:
-                f.write(f"version: '2.1'\nservices:\n  api:\n    volumes:\n      - ./{application_pii_yml_filename}:/home/dev/restapp/application-custom.yml")
-            self.docker_compose_custom_files.append(enable_pii_docker_compose_file)
+                    yaml_as_json = yaml.safe_load(f.read().decode("utf-8"))
+        self._gen_application_custom_file(yaml_as_json)          
+        self._gen_application_custom_file(self._configure_skip_extractors([]))      
         self.gdpr_enabled = True
+        
+    def _enable_email_treading(self):
+        if self.email_treading_enabled:
+            return
+        self._gen_application_custom_file(self._configure_email_treading(False, False, False))
+        self.email_treading_enabled = True
         
     def _do_operations(self, operations):   
         app_down = False
@@ -2582,20 +2650,26 @@ class Operational(EngineConnector):
                     installer.install()
                     if OP_ENABLE_GDPR in operations:
                         self._enable_gdpr()
+                    if operation == OP_ENABLE_ET:
+                        self._enable_email_treading()
+                    self._administrate_env_file()
                     installer.customize()
                     installer.post_install_operations()
                 else:
                     raise NotImplementedError("Only the Inspector is supported at this time")
             if operation == OP_ENABLE_GDPR:
                 self._enable_gdpr()
-                self._administrate_env_file()  
+            if operation == OP_ENABLE_ET:
+                self._enable_email_treading()
             if operation == OP_START:
                 if self.config.engine == INSPECTOR:
-                    print("If this is the first time the ayfie Inspector is started, then this will take quite some time....")
+                    print("Downloading any required Docker image not already downloaded. This may take many minutes...")
                     self.start_inspector()
                     log.debug("Waiting for engine to be up and ready")
                     self.wait_until_engine_ready()
-                    log.info("Search engine up and ready")
+                    message = "Search engine is now up and ready"
+                    log.info(message)
+                    print(message)
                     app_down = False
                 else:
                     raise NotImplementedError("Only the Inspector is supported at this time")
@@ -2623,6 +2697,8 @@ class Operational(EngineConnector):
                     self._administrate_env_file()
                 else:
                     raise NotImplementedError("Only the Inspector is supported at this time")
+        if self.gdpr_enabled or self.email_treading_enabled:
+            self._administrate_env_file()
         if app_down == True:
             raise EngineDown
         
@@ -4499,7 +4575,7 @@ class Config():
         self.os                       = self.__get_item(operational, 'os', "auto")      
         self.pre_operations           = self.__get_item(operational, 'pre_operations', None)
         self.post_operations          = self.__get_item(operational, 'post_operations', None)
-        self.docker_compose_yml_files = self.__get_item(operational, 'docker_compose_yml_files', [])
+        self.docker_compose_yml_files = self.__get_item(operational, 'docker_compose_yml_files', [DOCKER_COMPOSE_FILE])
         self.data_dir_path            = self.__get_item(operational, 'data_dir_path', None)
         self.dot_env_input_path       = self.__get_item(operational, 'dot_env_input_path', None)
         self.dot_env_output_path      = self.__get_item(operational, 'dot_env_output_path', ".env")        
@@ -5064,3 +5140,6 @@ run_from_cmd_line = False
 if __name__ == '__main__':
     run_from_cmd_line = True
     run_cmd_line(sys.argv)
+    
+   
+ 
