@@ -1,5 +1,6 @@
 from json import loads, dumps
 from json.decoder import JSONDecodeError
+from socket import gaierror
 from time import sleep, time
 from datetime import datetime, date, timedelta
 from os.path import join, basename, dirname, exists, isdir, isfile, splitext, split as path_split, getsize, isabs
@@ -146,13 +147,14 @@ MAX_CONNECTION_RETRIES = 100
 MAX_PAUSE_BEFORE_RETRY = 120
 SLEEP_LENGTH_FACTOR    = 5
 
-RETURN_RESULT          = 'return'
-DISPLAY_RESULT         = 'display'
+NORMAL_RESULT          = "normal"
 QUERY_AND_HITS_RESULT  = "query_and_numb_of_hits"
 ID_LIST_RESULT         = 'id_list'
 ID_AND_CLASSIFER_RESULT= 'id_and_classifier_score_list'
-SAVE_RESULT            = 'save:'
-RESULT_TYPES           = [RETURN_RESULT, DISPLAY_RESULT, QUERY_AND_HITS_RESULT, ID_LIST_RESULT, ID_AND_CLASSIFER_RESULT]
+RESULT_TYPES           = [NORMAL_RESULT, QUERY_AND_HITS_RESULT, ID_LIST_RESULT, ID_AND_CLASSIFER_RESULT]
+RETURN_RESULT          = 'return'
+DISPLAY_RESULT         = 'display'
+RESULT_DESTINATIONS    = [RETURN_RESULT, DISPLAY_RESULT] 
 
 JOB_POLLING_INTERVAL   = 10
 
@@ -188,6 +190,7 @@ DOCKER_COMPOSE_METRICS_FILE  = "docker-compose-metrics.yml"
 DOCKER_COMPOSE_FRONTEND_FILE = "docker-compose-frontend.yml"
 APPLICATION_CUSTOM_FILE      = "application-custom.yml"
 APPL_PII_TEMPLATE_FILE       = "application-pii.yml.template"
+DOCKER_WINDOW_CONFIG_DIR     = "config"
 
 ELASTICSEARCH_MAX_MEM_LIMIT  = 26
 ELASTICSEARCH_MAX_MX_HEAP    = 16
@@ -229,11 +232,13 @@ WIN_DOCKER_REGISTRY    = "index.docker.io"
 PWD_START_STOP_TOKEN   = "$#$"
 
 MONITOR_INTERVAL       = 60
-MONITOR_FIFO_LENGTH    = 10
-EMAIL_ALERT            = "email"
-SLACK_ALERT            = "slack"   
-TERMINAL_ALERT         = "terminal"          
-ALERT_TYPES            = [TERMINAL_ALERT, EMAIL_ALERT, SLACK_ALERT]
+EMAIL                  = "email"
+SLACK                  = "slack"   
+TERMINAL               = "terminal" 
+ALERTS                 = "alerts"
+HEARTBEATS             = "heartbeats"      
+MESSAGE_TYPES          = [TERMINAL, EMAIL, SLACK]
+NOTIFICATION_TYPES     = [ALERTS, HEARTBEATS]
 
 TERMINAL_OUTPUT        = "terminal"
 SILENCED_OUTPUT        = "silent"
@@ -289,12 +294,15 @@ logging.basicConfig(
     level = logging.DEBUG
 )
     
-def pretty_print(json):
+def pretty_formated(json):
     if type(json) is str:
         if not len(json):
             raise ValueError('json string cannot be empty string')
         json = loads(json)
-    print(dumps(json, indent=4))
+    return dumps(json, indent=4)    
+    
+def pretty_print(json):
+    print(pretty_formated(json))
     
 def replace_passwords(string):
     string_to_show = string
@@ -423,6 +431,7 @@ class WebContent():
             if len(filenames) > 0:
                 return filenames[0]
         return None
+
 
 class FileHandlingTools():
  
@@ -931,7 +940,7 @@ class SearchEngine:
     def doc_search(self, col_id, json_query):
         raise NotImplementedError
 
-    def search_collection(self, col_id, query, size=10, offset=0, filters=[], exclude=[], aggregations=[], scroll=False, meta_data=False):
+    def search_collection(self, col_id, query, size=20, offset=0, filters=[], exclude=[], aggregations=[], scroll=False, meta_data=False):
         raise NotImplementedError
         
     def next_scroll_page(self, link):
@@ -1227,7 +1236,7 @@ class Inspector(SearchEngine):
     def doc_search(self, col_id, json_query):
         return self.meta_search(col_id, json_query)['result']
 
-    def search_collection(self, col_id, query, size=10, offset=0, filters=[], exclude=[], aggregations=[], scroll=False, meta_data=False):
+    def search_collection(self, col_id, query, size=20, offset=0, filters=[], exclude=[], aggregations=[], scroll=False, meta_data=False):
         json_query = {
             "highlight" : False,
             "sort": {
@@ -1385,38 +1394,23 @@ class Inspector(SearchEngine):
         config = self._get_clustering_config(col_id, **kwargs)
         return self.create_job_and_wait(config, timeout)
 
-    ######### Classification #########
- 
-    def _get_classifier_config(self, classifier_name=None, col_id=None, min_score=None,
-                                      num_results=None, filters=None, output_field=None):
-        config = {
-            "collectionId" : col_id,
-            "type" : "CLASSIFICATION",
-            "filters" : filters,
-            "outputField" : output_field
-        }
-        settings = {
-            "classifierId": classifier_name,
-            "minScore" : min_score,
-            "numResults": num_results
-        }
-        settings = { k:v for k,v in settings.items() if v != None }
-        if settings:
-            config["settings"] = {"classification" : settings}
-        return config     
+    ######### Classification #########  
 
-    def create_classifier(self, classifier_name, col_id, training_field, min_score, num_results, filters):
-        classifier_id = classifier_name  # For now at least
-        data = {
+    def create_classifier(self, classifier_name, col_id, training_field, min_score, 
+                                num_results, filters, use_entities=None, use_tokens=None):
+        config = {
             "name": classifier_name,
-            "id": classifier_id,
+            "id": classifier_name,
             "collectionId": col_id,
             "trainingClassesField": training_field,
             "minScore": min_score,
             "numResults": num_results,
-            "filters": filters
+            "filters": filters,
+            "useEntities" : use_entities,
+            "useTokens" : use_tokens
         }
-        self._execute('classifiers', HTTP_POST, data)
+        config = { k:v for k,v in config.items() if v != None }
+        self._execute('classifiers', HTTP_POST, config)
         
     def get_classifiers(self):
         return self._get_all_items_of_an_item_type('classifiers')
@@ -1488,7 +1482,7 @@ class DataSource():
         if self.config.data_source == None:
             raise ValueError(f"Parameter 'data_source' is mandatory (but it can point to an empty source)")
         if self.config.data_source.startswith('http'):
-            FileHandlingTools.recreate_directory(DOWNLOAD_DIR)
+            FileHandlingTools().recreate_directory(DOWNLOAD_DIR)
             self.config.data_source = WebContent().download(self.config.data_source, DOWNLOAD_DIR)         
         if not exists(self.config.data_source):
             raise ValueError(f"There is no file or directory called '{self.config.data_source}'")
@@ -2323,7 +2317,7 @@ class Operational(EngineConnector):
             self.install_dir = self.config.install_dir
         else:
             try:
-                self.install_dir = self.install_dir = self._extract_version_number()
+                self.install_dir = self._extract_version_number()
             except ValueError:
                 self.install_dir = None
         self.host_os = get_host_os()
@@ -2338,14 +2332,20 @@ class Operational(EngineConnector):
             self.docker_registry = WIN_DOCKER_REGISTRY 
             self.script_extension = "cmd"
         self.docker_compose_custom_files = self.config.docker_compose_yml_files
-        if self.config.enable_frontend and (get_host_os() == OS_LINUX or self.config.os == OS_LINUX):
+        if self.config.enable_frontend:
             if not DOCKER_COMPOSE_FRONTEND_FILE in self.docker_compose_custom_files:
                 self.docker_compose_custom_files.append(DOCKER_COMPOSE_FRONTEND_FILE)
-                
-        # Semi hard coded fix until Inspector comes with a Windows frontend
+
         if self.host_os == OS_WINDOWS:
-            if DOCKER_COMPOSE_FRONTEND_FILE in self.docker_compose_custom_files:
-                self.docker_compose_custom_files.remove(DOCKER_COMPOSE_FRONTEND_FILE)
+            current_version = None
+            try:
+                current_version = self._extract_version_number()
+            except ValueError:
+                pass
+            if current_version:
+                if self._is_earlier_version(current_version, "2.6.1"):
+                    if DOCKER_COMPOSE_FRONTEND_FILE in self.docker_compose_custom_files:
+                        self.docker_compose_custom_files.remove(DOCKER_COMPOSE_FRONTEND_FILE)
             
         self.gdpr_enabled = False
         self.email_treading_enabled = False
@@ -2528,7 +2528,7 @@ class Operational(EngineConnector):
                 delimiter = ':'
             if self.docker_compose_custom_files:
                 dot_env_file_content += "COMPOSE_FILE=" 
-                dot_env_file_content += delimiter.join(self.docker_compose_custom_files)                
+                dot_env_file_content += delimiter.join(list(set(self.docker_compose_custom_files)))                
                 dot_env_file_content += "\n"
             dot_env_file_content += self._gen_mem_limits()
             if self.config.dot_env_output_path:
@@ -2569,15 +2569,27 @@ class Operational(EngineConnector):
         
     def _write_yml_to_file(self, content_as_json, filename):
         with change_dir(self.install_dir):
+            dir_path = dirname(filename)
+            if dir_path and not exists(dir_path):
+                makedirs(dir_path)
             with open(filename, "wb") as f:
-                f.write(("version: '2.1'\n" + yaml.dump(content_as_json, default_flow_style=False)).encode("utf-8"))
+                f.write(("version: '2.1'\n" + yaml.dump(content_as_json, default_flow_style=False)).encode("utf-8"))  
                 
     def _gen_application_custom_file(self, new_yml_content_as_json):
-        self.yml_content_as_json = self._merge_yaml_dict_structures(self.yml_content_as_json, new_yml_content_as_json)
-        self._write_yml_to_file(self.yml_content_as_json, APPLICATION_CUSTOM_FILE)
         with open(DOCKER_COMPOSE_CUSTOM_FILE, "w") as f:
-            f.write(f"version: '2.1'\nservices:\n  api:\n    volumes:\n      - ./{APPLICATION_CUSTOM_FILE}:/home/dev/restapp/application-custom.yml")
+            os = self._get_concluded_os()
+            if os == OS_LINUX:
+                application_custom_file_path = APPLICATION_CUSTOM_FILE
+                mapping = f"./{APPLICATION_CUSTOM_FILE}:/home/dev/restapp/application-custom.yml"
+            elif os == OS_WINDOWS:
+                application_custom_file_path = f"{DOCKER_WINDOW_CONFIG_DIR}/{APPLICATION_CUSTOM_FILE}"
+                mapping = f"./{DOCKER_WINDOW_CONFIG_DIR}:c:\\ayfie\\config"
+            else:
+                raise ValueError(f"'{os}' is not a supported OS")
+            f.write(f"version: '2.1'\nservices:\n  api:\n    volumes:\n      - {mapping}")
         self.docker_compose_custom_files.append(DOCKER_COMPOSE_CUSTOM_FILE)
+        self.yml_content_as_json = self._merge_yaml_dict_structures(self.yml_content_as_json, new_yml_content_as_json)
+        self._write_yml_to_file(self.yml_content_as_json, application_custom_file_path)
 
     def _configure_skip_extractors(self, skipExtractors):
         return {
@@ -2663,11 +2675,11 @@ class Operational(EngineConnector):
                 self._enable_email_treading()
             if operation == OP_START:
                 if self.config.engine == INSPECTOR:
-                    print("Downloading any required Docker image not already downloaded. This may take many minutes...")
+                    print("Downloading any required Docker images not already downloaded. This may take many minutes...")
                     self.start_inspector()
                     log.debug("Waiting for engine to be up and ready")
                     self.wait_until_engine_ready()
-                    message = "Search engine is now up and ready"
+                    message = "The ayfie Inspector is now up and ready"
                     log.info(message)
                     print(message)
                     app_down = False
@@ -2990,8 +3002,10 @@ class Classifier(EngineConnector):
             self.engine.delete_classifier(classification['name'])
         col_id = self.engine.get_collection_id(self.config.col_name) 
         self.engine.create_classifier(classification['name'], col_id, classification['training_field'],
-                                     classification['min_score'], classification['num_results'], 
-                                     classification['training_filters']) 
+                                     classification['min_score'], classification['num_results'],
+                                     classification['training_filters'],
+                                     classification['use_entities'],
+                                     classification['use_tokens'])
         self.engine.train_classifier(classification['name'])
         self.engine.wait_for_classifier_to_be_trained(classification['name'])
 
@@ -3002,8 +3016,8 @@ class Classifier(EngineConnector):
         settings = {
             "classification": {
                 "classifierId": classification["name"],
-                "minScore" : classification["min_score"],
-                "numResults": classification["num_results"]
+                "minScore": classification["min_score"],
+                "numResults": classification["num_results"],
             } 
         }
         more_params = {
@@ -3121,6 +3135,8 @@ class Classifier(EngineConnector):
                 "training_field"       : classification['training_field'],
                 "min_score"            : classification['min_score'],
                 "num_results"          : classification['num_results'],
+                "use_entities"         : classification['use_entities'],
+                "use_tokens"           : classification['use_tokens'],
                 "training_filters"     : [{"field": K_FOLD_FIELD, "value": "training"}],
                 "execution_filters"    : classification['execution_filters'],
                 "output_field"         : classification['output_field']
@@ -3157,6 +3173,8 @@ class Classifier(EngineConnector):
                         self.config.col_name,
                         classification['min_score'],
                         classification['num_results'],
+                        classification['use_entities'],
+                        classification['use_tokens'],
                         classification['execution_filters'],
                         classification['output_field']
                      )
@@ -3532,7 +3550,7 @@ class LogAnalyzer():
                 "extraction": [(1, 2)]
             },
             {
-                "pattern" : r"^.*main platform.config.AyfieVersion: (Version: .* Buildinfo: [^\$]*)\n$",   
+                "pattern" : r"^.*main platform.config.AyfieVersion: (Version: .* Buildinfo: [^\$]*)\n$",            
                 "extraction": [("ayfie Inspector", 1)] 
             },
             {
@@ -3709,7 +3727,15 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*I/O error on POST request for \"[^ ]+\": Read timed out;.*$",
                 "indication": "the Spark read or write operation timed out."
-            }  
+            },
+            {
+                "pattern" : r"^.*java.lang.IllegalStateException: Subprocess exited with status 137. Command ran: /extraction/[a-z]{2,3}/ayfie-wrapper.sh$",
+                "indication": 'the entity extraction ran out of memory, try reducing the amount of data / number of documents processed at the time: "settings":{"processing":{"entityExtraction":{"maxDocumentsPerPartition":1000}}'
+            },
+            {
+                "pattern" : r"^.*org.elasticsearch.hadoop.rest.EsHadoopRemoteException: illegal_argument_exception: .*$",
+                "indication": "one has run into an issue described in ticket PLATFORM-354 and that has been solved in Inspector version 2.2.0."
+            }
         ]
         for regex in self.config.report_custom_regexs:
             self.symptoms.append({
@@ -3819,6 +3845,7 @@ class LogAnalyzer():
                             query = query.replace(m.group(1), "")
                         else:
                             break
+                query = query.strip().lower()
                 if not query_pattern["title"] in self.queries:
                     self.queries[query_pattern["title"]] = {}
                 item_dict = self.queries[query_pattern["title"]]
@@ -4045,8 +4072,6 @@ class LogAnalyzer():
         else:
             ValueError(f"'{self.log_file}' is neither a file nor a directory")
         analyses_output = ""
-        query_statistics_output = ""
-        query_suggest_output = ""
         for log_file in FileHandlingTools().get_next_file(self.log_unpacking_dir):
             self._clear_counters()
             is_log_file = True
@@ -4100,34 +4125,34 @@ class LogAnalyzer():
         page += "</table><br>" 
         return page
  
+ 
 class Monitoring(EngineConnector):
 
-    def _send_slack_alert(self, message, web_hooks):
+    def _post_slack_message(self, message, web_hooks):
         for web_hook in web_hooks:
-            requests.post(web_hook, data=dumps({"text":message}))
-            
-    def _send_email_alert(self, message, recipients):
+            try:
+                requests.post(web_hook, data=dumps({"text":message}))
+            except (gaierror, requests.exceptions.ConnectionError) as e:
+                self._post_terminal_message(f"Error sending slack message: '{str(e)}'")
+                
+    def _post_email_message(self, message, recipients):
         raise NotImplementedError("Email alerting has still not been implemented")
 
-    def _make_terminal_alert(self, message):
+    def _post_terminal_message(self, message):
         print(message)
 
-    def _send_alert(self, message, alerts):
-        if not len(alerts):
-            self._terminal_alert(message)
+    def _post_message(self, message, message_type, message_destination):
+        if message_type == TERMINAL:
+            self._post_terminal_message(message)
+        elif message_type == EMAIL:
+            self._post_email_message(message, message_destination)
+        elif message_type == SLACK:
+            self._post_slack_message(message, message_destination)
         else:
-            for alert_type in alerts:
-                if alert_type == TERMINAL_ALERT:
-                    self._make_terminal_alert(message)
-                elif alert_type == EMAIL_ALERT:
-                    self._send_email_alert(message, alerts[alert_type])
-                elif alert_type == SLACK_ALERT:
-                    self._send_slack_alert(message, alerts[alert_type])
-                else:
-                    raise ValueError(f"'{alert_type}' is not a known alert type") 
+            raise ValueError(f"'{message_type}' is not a known message type") 
         
     def _system_is_up(self, monitoring):
-        if int((sum(monitoring["monitor_fifo"]) / MONITOR_FIFO_LENGTH) * 100) < monitoring["min_score"]:
+        if int((sum(monitoring["monitor_fifo"]) / monitoring["queue_length"]) * 100) < monitoring["min_score"]:
             return False
         else:
             return True
@@ -4166,13 +4191,18 @@ class Monitoring(EngineConnector):
         else:
             return False
             
+    def _get_alert_target(self, monitoring):
+        if monitoring["endpoint"]:
+            return monitoring["endpoint"]
+        else:
+            target_type = "query" if monitoring["query"] else "suggest"
+            return f'{monitoring["col_id"]} @ {monitoring["server"]}:{monitoring["port"]} ({target_type})' 
+      
     def _alert_if_failure(self, monitoring, result_obtaining_func, result_verification_func):
         result = None
         try:
             result = result_obtaining_func(monitoring)
-        except HTTPError as e:
-            monitoring["monitor_fifo"].append(0)
-        except requests.exceptions.ConnectionError:
+        except (HTTPError, requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout, gaierror) as e:
             monitoring["monitor_fifo"].append(0)
         if result:  
             if result_verification_func(result, monitoring):
@@ -4180,35 +4210,34 @@ class Monitoring(EngineConnector):
             else:
                 monitoring["monitor_fifo"].append(0)
         monitoring["monitor_fifo"].popleft()
-        
-        collection = monitoring["col_id"]
-        server = monitoring["server"]
-        port = monitoring["port"]
-        
-        if monitoring["endpoint"]:
-            print(monitoring["endpoint"])
-        else:
-            print(f'{"query" if monitoring["query"] else "suggest"} for {collection} @ {server}:{port}')
-        print(monitoring["monitor_fifo"])
-        print  
+                
+        if 0 in monitoring["monitor_fifo"]:
+            print(f"{str(datetime.now())[:-7]} - {self._get_alert_target(monitoring)}")
+            print(monitoring["monitor_fifo"])
+            print
         
         action = "obtain suggestions for"
         if monitoring["query"]:
             action = "query"
+        collection = monitoring["col_id"]
+        server = monitoring["server"]
+        port = monitoring["port"]
         if self._system_is_up(monitoring):
             if not monitoring["system_up"]:
                 monitoring["system_up"] = True
                 message = f'WORKING AGAIN: Now able to {action} {self.config.engine} collection "{collection}" at "{server}:{port}"'
                 if monitoring["endpoint"]:
                     message = f'WORKING AGAIN: Now able to dowlload {monitoring["endpoint"]} successfully'
-                self._send_alert(message, monitoring["alerts"]) 
+                for message_type in monitoring[ALERTS]:
+                    self._post_message(message, message_type, monitoring[ALERTS][message_type]) 
         else:
             if monitoring["system_up"]:
                 monitoring["system_up"] = False
                 message = f'FAILURE: Unable to {action} {self.config.engine} collection "{collection}" at "{server}:{port}"'
                 if monitoring["endpoint"]:
                     message = f'FAILURE: Unable to download {monitoring["endpoint"]} successfully'
-                self._send_alert(message, monitoring["alerts"])
+                for message_type in monitoring[ALERTS]:
+                    self._post_message(message, message_type, monitoring[ALERTS][message_type])
 
     def _alert_if_failing_query(self, search, monitoring):
         monitoring["search"] = search
@@ -4223,11 +4252,11 @@ class Monitoring(EngineConnector):
         
     def monitor(self):
         print("Entering infinite monitoring loop")
-        monitor_fifo = []
         duplicates = []
-        for i in range(MONITOR_FIFO_LENGTH):
-            monitor_fifo.append(1)
         for monitoring in self.config.monitorings:
+            monitor_fifo = []
+            for i in range(monitoring["queue_length"]):   
+                monitor_fifo.append(1)
             monitoring["monitor_fifo"] = deque(monitor_fifo) 
             monitoring["system_up"] = True
             if not monitoring["col_id"]:
@@ -4245,28 +4274,51 @@ class Monitoring(EngineConnector):
                 duplicate["suggest"] = False
                 duplicates.append(duplicate)
                 monitoring["query"] = False
+            for notification_type in NOTIFICATION_TYPES:
+                if monitoring[notification_type]:
+                    for message_type in monitoring[notification_type]:
+                        if notification_type == ALERTS:
+                            msg = f'Alerting activated for {self._get_alert_target(monitoring)}'
+                        elif notification_type == HEARTBEATS:
+                            monitoring["last_heartbeat"] = time()
+                            msg = f'A heartbeat every {monitoring["heartbeat_interval"]} seconds has been activated'
+                        self._post_message(msg, message_type, monitoring[notification_type][message_type])
         self.config.monitorings += duplicates
-        while True:
+        try:
+            while True:
+                for monitoring in self.config.monitorings:
+                    if monitoring["query"]:
+                        self._alert_if_failing_query({
+                            "query" : "",
+                            "size": 0
+                        }, monitoring)
+                    if monitoring["suggest"]:
+                        self._alert_if_failing_suggest({
+                            "query" : "jo",
+                            "size": 0,
+                            "suggest_only": True,
+                            "suggest_limit": 1,
+                            "suggest_offset": 0,
+                            "suggest_limit": None,
+                            "suggest_filter": None
+                       }, monitoring)
+                    if monitoring["endpoint"]:
+                        self._alert_if_failing_page(monitoring)
+                    if "last_heartbeat" in monitoring:
+                        elapsed_time = int(time() - monitoring["last_heartbeat"])
+                        if elapsed_time > monitoring["heartbeat_interval"]:
+                            for message_type in monitoring[HEARTBEATS]:
+                                self._post_message("Monitoring is still up and running", message_type, 
+                                                                   monitoring[HEARTBEATS][message_type])
+                            monitoring["last_heartbeat"] += monitoring["heartbeat_interval"]
+                print()
+                sleep(MONITOR_INTERVAL)
+                
+        except:
             for monitoring in self.config.monitorings:
-                if monitoring["query"]:
-                    self._alert_if_failing_query({
-                        "query" : "",
-                        "size": 0
-                    }, monitoring)
-                if monitoring["suggest"]:
-                    self._alert_if_failing_suggest({
-                        "query" : "jo",
-                        "size": 0,
-                        "suggest_only": True,
-                        "suggest_limit": 1,
-                        "suggest_offset": 0,
-                        "suggest_limit": None,
-                        "suggest_filter": None
-                   }, monitoring)
-                if monitoring["endpoint"]:
-                    self._alert_if_failing_page(monitoring)
-            print()
-            sleep(MONITOR_INTERVAL)
+                for message_type in monitoring[HEARTBEATS]:
+                    self._post_message("Monitoring is down", message_type, monitoring[HEARTBEATS][message_type])
+            raise
             
 
 class JobsHandler(EngineConnector):
@@ -4643,7 +4695,6 @@ class Config():
         self.ignore_pdfs              = self.__get_item(feeding, 'ignore_pdfs', True)
         self.treat_csv_as_text        = self.__get_item(feeding, 'treat_csv_as_text', False)
         self.max_docs_to_feed         = self.__get_item(feeding, 'max_docs_to_feed', None)
-        #self.id_from_filename_regex   = self.__get_item(feeding, 'id_from_filename_regex', None)
         self.doc_fragmentation        = self.__get_item(feeding, 'doc_fragmentation', False)
         self.doc_fragment_length      = self.__get_item(feeding, 'doc_fragment_length', 100)   
         self.max_doc_fragments        = self.__get_item(feeding, 'max_doc_fragments', 10000) 
@@ -4716,8 +4767,10 @@ class Config():
             self.classifications.append({
                 "name"              : self.__get_item(classification, 'name', None),
                 "training_field"    : self.__get_item(classification, 'trainingClassesField', 'trainingClass'),
-                "min_score"         : self.__get_item(classification, 'minScore', 0.66666),
+                "min_score"         : self.__get_item(classification, 'minScore', 0.6),
                 "num_results"       : self.__get_item(classification, 'numResults', 1),
+                "use_entities"      : self.__get_item(classification, 'useEntities', True),
+                "use_tokens"        : self.__get_item(classification, 'useTokens', False),
                 "training_filters"  : self.__get_item(classification, 'training_filters', []),
                 "execution_filters" : self.__get_item(classification, 'execution_filters', []),
                 "output_field"      : self.__get_item(classification, 'outputField', 'pathclassification'),
@@ -4792,7 +4845,8 @@ class Config():
         for search in searches:
             self.searches.append({
                 "query_file"         : self.__get_item(search, 'query_file', None),
-                "result"             : self.__get_item(search, 'result', "display"),
+                "result"             : self.__get_item(search, 'result', "normal"),
+                "result_destination" : self.__get_item(search, 'result_destination', "display"),
                 "classifier_field"   : self.__get_item(search, 'classifier_field', None),
                 "highlight"          : self.__get_item(search, 'highlight', True),
                 "sort_criterion"     : self.__get_item(search, 'sort_criterion', "_score"),
@@ -4801,9 +4855,9 @@ class Config():
                 "exclude"            : self.__get_item(search, 'exclude', []),
                 "aggregations"       : self.__get_item(search, 'aggregations', []),
                 "filters"            : self.__get_item(search, 'filters', []),
-                "query"              : self.__get_item(search, 'query', "*"),
+                "query"              : self.__get_item(search, 'query', ""),
                 "scroll"             : self.__get_item(search, 'scroll', False),
-                "size"               : self.__get_item(search, 'size', 10),
+                "size"               : self.__get_item(search, 'size', 20),
                 "offset"             : self.__get_item(search, 'offset', 0),
                 "suggest_only"       : self.__get_item(search, 'suggest_only', False), 
                 "suggest_offset"     : self.__get_item(search, 'suggest_offset', None), 
@@ -4854,7 +4908,7 @@ class Config():
         if not type(monitorings) is list:
             monitorings = [monitorings]
         for monitoring in monitorings:
-            self.monitorings.append({
+            self.monitorings.append({  
                 "endpoint"           : self.__get_item(monitoring, 'endpoint', None),
                 "encoding"           : self.__get_item(monitoring, 'encoding', "utf-8"),
                 "regex"              : self.__get_item(monitoring, 'regex', "^.*$"),
@@ -4864,15 +4918,24 @@ class Config():
                 "server"             : self.__get_item(monitoring, 'server', None),
                 "port"               : self.__get_item(monitoring, 'port', None),  
                 "user"               : self.__get_item(monitoring, 'user', None),
-                "password"           : self.__get_item(monitoring, 'password', None),                   
+                "password"           : self.__get_item(monitoring, 'password', None),                 
                 "min_docs"           : self.__get_item(monitoring, 'min_docs', 0),
+                "queue_length"       : self.__get_item(monitoring, 'queue_length', 10),
+                "alerts"             : self.__get_item(monitoring, 'alerts', {}),
                 "min_score"          : self.__get_item(monitoring, 'min_score', 50),
-                "alerts"             : self.__get_item(monitoring, 'alerts', []),
+                "heartbeats"         : self.__get_item(monitoring, 'heartbeats', {}),
+                "heartbeat_interval" : self.__get_item(monitoring, 'heartbeat_interval', 86400)
             })
             for monitoring in self.monitorings:
-                for alert_type in monitoring["alerts"]:
-                    if not alert_type in ALERT_TYPES:
-                        raise ValueError(f"'{alert_type}' is not a supported altert type")
+                for notification_type in NOTIFICATION_TYPES:
+                    if monitoring[notification_type]:
+                        if not type(monitoring[notification_type]) is dict:
+                            raise ValueError(f"Parameter '{notification_type}' has to be a dictionary")
+                        for message_type in monitoring[notification_type]:
+                            if not message_type in MESSAGE_TYPES:
+                                raise ValueError(f"'{message_type}' is not a supported message type")
+                        if type(monitoring[notification_type][message_type]) is str:
+                            monitoring[notification_type][message_type] = [monitoring[notification_type][message_type]]
         
     def __init_regression_testing(self, regression_testing):
         self.upload_config_dir        = self.__get_item(regression_testing, 'upload_config_dir', None)
@@ -4999,6 +5062,46 @@ class Admin():
                 self.operational.do_post_operations()
             except EngineDown:
                 pass
+
+    def search_result_processing(self, search, result):
+        result_type = type(search["result"])
+        if result_type is bool or result_type is int:
+            testExecutor = TestExecutor(self.config, self.config.server_settings)
+            testExecutor.process_test_result(search, result) 
+            return
+        elif not search["result"] in RESULT_TYPES:
+            values = '", "'.join(RESULT_TYPES)
+            raise ValueError(f'Parameter "result" must be a bool, an int or one of these strings: "{values}".')
+          
+        output = []
+        if search["result"] == NORMAL_RESULT:
+            output.append(pretty_formated(result))
+        elif search["result"] == QUERY_AND_HITS_RESULT:
+            output.append(f'{str(result["meta"]["totalDocuments"]).rjust(8)} <== {result["query"]["query"]}')
+        elif search["result"] == ID_LIST_RESULT:
+            output.append(pretty_formated([doc["document"]["id"] for doc in result["result"]]))
+        elif search["result"] == ID_AND_CLASSIFER_RESULT:
+            search["exclude"] = ["content", "term", "location", "organization", "person", "email"]
+            for page in self.querier.get_search_result_pages(search):  
+                for doc in page:
+                    fields = doc["document"]
+                    output_line = str(fields["id"])
+                    if search["classifier_field"] in fields:
+                        output_line += "\t" + str(fields[search["classifier_field"]])
+                    output.append(output_line)
+        output = "\n".join(output)    
+       
+        if search["result_destination"] == RETURN_RESULT:
+            return output
+        elif search["result_destination"] == DISPLAY_RESULT:
+            print(output)
+        else:
+            try:
+                with open(search["result_destination"], 'wb') as f:
+                    f.write(output.encode('utf-8'))
+            except:
+                msg = f'Parameter "result_destination" must be {", ".join(RESULT_DESTINATIONS)} or a output file path'
+                raise ValueError(msg)
         
     def run_config(self):
         if self.config.regression_testing:
@@ -5068,37 +5171,10 @@ class Admin():
             for search in self.config.searches:
                 try:
                     result = self.querier.search(search)
+                    self.search_result_processing(search, result)
                 except FileNotFoundError as e:
                     print(f'ERROR: {str(e)}')
                     return
-
-                result_type = type(search["result"])
-                if result_type is bool or result_type is int:
-                    testExecutor = TestExecutor(self.config, self.config.server_settings)
-                    testExecutor.process_test_result(search, result) 
-                elif search["result"] == RETURN_RESULT:
-                    return result
-                elif search["result"] == DISPLAY_RESULT:
-                    pretty_print(result)
-                elif search["result"] == QUERY_AND_HITS_RESULT:
-                    print(f'{str(result["meta"]["totalDocuments"]).rjust(8)} <== {result["query"]["query"]}')
-                elif search["result"] == ID_LIST_RESULT:
-                    pretty_print([doc["document"]["id"] for doc in result["result"]])
-                elif search["result"] == ID_AND_CLASSIFER_RESULT:
-                    search["exclude"] = ["content", "term", "location", "organization", "person", "email"]
-                    for page in self.querier.get_search_result_pages(search):  
-                        for doc in page:
-                            fields = doc["document"]
-                            output_line = str(fields["id"])
-                            if search["classifier_field"] in fields:
-                                output_line += "\t" + str(fields[search["classifier_field"]])
-                            print(output_line)
-                elif search["result"].startswith('save:'):
-                    with open(search["result"][len(SAVE_RESULT):], 'wb') as f:
-                        f.write(dumps(result, indent=4).encode('utf-8'))
-                else:    
-                    msg = f'"result" must be {", ".join(RESULT_TYPES)}, "{SAVE_RESULT}<file path>" or an int'
-                    raise ValueError(msg)
         self.run_post_operations()
         if self.config.monitorings:
             self.monitoring.monitor()
