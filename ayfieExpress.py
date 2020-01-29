@@ -248,6 +248,8 @@ NOTIFICATION_TYPES     = [ALERTS, HEARTBEATS]
 TERMINAL_OUTPUT        = "terminal"
 SILENCED_OUTPUT        = "silent"
 
+DOCKER_COMPOSE_EXE     = "/usr/bin/docker-compose"
+
 
 def get_host_os():
     return operating_system().lower()
@@ -2233,12 +2235,12 @@ class LinuxInspectorInstaller(InspectorInstaller):
         if version:
             ver = version
         link = f"https://github.com/docker/compose/releases/download/{ver}/docker-compose-$(uname -s)-$(uname -m)"
-        execute(f'curl -L "{link}" -o /usr/local/bin/docker-compose') 
+        execute(f'curl -L "{link}" -o {DOCKER_COMPOSE_EXE}')
         
     def post_install_operations(self): 
         self._print("Making scripts executable...")
         with change_dir(self.install_dir):
-            for item in ["start-ayfie.sh", "stop-ayfie.sh", "/usr/local/bin/docker-compose", "ayfie-logs.sh"]: 
+            for item in ["start-ayfie.sh", "stop-ayfie.sh", DOCKER_COMPOSE_EXE, "ayfie-logs.sh"]: 
                 execute(f"chmod +x {item}")
                 
     def _user_already_exists(self, user):
@@ -2333,23 +2335,23 @@ class AftPackageManager(PackageManager):
         execute(f"apt-get purge -y docker-engine docker docker.io docker-ce")
         execute(f"apt-get autoremove -y --purge docker-engine docker docker.io docker-ce")
 
-        
+
 class YumPackageManager(PackageManager):
 
     def _update_package_index(self):
-        #execute("yum check-update")
         execute("yum -y update")
         execute("yum install -y yum-utils device-mapper-persistent-data lvm2")
 
     def _install_docker_repository(self):
         execute("yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo")
-         
-    def _install_docker(self):
-        execute("yum install docker")
 
-    def uninstall_docker(self):
-        execute("yum remove docker docker-common docker-selinux docker-engine")
-        
+    def _install_docker(self):
+        execute("yum install -y docker-ce docker-ce-cli containerd.io")
+        #execute("systemctl start docker")
+    
+    def _uninstall_docker(self):
+        self._print("Uninstalling docker...")
+        execute("yum remove -y docker-ce")
 
 class WindowsInspectorInstaller(InspectorInstaller):  
 
@@ -2447,6 +2449,7 @@ class RemoteServer():
         import scp
         with scp.SCPClient(self.ssh.get_transport()) as scp_client:
             scp_client.put(from_path, to_path)
+
 
 class Operational(EngineConnector):
 
