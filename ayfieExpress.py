@@ -99,7 +99,7 @@ DEL_COL               = "delete_collection"
 CREATE_MISSING_COL    = "create_collection_if_not_exists"
 RECREATE_COL          = "recreate_collection"
 NO_ACTION             = "no_action"
-PRE_ACTIONS           = [NO_ACTION, DEL_ALL_COL, DEL_COL, RECREATE_COL, CREATE_MISSING_COL]
+PRE_FEEDING_ACTIONS   = [NO_ACTION, DEL_ALL_COL, DEL_COL, RECREATE_COL, CREATE_MISSING_COL]
 
 AUTO                  = "auto"
 AYFIE                 = "ayfie"
@@ -181,19 +181,24 @@ OP_ENABLE_GDPR         = "enable_gdpr"
 OP_ENABLE_ET           = "enable_email_threading"
 OP_FILE_TRANSFER       = "file_transfer"
 OP_DISABLE_DEFENDER    = "disable_defender"
+OP_DEL_ALL_COL         = "delete_all_collections"
 
 OPERATIONS             = [
     OP_INSTALL, OP_START, OP_STOP, OP_UNINSTALL, OP_PRUNE_SYSTEM, OP_GEN_DOT_ENV, OP_ENABLE_GDPR, 
-    OP_ENABLE_ET, OP_FILE_TRANSFER, OP_DISABLE_DEFENDER
-]
+    OP_ENABLE_ET, OP_FILE_TRANSFER, OP_DISABLE_DEFENDER, OP_DEL_ALL_COL
+] 
 
-DOCKER_COMPOSE_FILE          = "docker-compose.yml"
-DOCKER_COMPOSE_CUSTOM_FILE   = "docker-compose-custom.yml"
-DOCKER_COMPOSE_METRICS_FILE  = "docker-compose-metrics.yml"
-DOCKER_COMPOSE_FRONTEND_FILE = "docker-compose-frontend.yml"
+DOCKER_COMPOSE_FILE             = "docker-compose.yml"
+DOCKER_COMPOSE_CUSTOM_FILE      = "docker-compose-custom.yml"
+DOCKER_COMPOSE_METRICS_FILE     = "docker-compose-metrics.yml"
+DOCKER_COMPOSE_FRONTEND_FILE    = "docker-compose-frontend.yml"
+DOCKER_COMPOSE_SECURITY_FILE    = "docker-compose-security.yml"
+DOCKER_COMPOSE_SELF_SIGNED_FILE = "docker-compose-security-self-signed.yml"
+
 APPLICATION_CUSTOM_FILE      = "application-custom.yml"
 APPL_PII_TEMPLATE_FILE       = "application-pii.yml.template"
 DOCKER_WINDOW_CONFIG_DIR     = "config"
+SECURITY_ASSETS_DIR          = "security-assets"
 
 ELASTICSEARCH_MAX_MEM_LIMIT  = 26
 ELASTICSEARCH_MAX_MX_HEAP    = 16
@@ -229,9 +234,18 @@ OS_AUTO                = "auto"
 OS_WINDOWS             = "windows"
 OS_LINUX               = "linux"
 SUPPORTED_OS           = [OS_AUTO, OS_WINDOWS, OS_LINUX]
-DISTROS_USING_YUM      = ["centos linux", "red hat enterprise linux"]
-DISTROS_USING_AFT      = ["ubuntu"]
-
+DISTRO_CENTOS          = "centos"
+DISTRO_UBUNTU          = "ubuntu"
+DISTRO_REDHAT          = "redhat"
+LINUX_DISTROS_NAMES    = [DISTRO_CENTOS, DISTRO_REDHAT, DISTRO_UBUNTU]
+DISTROS_USING_YUM      = [DISTRO_CENTOS, DISTRO_REDHAT]
+DISTROS_USING_APT_GET  = [DISTRO_UBUNTU]
+DISTROS_USING_DNF      = []
+DISTRO_NAME_MAP        = {
+    "centos linux": DISTRO_CENTOS,
+    "ubuntu": DISTRO_UBUNTU,
+    "red hat enterprise linux": DISTRO_REDHAT
+}
 LINUX_DOCKER_REGISTRY  = "quay.io" 
 WIN_DOCKER_REGISTRY    = "index.docker.io" 
 PWD_START_STOP_TOKEN   = "$#$"
@@ -299,8 +313,7 @@ logging.basicConfig(
     format = '%(asctime)s %(levelname)s: %(message)s, %(filename)s(%(lineno)d)',
     datefmt = '%m/%d/%Y %H:%M:%S',
     filename = join(LOG_DIR, basename(basename(sys.argv[0])).split('.')[0] + ".log"), 
-    level = LOG_LEVEL_TO_USE
-    
+    level = LOG_LEVEL_TO_USE 
 )
     
 def pretty_formated(json):
@@ -320,6 +333,42 @@ def listify(obj):
         obj = [obj]
     return obj
     
+def get_env_vars_from_file(filepath, name_var, version_var):
+    try:
+        with open(filepath, "r") as f:
+            content = f.read()
+    except:
+        return None, None
+    m = search(f"{name_var}=\"(.+?)\"", content, DOTALL)
+    if m:
+        name = m.group(1)
+        m = search(f"{version_var}=\"(.+?)\"", content, DOTALL)
+        if m:
+            version = m.group(1)
+            return name.lower(), version.lower()
+    return None, None
+    
+def get_linux_distro_and_version(): 
+    name, version = get_env_vars_from_file("/etc/os-release", "NAME", "VERSION_ID")
+    if not name:
+        try:
+            version = execute("lsb_release -sr", return_response=True)
+            name = execute("lsb_release -si", return_response=True)
+        except CommandLineError:
+            pass
+        if not name:
+            name, version = get_env_vars_from_file("/etc/lsb-release", "DISTRIB_ID", "DISTRIB_RELEASE")
+            if not name:
+                name, version = get_env_vars_from_file("/etc/debian_version", "DISTRIB_ID", "DISTRIB_RELEASE")
+                if not name:
+                    raise AutoDetectionError("Unable to auto detect linux distro")
+                    
+    name = name.lower()
+    if name in DISTRO_NAME_MAP:
+        name = DISTRO_NAME_MAP[name]         
+    log.debug(f"Linux distro '{name}', version: '{version}'")
+    return name, version
+              
 def replace_passwords(string):
     string_to_show = string
     string_fragments = string.split(PWD_START_STOP_TOKEN)
@@ -371,26 +420,162 @@ def install_python_modules(modules):
                 if get_host_os() == OS_LINUX:
                     execute(f"umask 022")
                 first_time = False
+                command_line = f"{sys.executable} -m pip install --upgrade pip"
                 try:
-                    execute(f"{sys.executable} -m pip install --upgrade pip")
+                    execute(command_line)
                 except CommandLineError as e:
                     if not "No module named pip" in str(e):
-                        print("curl -O https://bootstrap.pypa.io/get-pip.py failed for an unexpected reasons")
                         raise
+                    linux_distro, version = get_linux_distro_and_version()
+                    if linux_distro in DISTROS_USING_APT_GET:
+                        package_manager = AptGetPackageManager(linux_distro)
+                    elif linux_distro in DISTROS_USING_YUM:
+                        package_manager = YumPackageManager(linux_distro)
+                    elif linux_distro in DISTROS_USING_DNF: 
+                        package_manager = DnfGetPackageManager(linux_distro)
+                    package_manager.install_pip()
                     try:
-                        execute("apt update")
-                        execute("apt install python3-pip --assume-yes")
                         execute("pip3 --version")
                     except:
-                        print(f"Failed to install pip")
+                        log.error("Failed to install pip3")
                         raise
             try:
                 execute(f"{sys.executable} -m pip install {package}")  
                 __import__(module)
             except:
-                print(f"Failed to automatatically install '{package}'")
-                raise
-           
+                print(f"Failed to automatatically install '{package}.'")
+                print("For some Linux distros this means one has to run the command line once for (almost) every module installed.")   
+                sys.exit() 
+                                
+class PackageManager: 
+
+    def __init__(self, linux_distro_name):
+        self.linux_distro_name = linux_distro_name
+        supported_distros = self._get_supported_distros()
+        if not self.linux_distro_name in self._get_supported_distros():
+            raise ValueError(f"'{self.linux_distro_name}' is not among the distros supported by this package manager: {LINUX_DISTROS_NAMES}")            
+        self.repo_url = f"https://download.docker.com/linux/{self.linux_distro_name}" 
+        
+    def _get_supported_distros(self):
+        return []    
+                
+    def install_pip(self):
+        self._update_package_index()
+        self._install_pip()
+        
+    def _setup_docker_repository(self):
+        self._update_package_index()
+        self._install_repository_tools()
+        self._add_docker_gpg_key()
+        self._add_repository()
+        
+    def install_docker(self):
+        self._setup_docker_repository()
+        self._install_docker()
+        
+    def uninstall_docker(self):
+        self._uninstall_docker()
+
+
+class AptGetPackageManager(PackageManager):
+
+    def __init__(self, linux_distro_name):
+        super().__init__(linux_distro_name)
+        self.gpg_url = f"{self.repo_url}/gpg"
+
+    def _get_supported_distros(self):
+        return DISTROS_USING_APT_GET
+ 
+    def _update_package_index(self):
+        execute("apt-get update")
+        
+    def _install_pip(self):
+        execute("apt install python3-pip --assume-yes")
+
+    def _install_repository_tools(self):
+        execute("apt-get install apt-transport-https ca-certificates curl gnupg-agent software-properties-common --assume-yes")  
+
+    def _add_docker_gpg_key(self):
+        execute(f"curl -fsSL {self.gpg_url} | apt-key add -")
+        execute("apt-key fingerprint 0EBFCD88")
+        
+    def _add_repository(self):
+        execute(f'add-apt-repository "deb [arch=amd64] {self.repo_url} $(lsb_release -cs) stable"') 
+            
+    def _get_latest_available_docker_version(self):
+        version_string = None
+        response = execute("apt-cache madison docker-ce", return_response=True)
+        log.debug(response)
+        for line in response.split("\n"):
+            regex = f"^docker-ce \| (.*) \| {self.repo_url} bionic/stable amd64 Packages$"
+            m = match(regex, line.strip())
+            if m:
+                version_string = m.group(1)
+                break
+        return version_string
+        
+    def _install_docker(self):
+        docker_version = self._get_latest_available_docker_version()
+        log.debug(f"Latest available docker version is '{docker_version}'")
+        if docker_version:
+            execute(f"apt-get install docker-ce={docker_version} docker-ce-cli={docker_version} containerd.io --assume-yes")
+        else:
+            execute("apt-get install docker-ce docker-ce-cli containerd.io --assume-yes")
+        
+    def _uninstall_docker(self):
+        execute(f"apt-get purge -y docker-engine docker docker.io docker-ce")
+        execute(f"apt-get autoremove -y --purge docker-engine docker docker.io docker-ce")
+        
+
+class YumPackageManager(PackageManager):
+
+    def _get_supported_distros(self):
+        return DISTROS_USING_YUM
+
+    def _update_package_index(self):
+        execute("yum -y update")
+        
+    def _install_pip(self):
+        execute("yum install python3-pip --assume-yes")
+        
+    def _install_repository_tools(self):
+        execute("yum install -y yum-utils device-mapper-persistent-data lvm2")
+
+    def _add_repository(self):
+        execute(f"yum-config-manager --add-repo {self.repo_url}/docker-ce.repo")
+        
+    def _add_docker_gpg_key(self):
+        pass
+       
+    def _install_docker(self):
+        execute("yum install -y docker-ce docker-ce-cli containerd.io")
+    
+    def _uninstall_docker(self):
+        execute("yum remove -y docker-ce")
+        
+
+class DnfPackageManager(PackageManager):
+
+    def _get_supported_distros(self):
+        return DISTROS_USING_DNF
+
+    def _update_package_index(self):
+        pass
+        
+    def _install_pip(self):
+        execute("dnf install python3-pip --assume-yes")
+
+    def _setup_docker_repository(self):
+        execute("dnf -y install dnf-plugins-core")
+        execute("dnf config-manager --add-repo {self.repo_url}")
+
+    def _install_docker(self):
+        execute("dnf install -y docker-ce docker-ce-cli containerd.io")
+    
+    def _uninstall_docker(self):
+        execute("dnf remove -y docker-ce")
+
+ 
 install_python_modules('requests') 
 import requests
 
@@ -405,7 +590,7 @@ def get_unit_adapted_byte_figure(number_of_bytes):
     if number_of_bytes >= 1024 * 1024 * 1024 * 1024:
         number_of_bytes /= 1024 * 1024 * 1024 * 1024
         unit = "TB"
-    if number_of_bytes >= 1024 * 1024 * 1024:
+    elif number_of_bytes >= 1024 * 1024 * 1024:
         number_of_bytes /= 1024 * 1024 * 1024
         unit = "GB"
     elif number_of_bytes >= 1024 * 1024:
@@ -418,7 +603,7 @@ def get_unit_adapted_byte_figure(number_of_bytes):
         return number_of_bytes, "bytes"
     return round(number_of_bytes, 1), unit    
     
-    
+
 class WebContent():
         
     def download(self, url, directory=None):
@@ -1624,13 +1809,20 @@ class DataSource():
                 values = v
                 if not type(v) is list:
                     values = [v]
+                token = "retrieve:"
+                if len(values) == 1 and values[0].startswith(token):
+                    id = row[mappings['id']]
+                    if id:
+                        new_row[k] = self._get_file_content(values[0][len(token):].replace("{id}", id))
+                    continue             
                 if self.config.include_headers_in_data:
                     new_row[k] = "\n".join([row[x] + " " + x for x in values])
                 else:
                     new_row[k] = "\n".join([row[x] for x in values])
             fields = {}
             for k,v in mappings["fields"].items():
-                fields[k] = new_row[k]
+                if new_row[k]:
+                    fields[k] = new_row[k]
             doc = {}
             if self.doc_fields_key:
                 doc[self.doc_fields_key] = fields
@@ -2038,12 +2230,13 @@ class InspectorInstaller(Installer):
         pass
 
     def __init__(self, installer_url, download_dir, install_dir, docker_registry, docker_compose_yml_files=[], 
-                                                   files_to_copy=[], dot_env_file_path=None, simulation=False):
+                       files_to_copy=[], dot_env_file_path=None, simulation=False, self_sign_cert_security={}):
         super().__init__(installer_url, download_dir, install_dir, simulation)
         self.dot_env_file_path = dot_env_file_path
         self.docker_registry = docker_registry
         self.docker_compose_yml_files = docker_compose_yml_files
         self.files_to_copy = files_to_copy
+        self.self_sign_cert_security = self_sign_cert_security
         self._init()
         
     def _restart_server_if_required(self):
@@ -2097,9 +2290,29 @@ class InspectorInstaller(Installer):
         if self.dot_env_file_path:
             custom_files.append(self.dot_env_file_path)
         self._add_custom_files(custom_files)
+        
+    def _configure_gatekeeper(self):
+        if self.self_sign_cert_security:
+            self._print("Configuring Gatekeeper...")
+            config_file = "config.yml"
+            with change_dir(join(self.install_dir, SECURITY_ASSETS_DIR)):   
+                execute(f"cp config-template.yml {config_file}")
+                with open(config_file, "r") as f:
+                    content = f.read()
+                content = content.replace("auth.localhost", self.self_sign_cert_security['domain'])
+                with open(config_file, "w") as f:
+                    f.write(content)
+
+    def _create_self_sign_certificate(self):
+        if self.self_sign_cert_security:
+            self._print("Creating self sign certificate...")
+            x = self.self_sign_cert_security
+            with change_dir(join(self.install_dir, SECURITY_ASSETS_DIR)):
+                execute(f"./create_certs.sh -c {x['country']} -st {x['state']} -l {x['city']} -o {x['company']} -cn {x['domain']}")                 
        
     def post_install_operations(self):
-        pass
+        self._configure_gatekeeper()
+        self._create_self_sign_certificate()
         
     def _docker_is_installed(self):
         if self.simulation:
@@ -2164,56 +2377,25 @@ class InspectorInstaller(Installer):
             f.write('\n'.join(settings))
        
     def _install_docker_compose(self, version=None):
-        raise NotImplementedError    
+        raise NotImplementedError        
 
  
 class LinuxInspectorInstaller(InspectorInstaller):
 
     def _init(self):
-        linux_distro, version = self._get_linux_distro_and_version()
+        linux_distro, version = get_linux_distro_and_version()
         log.info(f"The OS of the host is {linux_distro} {version}")
         if linux_distro in DISTROS_USING_YUM:
-            self.packet_manager = YumPackageManager()
-            log.info(f"Instanciated a yum packet manager.")
-        elif linux_distro in DISTROS_USING_AFT:
-            log.info(f"Instanciated an aft packet manager.")
-            self.packet_manager = AftPackageManager()
+            self.packet_manager = YumPackageManager(linux_distro)
+            log.info(f"Instanciated a yum package manager.")
+        elif linux_distro in DISTROS_USING_APT_GET:
+            log.info(f"Instanciated an aft-get package manager.")
+            self.packet_manager = AptGetPackageManager(linux_distro)
+        elif linux_distro in DISTROS_USING_DNF:
+            log.info(f"Instanciated a dnf package manager.")
+            self.packet_manager = AptGetPackageManager(linux_distro)
         else:
             raise ValueError(f"There is no packet manager mapping for linux distro '{linux_distro}'")
-
-    def _get_env_vars_from_file(self, filepath, name_var, version_var):
-        try:
-            with open(filepath, "r") as f:
-                content = f.read()
-        except:
-            return None, None
-        m = search(f"{name_var}=\"(.+?)\"", content, DOTALL)
-        if m:
-            name = m.group(1)
-            m = search(f"{version_var}=\"(.+?)\"", content, DOTALL)
-            if m:
-                version = m.group(1)
-                return name.lower(), version.lower()
-        return None, None
-        
-    def _get_linux_distro_and_version(self): 
-        name, version = self._get_env_vars_from_file("/etc/os-release", "NAME", "VERSION_ID")
-        if name and version:
-            return name, version
-        try:
-            name = execute("lsb_release -si", return_response=True)
-            version = execute("lsb_release -sr", return_response=True)
-        except CommandLineError:
-            pass
-        if name and version:
-            return name.lower(), version.lower()
-        name, version = self._get_env_vars_from_file("/etc/lsb-release", "DISTRIB_ID", "DISTRIB_RELEASE")
-        if name and version:
-            return name, version 
-        name, version = self._get_env_vars_from_file("/etc/debian_version", "DISTRIB_ID", "DISTRIB_RELEASE")
-        if name and version:
-            return name, version
-        raise AutoDetectionError("Unable to auto detect linux distro and version")
 
     def _prepare_host(self):
         for expression in SYSCTL_SETTINGS:
@@ -2240,8 +2422,14 @@ class LinuxInspectorInstaller(InspectorInstaller):
     def post_install_operations(self): 
         self._print("Making scripts executable...")
         with change_dir(self.install_dir):
-            for item in ["start-ayfie.sh", "stop-ayfie.sh", DOCKER_COMPOSE_EXE, "ayfie-logs.sh"]: 
-                execute(f"chmod +x {item}")
+            for item in ["start-ayfie.sh", "stop-ayfie.sh", "ayfie-logs.sh"]:
+                execute(f"chmod +x {item}") 
+        if exists(DOCKER_COMPOSE_EXE):
+            execute(f"chmod +x {DOCKER_COMPOSE_EXE}")
+        with change_dir(join(self.install_dir, SECURITY_ASSETS_DIR)):
+            for item in ["create_certs.sh"]:
+                execute(f"chmod +x {item}") 
+        super().post_install_operations()
                 
     def _user_already_exists(self, user):
         try:
@@ -2279,79 +2467,6 @@ class LinuxInspectorInstaller(InspectorInstaller):
             return True
         else:
             return False  
-
-            
-class PackageManager:
-
-    def _check_prerequisites(self):
-        pass
-
-    def _update_package_index(self):
-        raise NotImplementedError   
-        
-    def _install_docker_repository(self):
-        raise NotImplementedError
-
-    def _install_docker(self):
-        raise NotImplementedError
-        
-    def install_docker(self):
-        self._check_prerequisites()
-        self._update_package_index()
-        self._install_docker_repository()
-        self._install_docker()
-        
-    def uninstall_docker(self):
-        raise NotImplementedError
-
-
-class AftPackageManager(PackageManager):
-        
-    def _update_package_index(self):
-        execute("apt-get update")       
-        
-    def _install_docker_repository(self):
-        execute("apt-get install apt-transport-https ca-certificates curl gnupg-agent software-properties-common --assume-yes")
-        execute("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -")
-        execute("apt-key fingerprint 0EBFCD88")
-        execute('add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"')
-
-    def _install_docker(self):
-        execute("apt-get install docker-ce docker-ce-cli containerd.io --assume-yes")
-        version_string = None
-        response = execute("apt-cache madison docker-ce", return_response=True)
-        log.debug(response)
-        for line in response.split("\n"):
-            m = match("^docker-ce \| (.*) \| https://download.docker.com/linux/ubuntu bionic/stable amd64 Packages$", line.strip())
-            if m:
-                version_string = m.group(1)
-                break
-        if not version_string:
-            raise AutoDetectionError("Not able to auto detect information about available Docker versions.")
-        execute(f"apt-get install docker-ce={version_string} docker-ce-cli={version_string} containerd.io --assume-yes")
-        
-    def uninstall_docker(self):
-        self._print("Uninstalling docker...")
-        execute(f"apt-get purge -y docker-engine docker docker.io docker-ce")
-        execute(f"apt-get autoremove -y --purge docker-engine docker docker.io docker-ce")
-
-
-class YumPackageManager(PackageManager):
-
-    def _update_package_index(self):
-        execute("yum -y update")
-        execute("yum install -y yum-utils device-mapper-persistent-data lvm2")
-
-    def _install_docker_repository(self):
-        execute("yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo")
-
-    def _install_docker(self):
-        execute("yum install -y docker-ce docker-ce-cli containerd.io")
-        #execute("systemctl start docker")
-    
-    def _uninstall_docker(self):
-        self._print("Uninstalling docker...")
-        execute("yum remove -y docker-ce")
 
 class WindowsInspectorInstaller(InspectorInstaller):  
 
@@ -2440,11 +2555,19 @@ class RemoteServer():
         response = self._execute_command(f'find {start_directory} -name "{file_pattern}"')
         return [ line.decode('utf-8') for line in response.splitlines()]
 
-    def copy_file_from_remote(self, from_path, to_path):
+    def copy_file_from_remote(self, from_path, to_path, max_numb_of_retries=5):
         import scp
-        with scp.SCPClient(self.ssh.get_transport()) as scp_client:
-            scp_client.get(from_path, to_path)
-
+        retry = 0
+        while retry < max_numb_of_retries:
+            retry += 1
+            with scp.SCPClient(self.ssh.get_transport()) as scp_client:
+                try:
+                    scp_client.get(from_path, to_path)
+                except scp.SCPException as e:
+                    pause = 60 * retry
+                    print(f"Exception: '{str(e)}'. Trying again in {pause} seconds")
+                    sleep(pause)
+                
     def copy_file_to_remote(self, from_path, to_path):
         import scp
         with scp.SCPClient(self.ssh.get_transport()) as scp_client:
@@ -2463,6 +2586,16 @@ class Operational(EngineConnector):
                 self.install_dir = self._extract_version_number()
             except ValueError:
                 self.install_dir = None
+        if self.config.enable_security:
+            if str(self.engine.port) != "443": 
+                raise ValueError("The port has to be set to 443 when security is enabled (both 80 and 443 will be used)")
+            if self.config.acme_security and self.config.self_sign_cert_security:
+                raise ValueError("Set acme_security or self_sign_cert_security, not both")
+            if not (self.config.acme_security or self.config.self_sign_cert_security):
+                raise ValueError("With security enabled it is also required to either set acme_security or self_sign_cert_security")
+        else:
+            self.config.self_sign_cert_security = {}
+            self.config.acme_security = {}
         self.host_os = get_host_os()
         if not self.host_os in [OS_WINDOWS, OS_LINUX]:
             raise OSError(f"'{os}' is not a supported operation system")
@@ -2475,24 +2608,39 @@ class Operational(EngineConnector):
             self.docker_registry = WIN_DOCKER_REGISTRY 
             self.script_extension = "cmd"
         self.docker_compose_custom_files = self.config.docker_compose_yml_files
-        if self.config.enable_frontend:
-            if not DOCKER_COMPOSE_FRONTEND_FILE in self.docker_compose_custom_files:
-                self.docker_compose_custom_files.append(DOCKER_COMPOSE_FRONTEND_FILE)
-
+        self._add_docker_compose_custom_file(self.config.enable_frontend, DOCKER_COMPOSE_FRONTEND_FILE)
+        self._add_docker_compose_custom_file(self.config.enable_security, DOCKER_COMPOSE_SECURITY_FILE)
+        self._add_docker_compose_custom_file(self.config.self_sign_cert_security, DOCKER_COMPOSE_SELF_SIGNED_FILE)
         if self.host_os == OS_WINDOWS:
-            current_version = None
-            try:
-                current_version = self._extract_version_number()
-            except ValueError:
-                pass
-            if current_version:
-                if self._is_earlier_version(current_version, "2.6.1"):
-                    if DOCKER_COMPOSE_FRONTEND_FILE in self.docker_compose_custom_files:
-                        self.docker_compose_custom_files.remove(DOCKER_COMPOSE_FRONTEND_FILE)
+            self._remove_docker_compose_custom_file(DOCKER_COMPOSE_FRONTEND_FILE, "2.6.1")
+            self._remove_docker_compose_custom_file(DOCKER_COMPOSE_SECURITY_FILE)
+            self._remove_docker_compose_custom_file(DOCKER_COMPOSE_SELF_SIGNED_FILE)   
+        elif self.host_os == OS_LINUX:
+            self._remove_docker_compose_custom_file(DOCKER_COMPOSE_SECURITY_FILE, "2.8.0")
+            self._remove_docker_compose_custom_file(DOCKER_COMPOSE_SELF_SIGNED_FILE, "2.8.0")
         self.gdpr_enabled = False
         self.email_treading_enabled = False
         self.application_custom_file_content = ""
         self.yml_content_as_json = {}
+
+    def _add_docker_compose_custom_file(self, enable_feature, custom_file):       
+        if enable_feature:
+            if not custom_file in self.docker_compose_custom_files:
+                self.docker_compose_custom_files.append(custom_file)
+        
+    def _remove_docker_compose_custom_file(self, custom_file, first_version_to_not_remove=None):
+        remove_file = False
+        if first_version_to_not_remove:
+            try:
+                current_version = self._extract_version_number()
+            except ValueError:
+                current_version = None
+            if current_version and self._is_earlier_version(current_version, first_version_to_not_remove):
+                remove_file = True
+        else:
+            remove_file = True
+        if remove_file and custom_file in self.docker_compose_custom_files:
+            self.docker_compose_custom_files.remove(custom_file)
       
     def _file_transfer(self, transfer_config):
         for config in transfer_config:
@@ -2704,12 +2852,33 @@ class Operational(EngineConnector):
         version = self._extract_version_number()
         self.config.installer = f"http://docs.ayfie.com/ayfie-platform/release/ayfie-{os_string}installer-{version}.zip"
         return self.config.installer
+                
+    def _get_acme_security_dot_env_settings(self):
+        content = ""
+        if self.config.acme_security:
+            for key in self.config.acme_security:
+                value = self.config.acme_security[key]
+                if type(value) is list:
+                    value = ",".join(value)
+                content += f"{key.upper()}={value}\n"
+        return content
         
+    def _get_self_sign_cert_security_dot_env_settings(self):
+        content = ""
+        if self.config.self_sign_cert_security:
+            if "domain" in self.config.self_sign_cert_security:
+                value = self.config.self_sign_cert_security["domain"]
+                content += f"DOMAIN={value}\n"
+        return content
+
     def _administrate_env_file(self):
         if self.config.dot_env_input_path:
             return self.config.dot_env_input_path
         else:
-            dot_env_file_content = f"AYFIE_PORT={self.config.port}\n"
+            if self.config.enable_security:
+                dot_env_file_content = f"AYFIE_PORT=80\nAYFIE_HTTPS_PORT=443\n"
+            else:
+                dot_env_file_content = f"AYFIE_PORT={self.config.port}\n"
             if self._get_zip_file_os_string() == "windows":
                 delimiter = ';'
             else:
@@ -2719,6 +2888,9 @@ class Operational(EngineConnector):
                 dot_env_file_content += delimiter.join(list(set(self.docker_compose_custom_files)))                
                 dot_env_file_content += "\n"
             dot_env_file_content += self._gen_mem_limits()
+            dot_env_file_content += "\n"
+            dot_env_file_content += self._get_acme_security_dot_env_settings()
+            dot_env_file_content += self._get_self_sign_cert_security_dot_env_settings()
             if self.config.dot_env_output_path:
                 with open(self.config.dot_env_output_path, "w") as f:
                     f.write(dot_env_file_content)
@@ -2755,6 +2927,20 @@ class Operational(EngineConnector):
                 existing[key] = addition[key]
         return existing
         
+    def _get_docker_compose_format_version(self):
+        inspector_version = self._extract_version_number()
+        os = self._get_concluded_os()
+        if os == OS_LINUX:
+            version_that_format_version_changed = "2.8.1"
+        elif os == OS_WINDOWS:
+            version_that_format_version_changed = "2.8.0"
+        else:
+            raise ValueError(f"'{os}' is not a supported OS")
+        if self._is_earlier_version(inspector_version, version_that_format_version_changed):
+            return "2.1"
+        else:
+            return "2.4"
+            
     def _write_yml_to_file(self, content_as_json, filename):
         with change_dir(self.install_dir):
             dir_path = dirname(filename)
@@ -2762,7 +2948,8 @@ class Operational(EngineConnector):
                 makedirs(dir_path)
             with open(filename, "wb") as f:
                 import yaml
-                f.write(("version: '2.1'\n" + yaml.dump(content_as_json, default_flow_style=False)).encode("utf-8"))  
+                docker_compose_file_version = self._get_docker_compose_format_version()
+                f.write((f"version: '{docker_compose_file_version}'\n" + yaml.dump(content_as_json, default_flow_style=False)).encode("utf-8")) 
                 
     def _gen_application_custom_file(self, new_yml_content_as_json):
         with open(DOCKER_COMPOSE_CUSTOM_FILE, "w") as f:
@@ -2775,7 +2962,8 @@ class Operational(EngineConnector):
                 mapping = f"./{DOCKER_WINDOW_CONFIG_DIR}:c:\\ayfie\\config"
             else:
                 raise ValueError(f"'{os}' is not a supported OS")
-            f.write(f"version: '2.1'\nservices:\n  api:\n    volumes:\n      - {mapping}")
+            docker_compose_file_version = self._get_docker_compose_format_version()
+            f.write(f"version: '{docker_compose_file_version}'\nservices:\n  api:\n    volumes:\n      - {mapping}")
         self.docker_compose_custom_files.append(DOCKER_COMPOSE_CUSTOM_FILE)
         self.yml_content_as_json = self._merge_yaml_dict_structures(self.yml_content_as_json, new_yml_content_as_json)
         self._write_yml_to_file(self.yml_content_as_json, application_custom_file_path)
@@ -2841,11 +3029,19 @@ class Operational(EngineConnector):
             if operation == OP_DISABLE_DEFENDER:
                 if self.host_os == OS_WINDOWS:
                     if not self.config.defender_exclude_paths:
-                        execute(f'powershell -Command Set-MpPreference -DisableRealtimeMonitoring $true')
-                        print("Disabled Windows Defender realtime scanning")
+                        msg = "Disabled Windows Defender realtime scanning"
+                        if self.config.simulation:
+                            msg = f"Simulating: {msg}"
+                        else:
+                            execute(f'powershell -Command Set-MpPreference -DisableRealtimeMonitoring $true')
+                        print(msg)
                     for path in self.config.defender_exclude_paths:
-                        execute(f'powershell -Command Add-MpPreference -ExclusionPath "{path}"')
-                        print(f"Disabled Windows Defender realtime scanning for directory '{path}'")
+                        msg = f"Disabled Windows Defender realtime scanning for directory '{path}'"
+                        if self.config.simulation:
+                            msg = f"Simulating: {msg}"
+                        else:
+                            execute(f'powershell -Command Add-MpPreference -ExclusionPath "{path}"')
+                        print(msg)
             if operation == OP_FILE_TRANSFER:
                 self._file_transfer(self.config.file_transfer)
             elif operation == OP_INSTALL:
@@ -2855,9 +3051,10 @@ class Operational(EngineConnector):
                         os_specific_installer = LinuxInspectorInstaller
                     elif self.host_os == OS_WINDOWS:
                         os_specific_installer = WindowsInspectorInstaller
-                    installer = os_specific_installer(self._get_installer_zip_file(), ".", self.install_dir, self.config.docker_registry, 
-                                                      self.docker_compose_custom_files, self.config.copy_to_install_dir, 
-                                                      dot_env_file_path, self.config.simulation)
+                    installer = os_specific_installer(self._get_installer_zip_file(), ".", self.install_dir, 
+                                                      self.config.docker_registry, self.docker_compose_custom_files, 
+                                                      self.config.copy_to_install_dir, dot_env_file_path, self.config.simulation, 
+                                                      self.config.self_sign_cert_security)
                     installer.prerequisites(["docker"])
                     installer.install()
                     if OP_ENABLE_GDPR in operations:
@@ -2875,7 +3072,7 @@ class Operational(EngineConnector):
                 self._enable_email_treading()
             elif operation == OP_START:
                 if self.config.engine == INSPECTOR:
-                    self._double_report("Downloading any required Docker images not already downloaded. This could take many minutes...")
+                    self._double_report("Starting the Inspector - downloading any required Docker images not already downloaded. This could take many minutes...")
                     self.start_inspector()
                     self._double_report("Docker image download (if any) completed. Now waiting for Elasticsearch to come up")
                     self.wait_until_engine_ready()
@@ -2905,6 +3102,9 @@ class Operational(EngineConnector):
                     if self.config.dot_env_output_path and self.config.dot_env_input_path:
                         raise ValueError("Either the '.env' file is provided or it is generated, it cannot be both")
                     self._administrate_env_file()
+            elif operation == OP_DEL_ALL_COL:
+                if self.config.engine == INSPECTOR:
+                    self.engine.delete_all_collections_and_wait()
                 else:
                     raise NotImplementedError("Only the Inspector is supported at this time")
         if self.gdpr_enabled or self.email_treading_enabled:
@@ -3673,6 +3873,13 @@ class LogAnalyzer():
             "^.*RestControllerRequestLoggingAspect: triggering JobController.getJob\(\.\.\) with args:.*$",
             "^.*Performing partial update on document.*$"
         ] 
+        self.inspector_version = None
+        self.system_variables = [
+            {
+                "pattern" : r"^.*main platform.config.AyfieVersion: Version: (.*) Buildinfo: [^\$]*\n$",            
+                "variable": self.inspector_version 
+            }
+        ]
         self.system_info = [ 
             {
                 "pattern" : r"^.*jobId=([0-9]+),jobState=SCHEDULED]$",
@@ -3938,13 +4145,25 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*IllegalArgumentException: mapper \[ayfieProcessedVersion\] of different type, current_type \[text\], merged_type \[keyword\]$",
                 "indication": "one has run into a known migration issue relating to the field 'ayfieProcessedVersion' that is described in internal ayfie ticket OEM-1647"
+            },
+            {
+                "pattern" : r"^.*Remote RPC client disassociated. Likely due to containers exceeding thresholds, or network issues. Check driver logs for WARN messages.*$",
+                "indication": "one has run into the issue described in ticket PLATFORM-414 given that the failing sub job is ET2_PROCESSING and the Inspector version is 2.4.1. In that case either move to a later version or do not feed in conversion indexes.",
+                "before_version": "2.5.0",
+                "after_version": "2.4.0"
+            },
+            {
+                "pattern" : r"^.*restapp ERROR.*HttpClientErrorException: 400 Bad Request.*$",
+                "indication": "one one are feeding batches in parallel and one has run into a race condition (see PLATFORM-459).",
             }
         ]
         for regex in self.config.report_custom_regexs:
             self.symptoms.append({
                 "pattern" : regex,
                 "indication": "custom"
-            })        
+            })  
+        for variable in self.system_variables:
+            variable["compiled_pattern"] = compile(variable["pattern"])            
         for symptom in self.symptoms:
             symptom["compiled_pattern"] = compile(symptom["pattern"])
         self.query_patterns = [
@@ -3986,6 +4205,8 @@ class LogAnalyzer():
             symptom["occurences"] = 0
             symptom["last_occurence_line"] = None
             symptom["last_occurence_samples"] = deque([])
+            symptom["before_version"] = None
+            symptom["after_version"] = None
         self.errors_detected = False
         
     def _prepare_temp_log_directory(self, log_file, log_dir):
@@ -4148,7 +4369,35 @@ class LogAnalyzer():
                     start_line = LOG_FILE_START_STRING + "\n"
                     self.file_handle_lookup[filepath].write(start_line.encode("utf-8"))
                 self.file_handle_lookup[filepath].write(line.encode("utf-8"))
-                     
+                
+    def set_system_variables(self, line):
+        for variable in self.system_variables:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                m = variable["compiled_pattern"].match(line)
+                if m:
+                    variable["variable"] = m.group(1)
+                    
+    def _remove_non_applicaple_sympthoms(self): 
+        print("got here 0")
+        for symptom in self.symptoms:
+            print("got here 1")
+            if self.inspector_version:
+                print("got here 2")
+                if symptom["before_version"]:
+                    print("got here 3")
+                    if not self._is_earlier_version(self.inspector_version, symptom["before_version"]):
+                        print("got here 4")
+                        continue
+                if symptom["after_version"]:
+                    print("got here 5")
+                    if not self._is_earlier_version(symptom["after_version"], self.inspector_version):
+                        print("got here 6")
+                        continue
+                print("got here 7")
+            print("got here 8")
+        print("got here 9")
+                  
     def _process_encoded_log_file(self, log_file, encoding):
         if self.config.report_query_statistic_per_file:
             self.queries = {}
@@ -4163,15 +4412,20 @@ class LogAnalyzer():
                 output_file = "dummy.txt"
             with open(output_file, "w") as self.filtered_file:
                 pass
+            non_applicaple_sympthoms_removed = False
             with open(output_file, "ab") as self.filtered_file:
                 self.line_count = 0
                 self.info_pieces = {}
                 for line in f:
+                    if self.inspector_version and not non_applicaple_sympthoms_removed:
+                        self._remove_non_applicaple_sympthoms()
+                        non_applicaple_sympthoms_removed = True
                     self._log_file_verification(log_file, self.line_count, line) 
                     self.line_count += 1
                     self._log_file_filtering_and_splitting(line)
                     if self.config.report_max_log_lines and self.line_count >= self.config.report_max_log_lines:
                         return
+                    self.set_system_variables(line)
                     if self.config.report_queries:
                         if self._query_extraction(line):
                             continue
@@ -4407,7 +4661,8 @@ class Monitoring(EngineConnector):
         result = None
         try:
             result = result_obtaining_func(monitoring)
-        except (HTTPError, requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout, gaierror) as e:
+        except (HTTPError, requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout, 
+                           requests.exceptions.ChunkedEncodingError, gaierror) as e:
             monitoring["monitor_fifo"].append(0)
         if result:  
             if result_verification_func(result, monitoring):
@@ -4516,14 +4771,15 @@ class Monitoring(EngineConnector):
                                 self._post_message("Monitoring is still up and running", message_type, 
                                                                    monitoring[HEARTBEATS][message_type])
                             monitoring["last_heartbeat"] += monitoring["heartbeat_interval"]
-                print()
                 sleep(MONITOR_INTERVAL)
                 
-        except:
+        except Exception as e:
+            log.error(f"Monitoring is down due to an exepection: '{str(e)}'")
             for monitoring in self.config.monitorings:
                 for message_type in monitoring[HEARTBEATS]:
                     self._post_message("Monitoring is down", message_type, monitoring[HEARTBEATS][message_type])
             raise
+        log.error("Monitoring is down due to unknown reason")
             
 
 class JobsHandler(EngineConnector):
@@ -4578,20 +4834,7 @@ class JobsHandler(EngineConnector):
         return self.track_job(job_id, job_type)
         
     def __job_reporting_output_line(self, job, prefix, end="\n", tick=None):
-        rotator = " "
-        """
-        if tick:
-            position = tick % 8
-            if position in [0, 4]:
-                rotator = "|"
-            elif position in [1, 5]:
-                rotator = "/"
-            elif position in [2, 6]:
-                rotator = "—"
-            elif position in [3, 7]:
-                rotator = "\\"
-        """
-        self._print(f'{rotator} {prefix.rjust(8)}: {job["state"].ljust(10)} {job["id"].ljust(10)} {job["type"].ljust(22)}', end)
+        self._print(f' {prefix.rjust(8)}: {job["state"].ljust(10)} {job["id"].ljust(10)} {job["type"].ljust(22)}', end)
 
     def __extract_job_info(self, job):
         item = {}
@@ -4836,6 +5079,9 @@ class Config():
         self.dot_env_input_path       = self.__get_item(operational, 'dot_env_input_path', None)
         self.dot_env_output_path      = self.__get_item(operational, 'dot_env_output_path', ".env")        
         self.enable_frontend          = self.__get_item(operational, 'enable_frontend', True)
+        self.enable_security          = self.__get_item(operational, 'enable_security', False)  
+        self.acme_security            = self.__get_item(operational, 'acme_security', {})
+        self.self_sign_cert_security  = self.__get_item(operational, 'self_sign_cert_security', {})  
         self.ram_on_host              = self.__get_item(operational, 'ram_on_host', 64)
         self.no_suggest_index         = self.__get_item(operational, 'no_suggest_index', False)
         self.install_dir              = self.__get_item(operational, 'install_dir', None)
@@ -5314,8 +5560,8 @@ class Admin():
                     
         if self.config.server != OFF_LINE:
             if self.config.data_source:
-                if self.config.prefeeding_action not in PRE_ACTIONS:
-                    actions = '", "'.join(PRE_ACTIONS)
+                if self.config.prefeeding_action not in PRE_FEEDING_ACTIONS:
+                    actions = '", "'.join(PRE_FEEDING_ACTIONS)
                     msg = f'"prefeeding_action" must be one of these: "{actions}"'
                     raise ConfigError(msg)
                 if self.config.prefeeding_action == DEL_ALL_COL:
@@ -5404,6 +5650,7 @@ run_from_cmd_line = False
 if __name__ == '__main__':
     run_from_cmd_line = True
     run_cmd_line(sys.argv)
+
     
    
  
