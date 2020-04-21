@@ -2426,9 +2426,11 @@ class LinuxInspectorInstaller(InspectorInstaller):
                 execute(f"chmod +x {item}") 
         if exists(DOCKER_COMPOSE_EXE):
             execute(f"chmod +x {DOCKER_COMPOSE_EXE}")
-        with change_dir(join(self.install_dir, SECURITY_ASSETS_DIR)):
-            for item in ["create_certs.sh"]:
-                execute(f"chmod +x {item}") 
+        security_assets_dir = join(self.install_dir, SECURITY_ASSETS_DIR)
+        if exists(security_assets_dir):
+            with change_dir(security_assets_dir):
+                for item in ["create_certs.sh"]:
+                    execute(f"chmod +x {item}") 
         super().post_install_operations()
                 
     def _user_already_exists(self, user):
