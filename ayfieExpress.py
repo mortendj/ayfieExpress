@@ -264,6 +264,13 @@ SILENCED_OUTPUT        = "silent"
 
 DOCKER_COMPOSE_EXE     = "/usr/bin/docker-compose"
 
+SELF_SIGNED_CERTIFICATE    = "self_signed"
+LETS_ENCRYPT_CERTIFICATE   = "lets_encrypt"
+COMMERCIAL_CERTIFICATE     = "commercial"
+CERTIFICATE_TYPES          = [SELF_SIGNED_CERTIFICATE, LETS_ENCRYPT_CERTIFICATE, COMMERCIAL_CERTIFICATE]
+FRONTEND_CONFIG_TEMPLATE   = "config-frontend-template.yml"
+SECURE_API_CONFIG_TEMPLATE = "config-secure-api-template.yml"
+CONFIG_TEMPLATE            = "config-template.yml"
 
 def get_host_os():
     return operating_system().lower()
@@ -446,6 +453,25 @@ def install_python_modules(modules):
                 print(f"Failed to automatatically install '{package}.'")
                 print("For some Linux distros this means one has to run the command line once for (almost) every module installed.")   
                 sys.exit() 
+                
+def is_earlier_version(earlier_version, later_version):
+    input_version_numbers = [earlier_version, later_version]
+    version_numbers = []
+    for version_number in input_version_numbers:
+        split_version_number = version_number.split('.')
+        if len(split_version_number) != 3:
+            raise DataFormatError(f"The string '{version_number}' is not a valid version number") 
+        version_numbers.append(split_version_number)
+    for position in range(len(version_numbers[0])):
+        try:
+            if int(version_numbers[0][position]) < int(version_numbers[1][position]):
+                return True
+            if int(version_numbers[0][position]) > int(version_numbers[1][position]):
+                return False
+        except ValueError as e:      
+            raise ValueError(f"Bad version number(s): {input_version_numbers}. Original error message: {str(e)}") 
+    return False
+
                                 
 class PackageManager: 
 
@@ -814,7 +840,7 @@ class SearchEngine:
                 signatures.append(str(method_name + str(signature(getattr(self, method_name)))))
         return signatures
 
-    def __init__(self, server, port, base_endpoint, headers, user=None, password=None):
+    def __init__(self, server, port, base_endpoint, headers, user=None, password=None, client_secret=None):
         self.server = server
         try:
             self.port = str(int(port))
@@ -826,6 +852,7 @@ class SearchEngine:
         self.statusCodes = self._getHTTPStatusCodes()
         self.user = user
         self.password = password
+        self.client_secret = client_secret
         
     def _getHTTPStatusCodes(self):
         return {
@@ -1176,7 +1203,7 @@ class SearchEngine:
         
 class Solr(SearchEngine):
 
-    def __init__(self, server, port, user=None, password=None, api_version=None): 
+    def __init__(self, server, port, user=None, password=None, api_version=None, accessToken=None): 
         SearchEngine.__init__(self, server, port, "solr", {"Content-Type":"application/json"})
          
     def _response_format_converter(self, response_obj):
@@ -1277,8 +1304,8 @@ class Elasticsearch(Solr):
         
 class Inspector(SearchEngine):
   
-    def __init__(self, server, port, user=None, password=None, api_version='v1'):           
-        SearchEngine.__init__(self, server, port,  f"ayfie/{api_version}", {'Content-Type':'application/hal+json'}, user, password)
+    def __init__(self, server, port, user=None, password=None, api_version='v1', client_secret=None): 
+        SearchEngine.__init__(self, server, port, f"ayfie/{api_version}", {'Content-Type':'application/hal+json'}, user, password)
         
     def engine_is_healthy(self):
         try:
@@ -2144,7 +2171,10 @@ class EngineConnector():
     def __init__(self, config, data_source=None):
         self.config = config
         self.data_source = data_source
-        args = [self.config.server, self.config.port, self.config.user, self.config.password, self.config.api_version]
+        args = [
+            self.config.server, self.config.port, self.config.user, 
+            self.config.password, self.config.api_version, self.config.client_secret
+        ]
         if self.config.engine == INSPECTOR:
             self.engine = Inspector(*args)
         elif self.config.engine == SOLR:
@@ -2230,13 +2260,14 @@ class InspectorInstaller(Installer):
         pass
 
     def __init__(self, installer_url, download_dir, install_dir, docker_registry, docker_compose_yml_files=[], 
-                       files_to_copy=[], dot_env_file_path=None, simulation=False, self_sign_cert_security={}):
+                       files_to_copy=[], dot_env_file_path=None, simulation=False, self_sign_certificate={}, version=None):
         super().__init__(installer_url, download_dir, install_dir, simulation)
         self.dot_env_file_path = dot_env_file_path
         self.docker_registry = docker_registry
         self.docker_compose_yml_files = docker_compose_yml_files
         self.files_to_copy = files_to_copy
-        self.self_sign_cert_security = self_sign_cert_security
+        self.self_sign_certificate = self_sign_certificate
+        self.version = version
         self._init()
         
     def _restart_server_if_required(self):
@@ -2291,22 +2322,36 @@ class InspectorInstaller(Installer):
             custom_files.append(self.dot_env_file_path)
         self._add_custom_files(custom_files)
         
+    def _get_file_pair(self, template_file_name):
+        return (template_file_name, template_file_name.replace("-template", ""))
+    
     def _configure_gatekeeper(self):
-        if self.self_sign_cert_security:
+        if self.self_sign_certificate: 
             self._print("Configuring Gatekeeper...")
-            config_file = "config.yml"
-            with change_dir(join(self.install_dir, SECURITY_ASSETS_DIR)):   
-                execute(f"cp config-template.yml {config_file}")
-                with open(config_file, "r") as f:
-                    content = f.read()
-                content = content.replace("auth.localhost", self.self_sign_cert_security['domain'])
-                with open(config_file, "w") as f:
-                    f.write(content)
+            if is_earlier_version(self.version, "2.8.1"):
+                file_pairs = [
+                    self._get_file_pair(CONFIG_TEMPLATE)        
+                ]
+            else:
+                file_pairs = [
+                    self._get_file_pair(FRONTEND_CONFIG_TEMPLATE),
+                    self._get_file_pair(SECURE_API_CONFIG_TEMPLATE)
+                ]
+            with change_dir(join(self.install_dir, SECURITY_ASSETS_DIR)):  
+                for pair in file_pairs:
+                    from_file = pair[0]
+                    to_file = pair[1]
+                    execute(f"cp {from_file} {to_file}")
+                    with open(to_file, "r") as f:
+                        content = f.read()
+                    content = content.replace("auth.localhost", self.self_sign_certificate['domain'])
+                    with open(to_file, "w") as f:
+                        f.write(content)
 
     def _create_self_sign_certificate(self):
-        if self.self_sign_cert_security:
+        if self.self_sign_certificate:
             self._print("Creating self sign certificate...")
-            x = self.self_sign_cert_security
+            x = self.self_sign_certificate
             with change_dir(join(self.install_dir, SECURITY_ASSETS_DIR)):
                 execute(f"./create_certs.sh -c {x['country']} -st {x['state']} -l {x['city']} -o {x['company']} -cn {x['domain']}")                 
        
@@ -2574,7 +2619,7 @@ class RemoteServer():
         import scp
         with scp.SCPClient(self.ssh.get_transport()) as scp_client:
             scp_client.put(from_path, to_path)
-
+            
 
 class Operational(EngineConnector):
 
@@ -2588,16 +2633,18 @@ class Operational(EngineConnector):
                 self.install_dir = self._extract_version_number()
             except ValueError:
                 self.install_dir = None
-        if self.config.enable_security:
+        self.self_sign_certificate = {}
+        self.lets_encrypt_certificate = {}
+        if self.config.security:
+            self.self_sign_certificate = self._get_security_parameters(self.config.security, SELF_SIGNED_CERTIFICATE,
+                                                                        ["domain", "country", "state", "city", "company"])
+            self.lets_encrypt_certificate = self._get_security_parameters(self.config.security, LETS_ENCRYPT_CERTIFICATE,
+                                                                        ["domain", "acme_domains", "acme_email"])
             if str(self.engine.port) != "443": 
                 raise ValueError("The port has to be set to 443 when security is enabled (both 80 and 443 will be used)")
-            if self.config.acme_security and self.config.self_sign_cert_security:
-                raise ValueError("Set acme_security or self_sign_cert_security, not both")
-            if not (self.config.acme_security or self.config.self_sign_cert_security):
-                raise ValueError("With security enabled it is also required to either set acme_security or self_sign_cert_security")
         else:
-            self.config.self_sign_cert_security = {}
-            self.config.acme_security = {}
+            self.self_sign_certificate = {}
+            self.lets_encrypt_certificate = {}
         self.host_os = get_host_os()
         if not self.host_os in [OS_WINDOWS, OS_LINUX]:
             raise OSError(f"'{os}' is not a supported operation system")
@@ -2611,8 +2658,8 @@ class Operational(EngineConnector):
             self.script_extension = "cmd"
         self.docker_compose_custom_files = self.config.docker_compose_yml_files
         self._add_docker_compose_custom_file(self.config.enable_frontend, DOCKER_COMPOSE_FRONTEND_FILE)
-        self._add_docker_compose_custom_file(self.config.enable_security, DOCKER_COMPOSE_SECURITY_FILE)
-        self._add_docker_compose_custom_file(self.config.self_sign_cert_security, DOCKER_COMPOSE_SELF_SIGNED_FILE)
+        self._add_docker_compose_custom_file(self.config.security, DOCKER_COMPOSE_SECURITY_FILE)
+        self._add_docker_compose_custom_file(self.self_sign_certificate, DOCKER_COMPOSE_SELF_SIGNED_FILE)
         if self.host_os == OS_WINDOWS:
             self._remove_docker_compose_custom_file(DOCKER_COMPOSE_FRONTEND_FILE, "2.6.1")
             self._remove_docker_compose_custom_file(DOCKER_COMPOSE_SECURITY_FILE)
@@ -2624,6 +2671,25 @@ class Operational(EngineConnector):
         self.email_treading_enabled = False
         self.application_custom_file_content = ""
         self.yml_content_as_json = {}
+        
+    def _get_security_parameters(self, security, certificate_type, valid_keys):
+        parameters = {}
+        if security:
+            if not "type" in security:
+                raise ValueError("The security settings has no 'type' parameter")
+            cert_type = security["type"]
+            if not cert_type in CERTIFICATE_TYPES:
+                raise ValueError(f"'{cert_type}' is an unknown certificate type")
+            if cert_type != certificate_type:
+                return {}
+            for key in valid_keys:
+                if not key in security:
+                    raise ValueError(f"A '{cert_type}' certificate requires the field '{key}' to be set")
+                value = security[key]
+                if type(value) is list:
+                    value = ",".join(value)
+                parameters[key] = value
+        return parameters
 
     def _add_docker_compose_custom_file(self, enable_feature, custom_file):       
         if enable_feature:
@@ -2637,7 +2703,7 @@ class Operational(EngineConnector):
                 current_version = self._extract_version_number()
             except ValueError:
                 current_version = None
-            if current_version and self._is_earlier_version(current_version, first_version_to_not_remove):
+            if current_version and is_earlier_version(current_version, first_version_to_not_remove):
                 remove_file = True
         else:
             remove_file = True
@@ -2767,7 +2833,8 @@ class Operational(EngineConnector):
                 mem_limit = self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host)
                 if mem_limit > ELASTICSEARCH_MAX_MEM_LIMIT:
                     freed_up_ram += mem_limit - ELASTICSEARCH_MAX_MEM_LIMIT
-                
+            
+             
         mem_limits = []
         for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
             if self.config.no_suggest_index and "SUGGEST" in variable:
@@ -2788,24 +2855,6 @@ class Operational(EngineConnector):
             if m:
                 settings.append('='.join([x for x in m.groups() if x]))
         return list(set(settings))
-        
-    def _is_earlier_version(self, earlier_version, later_version):
-        input_version_numbers = [earlier_version, later_version]
-        version_numbers = []
-        for version_number in input_version_numbers:
-            split_version_number = version_number.split('.')
-            if len(split_version_number) != 3:
-                raise DataFormatError(f"The string '{version_number}' is not a valid version number") 
-            version_numbers.append(split_version_number)
-        for position in range(len(version_numbers[0])):
-            try:
-                if int(version_numbers[0][position]) < int(version_numbers[1][position]):
-                    return True
-                if int(version_numbers[0][position]) > int(version_numbers[1][position]):
-                    return False
-            except ValueError as e:      
-                raise ValueError(f"Bad version number(s): {input_version_numbers}. Original error message: {str(e)}") 
-        return False
                 
     def _extract_version_number(self):
         if self.config.version:
@@ -2854,30 +2903,43 @@ class Operational(EngineConnector):
         version = self._extract_version_number()
         self.config.installer = f"http://docs.ayfie.com/ayfie-platform/release/ayfie-{os_string}installer-{version}.zip"
         return self.config.installer
-                
-    def _get_acme_security_dot_env_settings(self):
+        
+    def _get_lets_encrypt_certificate_dot_env_settings(self):
         content = ""
-        if self.config.acme_security:
-            for key in self.config.acme_security:
-                value = self.config.acme_security[key]
+        if self.lets_encrypt_certificate: 
+            for key in self.lets_encrypt_certificate:
+                value = self.lets_encrypt_certificate[key]
                 if type(value) is list:
                     value = ",".join(value)
                 content += f"{key.upper()}={value}\n"
         return content
         
-    def _get_self_sign_cert_security_dot_env_settings(self):
+    def _get_self_sign_certificate_dot_env_settings(self):
         content = ""
-        if self.config.self_sign_cert_security:
-            if "domain" in self.config.self_sign_cert_security:
-                value = self.config.self_sign_cert_security["domain"]
+        if self.self_sign_certificate:
+            if "domain" in self.self_sign_certificate:
+                value = self.self_sign_certificate["domain"]
                 content += f"DOMAIN={value}\n"
         return content
-
+        
+    def order_yml_file_list(self, unordered_yml_file_list):
+        ordered_list = []
+        tail_items = []
+        unordered_yml_file_list = list(set(unordered_yml_file_list))
+        for item in unordered_yml_file_list:
+            if "security.yml" in item:
+                tail_items = [item] + tail_items
+            elif "signed.yml" in item:
+                tail_items = tail_items + [item]
+            else:
+                ordered_list.append(item)
+        return ordered_list + tail_items
+        
     def _administrate_env_file(self):
         if self.config.dot_env_input_path:
             return self.config.dot_env_input_path
         else:
-            if self.config.enable_security:
+            if self.config.security:
                 dot_env_file_content = f"AYFIE_PORT=80\nAYFIE_HTTPS_PORT=443\n"
             else:
                 dot_env_file_content = f"AYFIE_PORT={self.config.port}\n"
@@ -2887,12 +2949,12 @@ class Operational(EngineConnector):
                 delimiter = ':'
             if self.docker_compose_custom_files:
                 dot_env_file_content += "COMPOSE_FILE=" 
-                dot_env_file_content += delimiter.join(list(set(self.docker_compose_custom_files)))                
+                dot_env_file_content += delimiter.join(self.order_yml_file_list(self.docker_compose_custom_files))                
                 dot_env_file_content += "\n"
             dot_env_file_content += self._gen_mem_limits()
             dot_env_file_content += "\n"
-            dot_env_file_content += self._get_acme_security_dot_env_settings()
-            dot_env_file_content += self._get_self_sign_cert_security_dot_env_settings()
+            dot_env_file_content += self._get_lets_encrypt_certificate_dot_env_settings()
+            dot_env_file_content += self._get_self_sign_certificate_dot_env_settings()
             if self.config.dot_env_output_path:
                 with open(self.config.dot_env_output_path, "w") as f:
                     f.write(dot_env_file_content)
@@ -2938,7 +3000,7 @@ class Operational(EngineConnector):
             version_that_format_version_changed = "2.8.0"
         else:
             raise ValueError(f"'{os}' is not a supported OS")
-        if self._is_earlier_version(inspector_version, version_that_format_version_changed):
+        if is_earlier_version(inspector_version, version_that_format_version_changed):
             return "2.1"
         else:
             return "2.4"
@@ -3004,7 +3066,7 @@ class Operational(EngineConnector):
         version = self._extract_version_number()
         yaml_as_json = {}
         with change_dir(self.install_dir):
-            if not self._is_earlier_version(version, "2.1.0"):
+            if not is_earlier_version(version, "2.1.0"):
                 with open(APPL_PII_TEMPLATE_FILE, "rb") as f:
                     import yaml
                     yaml_as_json = yaml.safe_load(f.read().decode("utf-8"))
@@ -3056,7 +3118,7 @@ class Operational(EngineConnector):
                     installer = os_specific_installer(self._get_installer_zip_file(), ".", self.install_dir, 
                                                       self.config.docker_registry, self.docker_compose_custom_files, 
                                                       self.config.copy_to_install_dir, dot_env_file_path, self.config.simulation, 
-                                                      self.config.self_sign_cert_security)
+                                                      self.self_sign_certificate, self._extract_version_number())
                     installer.prerequisites(["docker"])
                     installer.install()
                     if OP_ENABLE_GDPR in operations:
@@ -3066,6 +3128,7 @@ class Operational(EngineConnector):
                     self._administrate_env_file()
                     installer.customize()
                     installer.post_install_operations()
+                    app_down = True
                 else:
                     raise NotImplementedError("Only the Inspector is supported at this time")
             elif operation == OP_ENABLE_GDPR:
@@ -3076,10 +3139,18 @@ class Operational(EngineConnector):
                 if self.config.engine == INSPECTOR:
                     self._double_report("Starting the Inspector - downloading any required Docker images not already downloaded. This could take many minutes...")
                     self.start_inspector()
-                    self._double_report("Docker image download (if any) completed. Now waiting for Elasticsearch to come up")
-                    self.wait_until_engine_ready()
-                    self._double_report("The ayfie Inspector is now up and ready")
-                    app_down = False
+                    self._double_report("Docker image download (if any) completed. Now waiting for Elasticsearch to come up...")
+                    is_ready = True
+                    if OP_INSTALL in operations:
+                        if self.config.security:
+                            self._double_report("Manual Keyecloak operations are now required")
+                            is_ready = False
+                    if is_ready:
+                        self.wait_until_engine_ready()
+                        self._double_report("The ayfie Inspector is now up and ready")
+                        app_down = False
+                    else:
+                        app_down = True
                 else:
                     raise NotImplementedError("Only the Inspector is supported at this time")
             elif operation == OP_STOP:
@@ -3141,7 +3212,13 @@ class DocumentRetriever(EngineConnector):
         self.requested_fields = self._get_fields_to_extract()
         self.exclude_fields = self._get_fields_to_exclude(self.schema_fields, self.requested_fields)
         self.batch_size = self._get_batch_size(self.config.doc_retrieval_batch_size, self.exclude_fields)
-
+        self.csv_output_columns = self.requested_fields[:]
+        if self.config.doc_retrieval_field_merging:
+            for new_field in self.config.doc_retrieval_field_merging:
+                self.csv_output_columns.append(new_field)
+                for old_field in self.config.doc_retrieval_field_merging[new_field]:
+                    self.csv_output_columns.remove(old_field)
+        
     def _get_batch_size(self, batch_size, exlude_fields): 
         if batch_size == "auto":
             batch_size = 1000
@@ -3156,22 +3233,36 @@ class DocumentRetriever(EngineConnector):
         if batch_size > MAX_PAGE_SIZE:
             batch_size = MAX_PAGE_SIZE
         return batch_size
+     
+    def merge_columns(self, row):
+        if self.config.doc_retrieval_field_merging:
+            for new_field in self.config.doc_retrieval_field_merging:
+                new_column = []
+                for old_field in self.config.doc_retrieval_field_merging[new_field]:
+                    if old_field in row:
+                        if len(row[old_field]):
+                            new_column.append(row[old_field])
+                        del row[old_field]
+                row[new_field] = self.config.doc_retrieval_separator.join(new_column)
+        return row
         
     def retrieve_documents(self):
         self._init_class_global_variables()
-        self.requested_fields = self.requested_fields + ["doc_count"]
         with open(self.config.doc_retrieval_output_file, mode='w', newline='', encoding="utf-8") as f:
-            csv_writer = csv.DictWriter(f, fieldnames=self.requested_fields, dialect=self.config.doc_retrieval_csv_dialect)
+            csv_writer = csv.DictWriter(f, fieldnames=self.csv_output_columns, dialect=self.config.doc_retrieval_csv_dialect)
             if self.config.doc_retrieval_csv_header_row:
                 csv_writer.writeheader()
             doc_count = 0
+            doc_skip_count = 0
+            skip_message = " "
             for doc_batch in self._get_documents(self.config.doc_retrieval_query, self.config.doc_retrieval_filters):
                 for document in doc_batch:
                     if self.config.doc_retrieval_max_docs:
                         if doc_count >= self.config.doc_retrieval_max_docs:
-                            self._print(f"Aborting after having extracted {doc_count} documents as specified by parameter 'max_docs'")
+                            self._print(f"Aborting after having extracted {doc_count} documents as specified by parameter 'max_docs' {skip_message}")
                             return
                     row = {}
+                    doc_is_empty = True
                     for field in self.requested_fields:
                         if self.search_operation:
                             value = document["document"].get(field, '')
@@ -3180,15 +3271,26 @@ class DocumentRetriever(EngineConnector):
                         if type(value) is list:
                             value = self.config.doc_retrieval_separator.join(value)
                         if type(value) is str:
-                            row[field] = value.replace('\n', ' ').replace('\t', ' ')
+                            value = value.replace('\n', ' ').replace('\t', ' ')
+                        if len(value):
+                            if field != "id":
+                                doc_is_empty = False
+                        row[field] = value
+                    row = self.merge_columns(row)
+                    if doc_is_empty:
+                        if self.config.doc_retrieval_skip_empty_documents:
+                            doc_skip_count += 1
+                            if doc_skip_count:
+                                skip_message = f"(of which {doc_skip_count} documents were skipped due to only empty fields)"
                         else:
-                            row[field] = value
-                    csv_writer.writerow(row)
+                            csv_writer.writerow(row)
+                    else:
+                        csv_writer.writerow(row)
                     if doc_count & (doc_count % self.config.doc_retrieval_report_frequency == 0):
-                        self._print(f"So far {doc_count} documents have been extracted")
+                        self._print(f"So far {doc_count} documents have been extracted{skip_message}")
                     doc_count += 1
-        self._print(f"Done after extracting {doc_count} documents")
-                         
+        self._print(f"Done after extracting {doc_count} documents {skip_message}")
+                     
     def _get_documents(self, query="", filters=[], exlude_fields=[]):
         if self.search_operation:
             result_page = self.engine.search_collection(self.col_id, query, self.batch_size, 0, filters,
@@ -3218,7 +3320,10 @@ class DocumentRetriever(EngineConnector):
         if not "id" in fields:
             fields = ["id"] + fields
         for field in self.config.doc_retrieval_exclude:
-            fields.remove(field)
+            try:
+                fields.remove(field)
+            except ValueError:
+                raise ValueError(f"Exclude list contains a non-existing field '{field}'. Check the spelling.")
         return fields
         
     def _get_fields_to_exclude(self, schema_fields, requested_fields):
@@ -4156,7 +4261,11 @@ class LogAnalyzer():
             },
             {
                 "pattern" : r"^.*restapp ERROR.*HttpClientErrorException: 400 Bad Request.*$",
-                "indication": "one one are feeding batches in parallel and one has run into a race condition (see PLATFORM-459).",
+                "indication": "one is feeding batches in parallel and one has run into a race condition (see PLATFORM-459).",
+            },
+            {
+                "pattern" : r"^.*max virtual memory areas vm.max_map_count \[[0-9]+\] is too low, increase to at least \[[0-9]+\].*$",   
+                "indication": "one has not set the variable vm.max_map_count as instructed in the Linux installation guide.",
             }
         ]
         for regex in self.config.report_custom_regexs:
@@ -4388,12 +4497,12 @@ class LogAnalyzer():
                 print("got here 2")
                 if symptom["before_version"]:
                     print("got here 3")
-                    if not self._is_earlier_version(self.inspector_version, symptom["before_version"]):
+                    if not is_earlier_version(self.inspector_version, symptom["before_version"]):
                         print("got here 4")
                         continue
                 if symptom["after_version"]:
                     print("got here 5")
-                    if not self._is_earlier_version(symptom["after_version"], self.inspector_version):
+                    if not is_earlier_version(symptom["after_version"], self.inspector_version):
                         print("got here 6")
                         continue
                 print("got here 7")
@@ -5017,6 +5126,7 @@ class Config():
         self.port             = self.__get_item(config, 'port', '80')
         self.api_version      = self.__get_item(config, 'api_version', 'v1')
         self.col_name         = self.__get_item(config, 'col_name', None)
+        self.client_secret    = self.__get_item(config, 'client_secret', None)
         self.csv_mappings     = self.__get_item(config, 'csv_mappings', None)
         self.progress_bar     = self.__get_item(config, 'progress_bar', True)
         self.document_update  = self.__get_item(config, 'document_update', False)
@@ -5081,17 +5191,15 @@ class Config():
         self.dot_env_input_path       = self.__get_item(operational, 'dot_env_input_path', None)
         self.dot_env_output_path      = self.__get_item(operational, 'dot_env_output_path', ".env")        
         self.enable_frontend          = self.__get_item(operational, 'enable_frontend', True)
-        self.enable_security          = self.__get_item(operational, 'enable_security', False)  
-        self.acme_security            = self.__get_item(operational, 'acme_security', {})
-        self.self_sign_cert_security  = self.__get_item(operational, 'self_sign_cert_security', {})  
-        self.ram_on_host              = self.__get_item(operational, 'ram_on_host', 64)
+        self.security                 = self.__get_item(operational, 'security', {})    
+        self.ram_on_host              = int(self.__get_item(operational, 'ram_on_host', 64))
         self.no_suggest_index         = self.__get_item(operational, 'no_suggest_index', False)
         self.install_dir              = self.__get_item(operational, 'install_dir', None)
         self.copy_to_install_dir      = self.__get_item(operational, 'copy_to_install_dir', [])
         self.file_transfer            = listify(self.__get_item(operational, 'file_transfer', []))
         self.defender_exclude_paths   = listify(self.__get_item(operational, 'defender_exclude_paths', None))
         self.docker_registry          = listify(self.__get_item(operational, 'docker_registry', None))
-
+        
     def __init_schema(self, schema_changes):
         if not schema_changes:
             self.schema_changes = None
@@ -5253,6 +5361,7 @@ class Config():
                             
     def __init_doc_retrieval(self, doc_retrieval):
         self.doc_retrieval_always_use_search      = self.__get_item(doc_retrieval, 'always_use_search', True)
+        self.doc_retrieval_skip_empty_documents   = self.__get_item(doc_retrieval, 'skip_empty_documents', False)
         self.doc_retrieval_output_file            = self.__get_item(doc_retrieval, 'output_file', "output.csv")
         self.doc_retrieval_fields                 = self.__get_item(doc_retrieval, 'fields', [])
         self.doc_retrieval_batch_size             = self.__get_item(doc_retrieval, 'batch_size', "auto")
@@ -5265,6 +5374,8 @@ class Config():
         self.doc_retrieval_csv_header_row         = self.__get_item(doc_retrieval, 'csv_header_row', True) 
         self.doc_retrieval_report_frequency       = self.__get_item(doc_retrieval, 'report_frequency', 1000)  
         self.doc_retrieval_drop_underscore_fields = self.__get_item(doc_retrieval, 'drop_underscore_fields', True) 
+        self.doc_retrieval_field_merging          = self.__get_item(doc_retrieval, 'field_merging', {}) 
+        
         if self.doc_retrieval_csv_dialect:
             if not self.doc_retrieval_csv_dialect in csv.list_dialects():
                 raise ValueError(f"'{self.doc_retrieval_}' is not csv dialect")
@@ -5654,5 +5765,4 @@ if __name__ == '__main__':
     run_cmd_line(sys.argv)
 
     
-   
- 
+  
