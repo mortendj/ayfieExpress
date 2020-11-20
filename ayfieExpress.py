@@ -1,25 +1,55 @@
+# -*- coding: utf-8 -*-
+#<#   <-- The instructions below refer to the first character on this line
+"""
+#>
+# To use this script to install Python on Windows, do the following:
+#
+# > copy ayfieExpress.py installPython.ps1
+#
+# In the new file installPython.ps1, remove the first character of the 
+# second line as instructed above before runninig the script:
+#
+# > powershell.exe .\installPython.ps1
+#
+# Upon complettion the original ayfie Express file can now be run
+# as a normal Python script from a new terminal window:
+#
+# > python ayfieExpress.py 
+#
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.8.0/python-3.8.0-amd64.exe" -OutFile "python-3.8.0-amd64.exe"    
+.\python-3.8.0-amd64.exe /quiet InstallAllUsers=0 PrependPath=1 Include_test=0
+Exit
+<#
+"""
+
+AYFIE_EXPRESS_VERSION = "0.0.99 (not uploaded)"
+
 from json import loads, dumps
 from json.decoder import JSONDecodeError
 from socket import gaierror
 from time import sleep, time
 from datetime import datetime, date, timedelta
-from os.path import join, basename, dirname, exists, isdir, isfile, splitext, split as path_split, getsize, isabs
+from os import remove
+from os.path import join, dirname, exists, isdir, isfile, splitext, split as path_split, getsize, isabs, splitdrive, expanduser, abspath
+from ntpath import basename
 from os import listdir, makedirs, walk, system, stat, getcwd, chdir, environ
 from zipfile import is_zipfile, ZipFile
 from gzip import open as gzip_open
 from tarfile import is_tarfile, open as tarfile_open 
 from bz2 import decompress
 from codecs import BOM_UTF8, BOM_UTF16_LE, BOM_UTF16_BE, BOM_UTF32_LE, BOM_UTF32_BE
-from shutil import copy, copytree as copy_dir_tree, rmtree as delete_dir_tree
+from shutil import copy, copytree as copy_dir_tree, rmtree as delete_dir_tree, chown
 from typing import Union, List, Optional, Tuple, Set, Dict, DefaultDict, Any
 from re import search, match, sub, DOTALL, compile, findall
-from random import random, shuffle
+from random import random, shuffle, randint
 from subprocess import run, PIPE, STDOUT, TimeoutExpired
 from copy import deepcopy
 from platform import system as operating_system
 from collections import deque
 from getpass import getuser
 from inspect import signature
+from argparse import ArgumentParser   
 import contextlib
 import logging
 import sys
@@ -28,7 +58,7 @@ import warnings
 
 # The f-formated string below will produce a syntax error and be displayed
 # as part of the resulting error message if the version of Python is < 3.6
-f"ayfie Express requires Python 3.6 or later"
+f"ERROR: ayfie Express requires Python 3.6 or later, please swap to later version"
 
 max_int_value = sys.maxsize
 while True:
@@ -50,12 +80,13 @@ ROOT_OUTPUT_DIR       = f'{__file__}_output'
 UNZIP_DIR             = join(ROOT_OUTPUT_DIR, 'unzipDir')
 DATA_DIR              = join(ROOT_OUTPUT_DIR, 'dataDir')
 LOG_DIR               = join(ROOT_OUTPUT_DIR, 'log')
+DUMMY_DIR             = join(ROOT_OUTPUT_DIR, 'dummy')
 DOWNLOAD_DIR          = join(ROOT_OUTPUT_DIR, 'inspectorDownload')
 TMP_LOG_UNPACK_DIR    = join(ROOT_OUTPUT_DIR, 'tempLogUnpacking')
+AYFIE_EXPRESS_CFG_DIR = join(ROOT_OUTPUT_DIR, 'configs')
+CRASHED_BATCHES_DIR   = join(ROOT_OUTPUT_DIR, 'CrashedBatches')
 
 OFF_LINE              = "off-line"
-OVERRIDE_CONFIG       = "override_config"
-RESPECT_CONFIG        = "respect_config"
 
 LOG_FILE_START_STRING = "Attaching to"
 QUERY_API_LOGS        = "Query logs (Api Container)"
@@ -111,9 +142,8 @@ WORD_DOC              = "docx"
 XLSX                  = "xlsx"
 TXT                   = "txt"
 XML                   = 'xml'
+HTML                  = 'html'
 JSON_LINES            = 'json_lines'
-DATA_TYPES            = [AYFIE, AYFIE_RESULT, JSON, CSV, PDF, TXT]
-JSON_TYPES            = [AYFIE, AYFIE_RESULT, JSON]
 ZIP_FILE              = 'zip'
 TAR_FILE              = 'tar'
 GZ_FILE               = 'gz'
@@ -145,9 +175,10 @@ BOM_MARKS_NAMES = {
     BOM_UTF32_BE: 'utf_32_be'
 }
 
-MAX_CONNECTION_RETRIES = 100
+MAX_CONNECTION_RETRIES = 10
 MAX_PAUSE_BEFORE_RETRY = 120
 SLEEP_LENGTH_FACTOR    = 5
+CONNECTION_TIMEOUT     = 1800
 
 NORMAL_RESULT          = "normal"
 QUERY_AND_HITS_RESULT  = "query_and_numb_of_hits"
@@ -171,38 +202,26 @@ COL_STATE              = 'col_state'
 CLASSIFIER_STATE       = 'classifier_state'
 WAIT_TYPES             = [COL_EVENT, COL_STATE, CLASSIFIER_STATE]
 
-OP_INSTALL             = "install"
-OP_START               = "start"
-OP_STOP                = "stop" 
-OP_UNINSTALL           = "uninstall"
-OP_PRUNE_SYSTEM        = "prune"
-OP_GEN_DOT_ENV         = "gen_dot_env"
-OP_ENABLE_GDPR         = "enable_gdpr"
-OP_ENABLE_ET           = "enable_email_threading"
-OP_FILE_TRANSFER       = "file_transfer"
-OP_DISABLE_DEFENDER    = "disable_defender"
-OP_DEL_ALL_COL         = "delete_all_collections"
-
-OPERATIONS             = [
-    OP_INSTALL, OP_START, OP_STOP, OP_UNINSTALL, OP_PRUNE_SYSTEM, OP_GEN_DOT_ENV, OP_ENABLE_GDPR, 
-    OP_ENABLE_ET, OP_FILE_TRANSFER, OP_DISABLE_DEFENDER, OP_DEL_ALL_COL
-] 
-
+DOCKER_DOT_ENV_FILE             = ".env"
 DOCKER_COMPOSE_FILE             = "docker-compose.yml"
 DOCKER_COMPOSE_CUSTOM_FILE      = "docker-compose-custom.yml"
 DOCKER_COMPOSE_METRICS_FILE     = "docker-compose-metrics.yml"
 DOCKER_COMPOSE_FRONTEND_FILE    = "docker-compose-frontend.yml"
 DOCKER_COMPOSE_SECURITY_FILE    = "docker-compose-security.yml"
 DOCKER_COMPOSE_SELF_SIGNED_FILE = "docker-compose-security-self-signed.yml"
+DOCKER_COMPOSE_PRIMARY_FILE     = "docker-compose-cluster-primary.yml"
+DOCKER_COMPOSE_PROCESSOR_FILE   = "docker-compose-cluster-processor.yml"
+DOCKER_COMPOSE_NETWORK_FILE     = "docker-compose-external-network.yml"
+DOCKER_COMPOSE_FEEDER_FILE      = "docker-compose-feeder.yml"
 
-APPLICATION_CUSTOM_FILE      = "application-custom.yml"
-APPL_PII_TEMPLATE_FILE       = "application-pii.yml.template"
-DOCKER_WINDOW_CONFIG_DIR     = "config"
-SECURITY_ASSETS_DIR          = "security-assets"
+APPLICATION_CUSTOM_FILE         = "application-custom.yml"
+APPL_PII_TEMPLATE_FILE          = "application-pii.yml.template"
+DOCKER_WINDOW_CONFIG_DIR        = "config"
+SECURITY_ASSETS_DIR             = "security-assets"
 
-ELASTICSEARCH_MAX_MEM_LIMIT  = 26
-ELASTICSEARCH_MAX_MX_HEAP    = 16
-MEM_LIMITS_64_AND_128_GB_RAM = {
+ELASTICSEARCH_MAX_MEM_LIMIT     = 26
+ELASTICSEARCH_MAX_MX_HEAP       = 16
+MEM_LIMITS_64_AND_128_GB_RAM    = {
     "1": [
         ["AYFIE_MEM_LIMIT",         42, 84],
         ["ELASTICSEARCH_MEM_LIMIT", 10, 20],
@@ -213,6 +232,7 @@ MEM_LIMITS_64_AND_128_GB_RAM = {
         ["API_MEM_LIMIT",           14, 18],
         ["ELASTICSEARCH_MEM_LIMIT",  9, 16],
         ["ELASTICSEARCH_MX_HEAP",    6, 10],
+        ["SPARK_MASTER_MEM_LIMIT",   2,  2],
         ["SPARK_DRIVER_MEMORY",      6, 10],
         ["SPARK_WORKER_MEM_LIMIT",  28, 60],
         ["SPARK_WORKER_MEMORY",     24, 56],    
@@ -222,32 +242,31 @@ MEM_LIMITS_64_AND_128_GB_RAM = {
         ["SUGGEST_MX_HEAP",          6,  6],
         ["SUGGEST_MEM_LIMIT",        7,  7],
     ] 
-} 
-
-NON_ACTION_CONFIG      = ["server", 'port', 'col_name', 'config_source', 'silent_mode']
-OFFLINE_ACTIONS        = ["operational", "reporting"]   
-
-SYSCTL_SETTINGS        = ["vm.max_map_count=262144", "vm.swappiness=1"]
-SYSCTL_PATH            = "/etc/sysctl.conf"
+}   
 
 OS_AUTO                = "auto"
 OS_WINDOWS             = "windows"
 OS_LINUX               = "linux"
-SUPPORTED_OS           = [OS_AUTO, OS_WINDOWS, OS_LINUX]
+SUPPORTED_OS           = [OS_WINDOWS, OS_LINUX]
+SUPPORTED_OS_VALUES    = SUPPORTED_OS + [OS_AUTO]
 DISTRO_CENTOS          = "centos"
 DISTRO_UBUNTU          = "ubuntu"
 DISTRO_REDHAT          = "redhat"
-LINUX_DISTROS_NAMES    = [DISTRO_CENTOS, DISTRO_REDHAT, DISTRO_UBUNTU]
+LINUX_DISTROS          = [DISTRO_CENTOS, DISTRO_REDHAT, DISTRO_UBUNTU]
 DISTROS_USING_YUM      = [DISTRO_CENTOS, DISTRO_REDHAT]
-DISTROS_USING_APT_GET  = [DISTRO_UBUNTU]
+APT_MANAGER            = "APT"
+YUM_MANAGER            = "YUM"
+DNF_MANAGER            = "DNF"
+DISTROS_USING_APT      = [DISTRO_UBUNTU]
 DISTROS_USING_DNF      = []
+DOCKER_LINUX_DISTROS   = [DISTRO_CENTOS, DISTRO_UBUNTU]
 DISTRO_NAME_MAP        = {
     "centos linux": DISTRO_CENTOS,
     "ubuntu": DISTRO_UBUNTU,
     "red hat enterprise linux": DISTRO_REDHAT
 }
 LINUX_DOCKER_REGISTRY  = "quay.io" 
-WIN_DOCKER_REGISTRY    = "index.docker.io" 
+WIN_DOCKER_REGISTRY    = "index.docker.io"   
 PWD_START_STOP_TOKEN   = "$#$"
 
 MONITOR_INTERVAL       = 60
@@ -272,18 +291,26 @@ FRONTEND_CONFIG_TEMPLATE   = "config-frontend-template.yml"
 SECURE_API_CONFIG_TEMPLATE = "config-secure-api-template.yml"
 CONFIG_TEMPLATE            = "config-template.yml"
 
-def get_host_os():
-    return operating_system().lower()
+BASH_START_SCRIPT          = "start-ayfie.sh"
+BASH_STOP_SCRIPT           = "stop-ayfie.sh"
+BASH_LOG_SCRIPT            = "ayfie-logs.sh"
+INSPECTOR_BASH_SCRIPTS     = [BASH_START_SCRIPT, BASH_STOP_SCRIPT, BASH_LOG_SCRIPT]
 
-host_os = get_host_os()
-if host_os == OS_LINUX:
-    from grp import getgrnam, getgrgid
+CONDITIONAL_KEY            = "conditional"
+
+ID_BASED_ON_FILENAME       = "filename"
+ID_BASED_ON_SEQUENCE       = "sequence_number"
+ID_GENERATION_ALGORITHMS   = [ID_BASED_ON_FILENAME, ID_BASED_ON_SEQUENCE]
+
+HOST_OS  = operating_system().lower()
+if HOST_OS == OS_LINUX:
+    from grp import getgrall, getgrnam, getgrgid
     from pwd import getpwnam, getpwall
-    from os import setuid, getuid, geteuid
-elif host_os == OS_WINDOWS:
+    from os import geteuid
+elif HOST_OS == OS_WINDOWS:
     from ctypes import windll
 else:
-    raise OSError(f"'{host_os}' is not a supported OS'") 
+    raise OSError(f"'{HOST_OS}' is not a supported OS'") 
     
 class HTTPError(IOError):
     pass
@@ -312,23 +339,341 @@ class EngineDown(Exception):
 class UnknownIssue(Exception):
     pass
     
-
-if not exists(LOG_DIR):
-    makedirs(LOG_DIR)
-log = logging.getLogger(__name__)
-logging.basicConfig(
-    format = '%(asctime)s %(levelname)s: %(message)s, %(filename)s(%(lineno)d)',
-    datefmt = '%m/%d/%Y %H:%M:%S',
-    filename = join(LOG_DIR, basename(basename(sys.argv[0])).split('.')[0] + ".log"), 
-    level = LOG_LEVEL_TO_USE 
-)
+class NotSupported(Exception):
+    pass
     
-def pretty_formated(json):
-    if type(json) is str:
-        if not len(json):
+class NotEnoughInformation(Exception):
+    pass
+    
+# Dummy log to handle a cyclic dependency before before function prepare_logging() has completed
+class DummyLog:
+    def warning(self, msg):
+        pass
+    def debug(self, msg):
+        pass
+log = DummyLog()
+    
+def prepare_logging(): 
+    Os.make_dir(ROOT_OUTPUT_DIR)
+    Os.make_dir(LOG_DIR) 
+    filepath = join(LOG_DIR, basename(basename(sys.argv[0])).split('.')[0] + ".log")
+    Os.write_to_file_as_non_root_user(filepath, "".encode("utf-8"))
+    global log
+    log = logging.getLogger(__name__)
+    logging.basicConfig(
+        format = '%(asctime)s %(levelname)s: %(message)s, %(filename)s(%(lineno)d)',
+        datefmt = '%m/%d/%Y %H:%M:%S',
+        filename = filepath, 
+        level = LOG_LEVEL_TO_USE 
+    )
+    
+def replace_passwords(string):
+    string_to_show = string
+    string_fragments = string.split(PWD_START_STOP_TOKEN)
+    if len(string_fragments) == 3:
+        string_to_show = string_fragments[0] + "******" + string_fragments[2]
+    string_to_use = "".join(string_fragments)
+    return string_to_show, string_to_use 
+
+def execute(cmd_line_str, dumpfile=None, timeout=None, continue_on_timeout=True, return_response=False, 
+                          ignore_error=False, run_non_privileged=False, run_as_user=None, 
+                          simulation=False, fake_response="", success_codes=[0], max_response_log_length=0):
+    if simulation:
+        string_to_show, string_to_use = replace_passwords(cmd_line_str)
+        message = f"Simulating: '{string_to_show}'"
+        if return_response:
+            message += f" and the fake response: '{fake_response}'"
+            print(message)
+            return fake_response
+        print(message)
+        return
+    stdout=PIPE
+    stderr=STDOUT
+    if dumpfile:
+        stdout=dumpfile
+        stderr=dumpfile
+    process = None
+    if HOST_OS == OS_LINUX and geteuid() == 0:
+        user = None
+        if run_as_user:
+            user = run_as_user
+        elif run_non_privileged:
+            user = environ['SUDO_USER']
+        if user:
+            cmd_line_str = f"sudo -u {user} {cmd_line_str}"
+    string_to_show, string_to_use = replace_passwords(cmd_line_str)
+    log.debug(f"Command: '{string_to_show}'")
+    try:
+        process = run(string_to_use, timeout=timeout, shell=True, universal_newlines=True, stdout=stdout, stderr=stderr)
+    except TimeoutExpired:
+        log.warning(f'Command "{cmd_line_str}" timed out after {timeout} seconds.')
+        if not continue_on_timeout:
+            raise 
+    if process:
+        response = process.stdout.strip() if process.stdout else ""
+        if len(response):
+            single_line_response = response.replace('\n', '\\n')
+            if max_response_log_length:
+                if len(single_line_response) > max_response_log_length:
+                    single_line_response = single_line_response[:max_response_log_length] + "(...)"
+            log.debug(f"Response: '{single_line_response}'")
+        if not process.returncode in success_codes and not ignore_error:
+            if "Permission denied" in response:
+                raise PermissionError(response)
+            raise CommandLineError(f"Error (code: {process.returncode}): {response}")
+        if return_response:
+            return response
+    else:
+        raise UnknownIssue("No process object")
+
+
+class Os:
+
+    users = []
+
+    ############ DISTRO ############
+    @classmethod 
+    def _get_env_vars_from_file(cls, filepath, name_var, version_var):
+        try:
+            with open(filepath, "r") as f:
+                content = f.read()
+        except:
+            return None, None
+        m = search(f"{name_var}=\"(.+?)\"", content, DOTALL)
+        if m:
+            name = m.group(1)
+            m = search(f"{version_var}=\"(.+?)\"", content, DOTALL)
+            if m:
+                version = m.group(1)
+                return name.lower(), version.lower()
+        return None, None
+
+    @classmethod    
+    def get_linux_distro_and_version(cls):
+        if HOST_OS != OS_LINUX:
+            return None, None
+        name, version = cls._get_env_vars_from_file("/etc/os-release", "NAME", "VERSION_ID")
+        if not name:
+            try:
+                version = execute("lsb_release -sr", return_response=True)
+                name = execute("lsb_release -si", return_response=True)
+            except CommandLineError:
+                pass
+            if not name:
+                name, version = cls._get_env_vars_from_file("/etc/lsb-release", "DISTRIB_ID", "DISTRIB_RELEASE")
+                if not name:
+                    name, version = cls._get_env_vars_from_file("/etc/debian_version", "DISTRIB_ID", "DISTRIB_RELEASE")
+                    if not name:
+                        raise AutoDetectionError("Unable to auto detect linux distro") 
+        name = name.lower()
+        if name in DISTRO_NAME_MAP:
+            name = DISTRO_NAME_MAP[name]         
+        log.debug(f"Linux distro '{name}', version: '{version}'")
+        return name, version
+
+    ############ USER ############
+    @classmethod
+    def is_root_or_elevated_mode(cls, simulate=False, fake_response=False):
+        if simulate:
+            return fake_response
+        if HOST_OS == OS_LINUX:
+            if geteuid() == 0:
+                return True
+            return False
+        elif HOST_OS == OS_WINDOWS:
+            if windll.shell32.IsUserAnAdmin() != 0:  
+                return True
+            return False
+        else:
+            raise NotSupported(f"Host OS '{HOST_OS}' is not a supported OS")
+    
+    @classmethod
+    def get_actual_user(cls):
+        if HOST_OS == OS_LINUX:
+            if 'SUDO_USER' in environ:
+                return environ['SUDO_USER']
+            return getuser()
+        elif HOST_OS == OS_WINDOWS:
+            return getuser()
+        else:
+            raise NotSupported(f"Host OS '{HOST_OS}' is not a supported OS")
+            
+    @classmethod                
+    def create_user(cls, user_name, password):
+        if HOST_OS == OS_LINUX:
+            if cls.user_exists(user_name):
+                print(f"User '{user_name}' already exist")
+            elif cls.is_root_or_elevated_mode():
+                hashed_password = execute(f'echo "{password}" | openssl passwd -1 -stdin', return_response=True)
+                execute(f'useradd -p {hashed_password} {user_name}', return_response=True)
+                cls.users = []
+            else:
+                raise PermissionError(f"Need to be root user for creating user '{user_name}'")
+                
+    @classmethod          
+    def delete_user(cls, user_name):
+        if HOST_OS == OS_LINUX:
+            if cls.user_exists(user_name):
+                if cls.is_root_or_elevated_mode():
+                    execute(f'userdel -r -f {user_name}')
+                    cls.users = []
+                else:
+                    raise PermissionError(f"Need to be root user for deleting user '{user_name}'")
+            else:
+                raise ValueError(f"User '{user_name}' does not exist")
+
+    @classmethod  
+    def get_users(cls):
+        if not cls.users:
+            if HOST_OS == OS_LINUX:
+                passwd_file_content = execute(f'cat /etc/passwd', return_response=True, max_response_log_length=100)
+                cls.users = [line.split(':')[0] for line in passwd_file_content.split('\n')]
+            elif HOST_OS == OS_WINDOWS:
+                dir_blacklist = ['Default', 'Default User', 'Public', 'All Users']
+                cls.users = [dir for dir in listdir(path_split(expanduser("~"))[0]) if not isfile(dir) and dir not in dir_blacklist]
+            else:
+                raise NotSupported(f"Host OS '{HOST_OS}' is not a supported OS")
+        return cls.users
+
+    @classmethod    
+    def user_exists(cls, user):
+        if user in cls.get_users():
+            return True
+        return False
+            
+    ############ GROUP ############
+    @classmethod 
+    def create_group(cls, group): 
+        if HOST_OS == OS_LINUX:
+            if not cls.group_exists(group):
+                cmd = f"groupadd {group}" 
+                log.debug(f'Creating group: "{cmd}"')
+                execute(cmd)            
+
+    @classmethod 
+    def delete_group(cls, group, simulate=False):
+        if HOST_OS == OS_LINUX:
+            if cls.group_exists(group):
+                cmd = f"groupdel {group}" 
+                log.debug(f'Deleting group: "{cmd}"')
+                execute(cmd, simulation=simulate)            
+
+    @classmethod         
+    def get_groups(cls):
+        if HOST_OS == OS_LINUX:
+            return [group[0] for group in getgrall()]
+        return []
+            
+    @classmethod 
+    def group_exists(cls, group, simulate=False, fake_response=False):
+        if simulate:
+            return fake_response
+        if HOST_OS != OS_LINUX:
+            raise NotImplementedError(f"There is no user group support for OS '{HOST_OS}'")
+        try:
+            getgrnam(group) 
+            log.debug(f'User group "{group}" exists')
+            return True
+        except KeyError:
+            log.debug(f'User group "{group}" does not exist')
+            return False
+    
+    @classmethod 
+    def add_user_to_groups(cls, user, groups, simulation=False):
+        groups = listify(groups)
+        if HOST_OS == OS_LINUX:
+            for group in groups:
+                if not cls.group_exists(group) or simulation:
+                    cmd = f"groupadd {group}"
+                    log.debug(f'Creating group: "{cmd}"')
+                    execute(cmd, simulation=simulation)
+                cmd = f"usermod -a -G {group} {user}"
+                log.debug(f'Adding member to group: "{cmd}"')
+                execute(cmd, simulation=simulation)
+
+    @classmethod       
+    def _get_primary_group(cls, user):
+        if HOST_OS == OS_LINUX:
+            if cls.user_exists(user):
+                return getgrgid(getpwnam(user).pw_gid).gr_name
+        return None                
+
+    ############ FILES / DIRECTORIES ############        
+    @classmethod
+    def change_owner(cls, path, user=None, group=None, recursive=False):
+        if HOST_OS == OS_LINUX:
+            if exists(path):
+                if not user:
+                    user = cls.get_actual_user()
+                if not group:
+                    group = cls._get_primary_group(user)
+                if recursive:
+                    execute(f"chown {user}:{user} {path} -R")
+                else:
+                    chown(path, user, group)
+                
+    @classmethod                
+    def change_mode(cls, path, mode, recursive=False):
+        if HOST_OS == OS_LINUX:
+            if exists(path):
+                cmd = f"chmod {mode} {path}"
+                if recursive:
+                    execute(f"{cmd} -R")
+                else:
+                    execute(cmd)
+        
+    @classmethod
+    def make_dir(cls, directory, user=None, simulate=False):
+        if simulate:
+            print(f"Simulating creating directory '{directory}'")
+        elif not exists(directory):
+            makedirs(directory)
+            if HOST_OS == OS_LINUX and cls.is_root_or_elevated_mode:
+                if not user:
+                    user = cls.get_actual_user()
+                cls.change_owner(directory, user)
+     
+    @classmethod
+    def del_dir(cls, dir_path): 
+        tries = 0
+        while exists(dir_path):
+            if tries > 5:
+                raise IOError(f"Failed to delete directory '{dir_path}'")    
+            delete_dir_tree(dir_path)
+            tries += 1
+            sleep(5 * tries)
+        log.debug(f"Deleted directory '{dir_path}'")
+            
+    @classmethod
+    def recreate_dir(cls, dir_path):
+        cls.del_dir(dir_path)
+        cls.make_dir(dir_path)  
+        if not exists(dir_path):
+            raise IOError("Failed to create directory '{dir_path}'") 
+
+    @classmethod
+    def write_to_file_as_non_root_user(cls, file_path, content, user=None):
+        with open(file_path, 'wb') as f:
+            f.write(content)
+        cls.change_owner(file_path, user)
+ 
+    @classmethod
+    def get_script_extension(cls): 
+        if HOST_OS == OS_LINUX:
+            return "sh"
+        elif HOST_OS == OS_WINDOWS:
+            return "cmd"
+        else:
+            raise NotSupported(f"Host OS '{HOST_OS}' is not a supported OS")
+ 
+ 
+def pretty_formated(input):
+    obj = input
+    if type(input) is str:
+        if not len(input):
             raise ValueError('json string cannot be empty string')
-        json = loads(json)
-    return dumps(json, indent=4)    
+        obj = loads(input)
+    return dumps(obj, indent=4)    
     
 def pretty_print(json):
     print(pretty_formated(json))
@@ -339,76 +684,6 @@ def listify(obj):
     if not type(obj) is list:
         obj = [obj]
     return obj
-    
-def get_env_vars_from_file(filepath, name_var, version_var):
-    try:
-        with open(filepath, "r") as f:
-            content = f.read()
-    except:
-        return None, None
-    m = search(f"{name_var}=\"(.+?)\"", content, DOTALL)
-    if m:
-        name = m.group(1)
-        m = search(f"{version_var}=\"(.+?)\"", content, DOTALL)
-        if m:
-            version = m.group(1)
-            return name.lower(), version.lower()
-    return None, None
-    
-def get_linux_distro_and_version(): 
-    name, version = get_env_vars_from_file("/etc/os-release", "NAME", "VERSION_ID")
-    if not name:
-        try:
-            version = execute("lsb_release -sr", return_response=True)
-            name = execute("lsb_release -si", return_response=True)
-        except CommandLineError:
-            pass
-        if not name:
-            name, version = get_env_vars_from_file("/etc/lsb-release", "DISTRIB_ID", "DISTRIB_RELEASE")
-            if not name:
-                name, version = get_env_vars_from_file("/etc/debian_version", "DISTRIB_ID", "DISTRIB_RELEASE")
-                if not name:
-                    raise AutoDetectionError("Unable to auto detect linux distro")
-                    
-    name = name.lower()
-    if name in DISTRO_NAME_MAP:
-        name = DISTRO_NAME_MAP[name]         
-    log.debug(f"Linux distro '{name}', version: '{version}'")
-    return name, version
-              
-def replace_passwords(string):
-    string_to_show = string
-    string_fragments = string.split(PWD_START_STOP_TOKEN)
-    if len(string_fragments) == 3:
-        string_to_show = string_fragments[0] + "******" + string_fragments[2]
-    string_to_use = "".join(string_fragments)
-    return string_to_show, string_to_use
-
-def execute(cmd_line_str, dumpfile=None, timeout=None, continue_on_timeout=True, return_response=False, ignore_error=False):
-    stdout=PIPE
-    stderr=STDOUT
-    if dumpfile:
-        stdout=dumpfile
-        stderr=dumpfile
-    process = None
-    string_to_show, string_to_use = replace_passwords(cmd_line_str)
-    log.debug(string_to_show)
-    try:
-        process = run(string_to_use, timeout=timeout, shell=True, universal_newlines=True, stdout=stdout, stderr=stderr)
-    except TimeoutExpired:
-        log.warning(f'Command "{cmd_line_str}" timed out after {timeout} seconds.')
-        if not continue_on_timeout:
-            raise 
-    if process:
-        response = process.stdout.strip() if process.stdout else ""
-        if len(response):
-            log.debug(f"{response}".replace('\n', '\\n'))
-        if process.returncode != 0 and not ignore_error:
-            raise CommandLineError(f"Error (code: {process.returncode}): {response}")
-        if return_response:
-            return response
-    else:
-        raise UnknownIssue("No process object")
 
 def install_python_modules(modules):
     if not type(modules) is list:
@@ -424,27 +699,28 @@ def install_python_modules(modules):
         except ModuleNotFoundError:
             print(f"Python module '{module}' not installed. Installing now...")
             if first_time:
-                if get_host_os() == OS_LINUX:
-                    execute(f"umask 022")
                 first_time = False
+                if HOST_OS == OS_LINUX:
+                    execute(f"umask 022")
                 command_line = f"{sys.executable} -m pip install --upgrade pip"
                 try:
                     execute(command_line)
                 except CommandLineError as e:
-                    if not "No module named pip" in str(e):
-                        raise
-                    linux_distro, version = get_linux_distro_and_version()
-                    if linux_distro in DISTROS_USING_APT_GET:
-                        package_manager = AptGetPackageManager(linux_distro)
-                    elif linux_distro in DISTROS_USING_YUM:
-                        package_manager = YumPackageManager(linux_distro)
-                    elif linux_distro in DISTROS_USING_DNF: 
-                        package_manager = DnfGetPackageManager(linux_distro)
-                    package_manager.install_pip()
-                    try:
-                        execute("pip3 --version")
-                    except:
-                        log.error("Failed to install pip3")
+                    if "No module named pip" in str(e):
+                        if HOST_OS == OS_LINUX and not Os.is_root_or_elevated_mode():
+                            raise PermissionError(f"Installing '{module}' requires root user (sudo)")
+                        linux_distro, version = Os.get_linux_distro_and_version()
+                        if linux_distro in DISTROS_USING_APT:
+                            execute("apt-get update")
+                            execute("apt-get install python3-pip --assume-yes")
+                        elif linux_distro in DISTROS_USING_YUM:
+                            execute("yum install python3-pip --assume-yes")
+                        try:
+                            execute("pip3 --version")
+                        except:
+                            log.error("Failed to install pip3")
+                            raise
+                    else:
                         raise
             try:
                 execute(f"{sys.executable} -m pip install {package}")  
@@ -472,138 +748,12 @@ def is_earlier_version(earlier_version, later_version):
             raise ValueError(f"Bad version number(s): {input_version_numbers}. Original error message: {str(e)}") 
     return False
 
-                                
-class PackageManager: 
 
-    def __init__(self, linux_distro_name):
-        self.linux_distro_name = linux_distro_name
-        supported_distros = self._get_supported_distros()
-        if not self.linux_distro_name in self._get_supported_distros():
-            raise ValueError(f"'{self.linux_distro_name}' is not among the distros supported by this package manager: {LINUX_DISTROS_NAMES}")            
-        self.repo_url = f"https://download.docker.com/linux/{self.linux_distro_name}" 
-        
-    def _get_supported_distros(self):
-        return []    
-                
-    def install_pip(self):
-        self._update_package_index()
-        self._install_pip()
-        
-    def _setup_docker_repository(self):
-        self._update_package_index()
-        self._install_repository_tools()
-        self._add_docker_gpg_key()
-        self._add_repository()
-        
-    def install_docker(self):
-        self._setup_docker_repository()
-        self._install_docker()
-        
-    def uninstall_docker(self):
-        self._uninstall_docker()
-
-
-class AptGetPackageManager(PackageManager):
-
-    def __init__(self, linux_distro_name):
-        super().__init__(linux_distro_name)
-        self.gpg_url = f"{self.repo_url}/gpg"
-
-    def _get_supported_distros(self):
-        return DISTROS_USING_APT_GET
- 
-    def _update_package_index(self):
-        execute("apt-get update")
-        
-    def _install_pip(self):
-        execute("apt install python3-pip --assume-yes")
-
-    def _install_repository_tools(self):
-        execute("apt-get install apt-transport-https ca-certificates curl gnupg-agent software-properties-common --assume-yes")  
-
-    def _add_docker_gpg_key(self):
-        execute(f"curl -fsSL {self.gpg_url} | apt-key add -")
-        execute("apt-key fingerprint 0EBFCD88")
-        
-    def _add_repository(self):
-        execute(f'add-apt-repository "deb [arch=amd64] {self.repo_url} $(lsb_release -cs) stable"') 
-            
-    def _get_latest_available_docker_version(self):
-        version_string = None
-        response = execute("apt-cache madison docker-ce", return_response=True)
-        log.debug(response)
-        for line in response.split("\n"):
-            regex = f"^docker-ce \| (.*) \| {self.repo_url} bionic/stable amd64 Packages$"
-            m = match(regex, line.strip())
-            if m:
-                version_string = m.group(1)
-                break
-        return version_string
-        
-    def _install_docker(self):
-        docker_version = self._get_latest_available_docker_version()
-        log.debug(f"Latest available docker version is '{docker_version}'")
-        if docker_version:
-            execute(f"apt-get install docker-ce={docker_version} docker-ce-cli={docker_version} containerd.io --assume-yes")
-        else:
-            execute("apt-get install docker-ce docker-ce-cli containerd.io --assume-yes")
-        
-    def _uninstall_docker(self):
-        execute(f"apt-get purge -y docker-engine docker docker.io docker-ce")
-        execute(f"apt-get autoremove -y --purge docker-engine docker docker.io docker-ce")
-        
-
-class YumPackageManager(PackageManager):
-
-    def _get_supported_distros(self):
-        return DISTROS_USING_YUM
-
-    def _update_package_index(self):
-        execute("yum -y update")
-        
-    def _install_pip(self):
-        execute("yum install python3-pip --assume-yes")
-        
-    def _install_repository_tools(self):
-        execute("yum install -y yum-utils device-mapper-persistent-data lvm2")
-
-    def _add_repository(self):
-        execute(f"yum-config-manager --add-repo {self.repo_url}/docker-ce.repo")
-        
-    def _add_docker_gpg_key(self):
-        pass
-       
-    def _install_docker(self):
-        execute("yum install -y docker-ce docker-ce-cli containerd.io")
-    
-    def _uninstall_docker(self):
-        execute("yum remove -y docker-ce")
-        
-
-class DnfPackageManager(PackageManager):
-
-    def _get_supported_distros(self):
-        return DISTROS_USING_DNF
-
-    def _update_package_index(self):
-        pass
-        
-    def _install_pip(self):
-        execute("dnf install python3-pip --assume-yes")
-
-    def _setup_docker_repository(self):
-        execute("dnf -y install dnf-plugins-core")
-        execute("dnf config-manager --add-repo {self.repo_url}")
-
-    def _install_docker(self):
-        execute("dnf install -y docker-ce docker-ce-cli containerd.io")
-    
-    def _uninstall_docker(self):
-        execute("dnf remove -y docker-ce")
-
- 
-install_python_modules('requests') 
+prepare_logging()
+install_python_modules(['requests', 'urllib3']) 
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 @contextlib.contextmanager
 def change_dir(dir):
@@ -632,23 +782,22 @@ def get_unit_adapted_byte_figure(number_of_bytes):
 
 class WebContent():
         
-    def download(self, url, directory=None):
+    @classmethod
+    def download(cls, url, directory=None):
         response = requests.get(url, allow_redirects=True)
         if response.status_code != 200:
             raise HTTPError(f'Downloading "{url}" failed with HTTP error code {response.status_code}')
-        filename = self._get_filename_from_response(response)
+        filename = cls._get_filename_from_response(response)
         if not filename:
             filename = url.split('/')[-1]
         if directory:
-            if not exists(directory):
-                makedirs(directory)
             path = join(directory, filename)
-            with open(path, 'wb') as f:
-                f.write(response.content)
+            Os.make_dir(directory)   
+            Os.write_to_file_as_non_root_user(path, response.content)
             return path
-        else:
-            return response.content
-                
+        return response.content
+    
+    @classmethod    
     def _get_filename_from_response(self, response):
         content_disposition = response.headers.get('content-disposition')
         if content_disposition:
@@ -658,9 +807,10 @@ class WebContent():
         return None
 
 
-class FileHandlingTools():
+class FileTools():
  
-    def get_file_type(self, file_path):
+    @classmethod 
+    def get_file_type(cls, file_path):
         detected_encoding = None
         if isfile(file_path):
             extension = splitext(file_path)[-1].lower()
@@ -681,12 +831,13 @@ class FileHandlingTools():
                             detected_encoding = BOM_MARKS_NAMES[pattern]
                             log.debug(f"'{file_path}' encoding auto detected to '{detected_encoding}'")
                             start_byte_sequence = start_byte_sequence[len(pattern):]
-                            return self._get_text_format_type(start_byte_sequence, extension), detected_encoding
+                            return cls._get_text_format_type(start_byte_sequence, extension), detected_encoding
                         return FILE_SIGNATURES[pattern], detected_encoding
-                return self._get_text_format_type(start_byte_sequence, extension), detected_encoding
+                return cls._get_text_format_type(start_byte_sequence, extension), detected_encoding
         return None, detected_encoding
 
-    def _get_text_format_type(self, start_byte_sequence, extension):
+    @classmethod 
+    def _get_text_format_type(cls, start_byte_sequence, extension):
         start_char_sequence = start_byte_sequence.decode('iso-8859-1')
         org_start_char_sequence = start_char_sequence
         for char in [' ', '\n', '\r', '\t']:
@@ -694,7 +845,10 @@ class FileHandlingTools():
         char_patterns = {
             '{"documents":[{': AYFIE,
             '{"query":{'     : AYFIE_RESULT,
-            '{"id":'         : JSON_LINES
+            '{"id":'         : JSON_LINES,
+            '<!DOCTYPE html>': HTML,
+            '<html'          : HTML,
+            '<HTML'          : HTML
         }
         for pattern in char_patterns.keys():
             if start_char_sequence.startswith(pattern):
@@ -704,6 +858,8 @@ class FileHandlingTools():
             return JSON
         elif extension == '.txt':
             return TXT
+        elif extension in ['.htm', '.html']:
+            return HTML
         elif extension == '.csv' or extension == '.tsv':
             try:
                 dialect = csv.Sniffer().sniff(org_start_char_sequence)
@@ -712,31 +868,37 @@ class FileHandlingTools():
                 return None
         return None
         
-    def _get_output_file_path(self, input_file_path, zip_file_extension, unzip_dir):
+    @classmethod 
+    def _get_output_file_path(cls, input_file_path, zip_file_extension, unzip_dir):
         return join(unzip_dir, basename(input_file_path).replace(f".{zip_file_extension}", ""))
 
-    def unzip(self, file_path, unzip_dir, file_type=None):
+    @classmethod 
+    def unzip(cls, file_path, unzip_dir, file_type=None):
         if not file_type:
-            file_type, encoding = self.get_file_type(file_path)
+            file_type, encoding = cls.get_file_type(file_path)
         if file_type not in ZIP_FILE_TYPES:
             return False
         if not unzip_dir:
             raise ValueError("No unzip directory is given")
-        self.recreate_directory(unzip_dir)
+        Os.recreate_dir(unzip_dir)
         if file_type == ZIP_FILE:
-            with ZipFile(file_path, 'r') as z:
-                z.extractall(unzip_dir)
+            with ZipFile(file_path, 'r') as f:
+                f.extractall(unzip_dir)
+                for file_path in f.namelist():
+                    Os.change_owner(join(unzip_dir, file_path))
         elif file_type == TAR_FILE:
-            with tarfile_open(file_path) as tar:
-                tar.extractall(unzip_dir)
+            with tarfile_open(file_path) as f:
+                f.extractall(unzip_dir)
+                for file_path in f.getnames():
+                    Os.change_owner(join(unzip_dir, file_path))
         elif file_type == GZ_FILE:
-            output_file_path = self._get_output_file_path(file_path, "gz", unzip_dir)
-            with open(output_file_path, 'wb') as f, gzip_open(file_path, 'rb') as z:
-                f.write(z.read())
+            output_file_path = cls._get_output_file_path(file_path, "gz", unzip_dir)
+            with gzip_open(file_path, 'rb') as f:
+                Os.write_to_file_as_non_root_user(output_file_path, f.read())
         elif file_type == BZ2_FILE:
-            output_file_path = self._get_output_file_path(file_path, "bz2", unzip_dir)
-            with open(output_file_path, 'wb') as f, open(file_path,'rb') as z:
-                f.write(decompress(z.read()))
+            output_file_path = cls._get_output_file_path(file_path, "bz2", unzip_dir)
+            with open(file_path,'rb') as f:
+                Os.write_to_file_as_non_root_user(output_file_path, f.read())
         elif file_type == _7Z_FILE:
             log.info(f"Skipping '{file_path}' - 7z decompression still not implemented")
         elif file_type == RAR_FILE:
@@ -744,26 +906,59 @@ class FileHandlingTools():
         else:
             raise ValueError(f'Unknown zip file type "{zip_file_type}"')
         return True
-             
-    def delete_directory(self, dir_path): 
-        tries = 0
-        while exists(dir_path):
-            if tries > 5:
-                raise IOError(f"Failed to delete directory '{dir_path}'")    
-            delete_dir_tree(dir_path)
-            tries += 1
-            sleep(5 * tries)
-
-    def recreate_directory(self, dir_path):
-        self.delete_directory(dir_path)
-        makedirs(dir_path)
-        if not exists(dir_path):
-            raise IOError("Failed to create directory '{dir_path}'") 
-
-    def get_next_file(self, root, dir_filter=None, extension_filter=None, min_size=0, max_size=0):
+        
+    @classmethod 
+    def zip(cls, zip_file_path, source_files_root_dir, zip_file_type=ZIP_FILE, blocked_dirs=None, extension_filter=None, min_size=0, max_size=0):
+        file_list = []
+        if zip_file_type == ZIP_FILE:
+            with ZipFile(zip_file_path, 'w') as z:
+                for f in cls.get_next_file(source_files_root_dir, extension_filter, min_size, max_size):
+                    file_list.append(f)
+                    z.write(f)
+        else:
+            raise NotSupported(f"Zip file type '{zip_file_type}' is currently not supported")
+        return file_list
+           
+    @classmethod 
+    def gen_zipped_load_file_with_load(cls, load_file_path, zip_file_path, source_files_root_dir, zip_file_type=ZIP_FILE, 
+                                            doc_id_generation=ID_BASED_ON_FILENAME, sequence_start_number=0, sequence_number_steps=1, 
+                                            blocked_dirs=None, extension_filter=None, min_size=0, max_size=0, csv_dialect='excel'):
+        doc_id = sequence_start_number
+        rows = [("doc_id", "file_path")]
+        if not doc_id_generation in ID_GENERATION_ALGORITHMS:
+            raise ValueError(f"'{doc_id_generation}' is not a known id generation option")
+        for file_path in cls.zip(zip_file_path, source_files_root_dir, zip_file_type, blocked_dirs, extension_filter, min_size, max_size):
+            if doc_id_generation == ID_BASED_ON_FILENAME:
+                path_without_extension, extension = splitext(file_path)
+                doc_id = basename(path_without_extension)
+            elif doc_id_generation == ID_BASED_ON_SEQUENCE:
+                doc_id += sequence_number_steps
+            drive, file_path = splitdrive(file_path)
+            file_path = file_path.replace('/', '\\')
+            if file_path[0] == '\\':
+                file_path = file_path[1:] 
+            rows.append((doc_id, file_path))
+        with open(load_file_path, "w") as f:
+            f.write("")
+        with open(load_file_path, "a", newline="") as f:
+            writer = csv.writer(f, csv_dialect)
+            for row in rows:
+                writer.writerow(row)
+        with ZipFile(zip_file_path, 'a') as f:
+            f.write(load_file_path)
+        remove(load_file_path)
+            
+    @classmethod 
+    def get_next_file(cls, root, blocked_dirs=None, extension_filter=None, min_size=0, max_size=0):
         items = listdir(root)
         files = [item for item in items if isfile(join(root, item))]
         dirs = [item for item in items if isdir(join(root, item))]
+        ext_filter = []
+        if extension_filter:
+            for ext in [ext.lower() for ext in listify(extension_filter)]:
+                if not ext.startswith('.'):
+                    ext = '.' + ext
+                    ext_filter.append(ext)
         for f in files:
             file_path = join(root, f)
             if min_size or max_size: 
@@ -773,27 +968,31 @@ class FileHandlingTools():
                 if max_size and file_size > max_size:
                     continue
             path_without_extension, extension = splitext(f)
-            if extension_filter:
-                if extension in extension_filter:
+            if ext_filter:
+                if extension.lower() in ext_filter:
                     yield file_path
             else:
                 yield file_path
         for dir in dirs:
-            if dir_filter:
-                if dir in dir_filter:
+            if blocked_dirs:
+                if dir in blocked_dirs:
                     continue
-            for f in self.get_next_file(join(root, dir), dir_filter, extension_filter, min_size, max_size):
+            for f in cls.get_next_file(join(root, dir), blocked_dirs, ext_filter, min_size, max_size):
                 yield f
 
-    def __write_fragment_to_file(self, dir_name, fragment_name, fragment_count, fragment_lines):
-        with open(join(dir_name, f"{fragment_name}_{fragment_count}"), "wb") as f:
-            f.write(''.join(fragment_lines).encode('utf-8')) 
-            
-    def split_files(self, dir_path, lines_per_fragment=0, max_fragments=0):
-        for log_file in self.get_next_file(dir_path):
-            self.split_file(log_file, lines_per_fragment, max_fragments)            
-                
-    def split_file(self, file_path, lines_per_fragment=0, max_fragments=0):
+    @classmethod 
+    def _write_fragment_to_file(cls, dir_name, fragment_name, fragment_count, fragment_lines):
+        path = join(dir_name, f"{fragment_name}_{fragment_count}")
+        content = ''.join(fragment_lines).encode('utf-8')
+        Os.write_to_file_as_non_root_user(path, content)
+     
+    @classmethod 
+    def split_files(cls, dir_path, lines_per_fragment=0, max_fragments=0):
+        for log_file in cls.get_next_file(dir_path):
+            cls.split_file(log_file, lines_per_fragment, max_fragments)            
+     
+    @classmethod 
+    def split_file(cls, file_path, lines_per_fragment=0, max_fragments=0):
         lines_per_fragment = int(lines_per_fragment)
         max_fragments = int(max_fragments)
         line_count = 0
@@ -805,7 +1004,7 @@ class FileHandlingTools():
             for line in f:
                 fragment_lines.append(line)
                 if lines_per_fragment and line_count >= lines_per_fragment - 1:
-                    self.__write_fragment_to_file(dir_name, fragment_name, fragment_count, fragment_lines)                    
+                    cls._write_fragment_to_file(dir_name, fragment_name, fragment_count, fragment_lines)                    
                     line_count = 0
                     fragment_lines = []
                     fragment_count += 1
@@ -814,22 +1013,70 @@ class FileHandlingTools():
                 else:
                     line_count += 1
         if line_count > 0: 
-            self.__write_fragment_to_file(dir_name, fragment_name, fragment_count, fragment_lines)
-            
-    def get_random_path(self, path, name_prefix=""):
+            cls._write_fragment_to_file(dir_name, fragment_name, fragment_count, fragment_lines)
+        
+    @classmethod 
+    def get_random_path(cls, path, name_prefix=""):
         if name_prefix:
             name_prefix += "-"
-        return join(path, f"{name_prefix}{str(int(random() * 10000000))}")
-        
-    def get_absolute_path(self, path, reference_path):
+        return join(path, f"{name_prefix}{str(randint(10000000, 99999999))}")
+    
+    @classmethod 
+    def get_absolute_path(cls, path, reference_path):
         if path:
             if path.startswith("http://") or path.startswith("https://"):
                 return path
             if not isabs(path):
                 return join(path_split(reference_path)[0], path)  
         return path
+ 
+ 
+class RemoteServer():
 
-    
+    def __init__(self, server, username, port=22):
+        install_python_modules(["paramiko", "scp"])
+        import paramiko
+        import scp
+        self.ssh = paramiko.SSHClient()
+        self.ssh.load_system_host_keys()
+        self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        params = {
+            "hostname": server,
+            "username": username,
+            "port": port
+        }
+        try: 
+            self.ssh.connect(**params)
+        except paramiko.ssh_exception.SSHException as e:
+            raise paramiko.ssh_exception.SSHException(f"Pageant, putty or whatever ssh tool used does not currently seem to have access to the private key: '{str(e)}'")
+
+    def _execute_command(self, command):
+        stdin, stdout, stderr = self.ssh.exec_command(command)
+        return stdout.read()
+
+    def find_files(self, start_directory, file_pattern):
+        response = self._execute_command(f'find {start_directory} -name "{file_pattern}"')
+        return [ line.decode('utf-8') for line in response.splitlines()]
+
+    def copy_file_from_remote(self, from_path, to_path, max_numb_of_retries=5):
+        import scp
+        retry = 0
+        while retry < max_numb_of_retries:
+            retry += 1
+            with scp.SCPClient(self.ssh.get_transport()) as scp_client:
+                try:
+                    scp_client.get(from_path, to_path)
+                except scp.SCPException as e:
+                    pause = 60 * retry
+                    print(f"Exception: '{str(e)}'. Trying again in {pause} seconds")
+                    sleep(pause)
+                
+    def copy_file_to_remote(self, from_path, to_path):
+        import scp
+        with scp.SCPClient(self.ssh.get_transport()) as scp_client:
+            scp_client.put(from_path, to_path)
+
+   
 class SearchEngine:
 
     @classmethod
@@ -842,17 +1089,18 @@ class SearchEngine:
 
     def __init__(self, server, port, base_endpoint, headers, user=None, password=None, client_secret=None):
         self.server = server
-        try:
-            self.port = str(int(port))
-        except ValueError:
-            raise ValueError(f"Value '{port}' is not a valid port number")
+        self.client_secret = client_secret
         self._set_port(port)
         self.base_endpoint = base_endpoint
         self.headers = headers
         self.statusCodes = self._getHTTPStatusCodes()
         self.user = user
         self.password = password
-        self.client_secret = client_secret
+        self.last_batch = None
+        self.batch_count = 0
+        
+    def get_last_batch(self):
+        return self.batch_count, self.last_batch
         
     def _getHTTPStatusCodes(self):
         return {
@@ -899,10 +1147,15 @@ class SearchEngine:
                 "description": "This one is not listed in ayfie literature."
             }
         }
-        
+            
     def _set_port(self, port):
-        self.port = str(port)
+        try:
+            self.port = str(int(port))
+        except ValueError:
+            raise ValueError(f"Value '{port}' is not a valid port number")
         self.protocol = "http"
+        if self.client_secret:
+            self.port = '443'
         if self.port == '443':
             self.protocol = "https"
         
@@ -911,7 +1164,10 @@ class SearchEngine:
              parameters = f"?{ parameters}"
         if self.base_endpoint and self.base_endpoint[-1] != "/":
             self.base_endpoint += "/"
-        return f'{self.protocol}://{self.server}:{self.port}/{self.base_endpoint}{path}{parameters}'  
+        port = f":{self.port}"
+        if self.port in ["80", "443"]:
+            port = ""
+        return f'{self.protocol}://{self.server}{port}/{self.base_endpoint}{path}{parameters}'  
 
     def _validateInputValue(self, input_value, allowed_values):
         if input_value not in allowed_values:
@@ -937,8 +1193,9 @@ class SearchEngine:
             es = response_obj['errors']
             err_msg = "; ".join([f"{e['documentId']}:{e['message']}" for e in es]) 
         msg = f'HTTP error code: "{ayfieStatusCode}". '
-        msg += f'General error description: "{ayfieDescription}". '
-        msg += f'Specific error description: "{err_msg}"'
+        msg += f'General error description: "{ayfieDescription}"'
+        if err_msg != "null":
+            msg += f'. Specific error description: "{err_msg}"'
         return msg
         
     def _gen_non_ayfie_code_msg(self, code):
@@ -954,7 +1211,7 @@ class SearchEngine:
                 return m.group(2)
         return None
         
-    def _log_attempt_and_go_to_sleep(self, tries, error_msg, go_to_sleep): 
+    def _log_attempt_and_go_to_sleep(self, tries, error_msg, go_to_sleep, max_tries=3): 
         sleep_msg = ""
         if go_to_sleep:
             sleep_interval = tries * SLEEP_LENGTH_FACTOR
@@ -964,7 +1221,7 @@ class SearchEngine:
             sleep_msg = f". Trying again in {sleep_interval} seconds"
         msg = f"Connection issue: {error_msg}{sleep_msg}"
         log.debug(msg)
-        if tries > 3:
+        if tries > max_tries:
             print(msg)
         
     def _response_format_converter(self, response_obj):
@@ -991,14 +1248,38 @@ class SearchEngine:
             return getattr(session, verb.lower())
         return getattr(requests, verb.lower())
         
+    def _get_headers(self):
+        headers = self.headers
+        if self.client_secret:
+            failed = True
+            error_msg = ""
+            endpoint = f'https://{self.server}/security/v1/client/token'
+            data = {"clientId":"inspector","clientSecret": self.client_secret, "grantType":"client_credentials"}
+            response = requests.post(endpoint, json=data, headers=headers, verify=False)
+            response_obj = self._get_response_object(response)
+            if "error" in response_obj:
+                msg = response_obj['error']
+                error_msg = f"Attempt to obtain access token fails: '{msg}'"
+            elif "accessToken" in response_obj:
+                access_token = response_obj["accessToken"]
+                headers["Authorization"] = f"Bearer {access_token}"
+                failed = False
+            else:
+                error_msg = f"No 'accessToken' parameter in response object: {response_obj}"
+            if failed:
+                error_msg += f", Headers: {self.headers}, Endpoint: {endpoint}, Data: {data}"
+                log.error(error_msg)
+        return headers
+        
     def _execute(self, path, verb, data={}, parameters="", max_retry_attemps=MAX_CONNECTION_RETRIES):
         self._validateInputValue(verb, HTTP_VERBS)
         endpoint = self._get_endpoint(path, parameters) 
         request_function = self._get_request_function_to_use(verb.lower())
         log.debug(self._gen_req_log_msg(verb, endpoint, data, self.headers))
         if data and verb == "POST" and "batches" in endpoint:
-            with open(join(ROOT_OUTPUT_DIR, "last_batch.json"), 'wb') as f:
-                f.write(dumps(data).encode('utf-8'))
+            self.last_batch = dumps(data).encode('utf-8')
+            self.batch_count += 1
+            Os.write_to_file_as_non_root_user(join(ROOT_OUTPUT_DIR, "last_batch.json"), self.last_batch)
                 
         tries = 0
         while True:
@@ -1006,18 +1287,22 @@ class SearchEngine:
                 break
             tries += 1
             try:
-                response = request_function(endpoint, json=data, headers=self.headers)
+                response = request_function(endpoint, json=data, headers=self._get_headers(), timeout=CONNECTION_TIMEOUT) 
                 break
             except requests.exceptions.ConnectionError as e:
                 if tries > max_retry_attemps:
                     raise
                 self._log_attempt_and_go_to_sleep(tries, str(e), go_to_sleep=True)
-            except MemoryError:
-                self._log_attempt_and_go_to_sleep(tries, "Out of memory - giving up!", go_to_sleep=False)
-                raise
+            except (MemoryError, requests.exceptions.ReadTimeout) as e:
+                self._log_attempt_and_go_to_sleep(tries, str(e), go_to_sleep=False, max_tries=1)
+                raise 
             except Exception as e:
-                self._log_attempt_and_go_to_sleep(tries, "Unknown/unhandled error reason", go_to_sleep=False) 
-                raise
+                print(str(e))
+                if "!doctype html" in str(e) and "400" in str(e) and "bad request" in str(e).lower():
+                    self._log_attempt_and_go_to_sleep(tries, "HTTP Status 400 – Bad Request", go_to_sleep=True)
+                else:
+                    self._log_attempt_and_go_to_sleep(tries, "Unknown/unhandled error reason", go_to_sleep=False) 
+                    raise
          
         id_from_headers = self._get_id_from_header(response.headers)
         log.debug(f'HTTP response status: {response.status_code}')
@@ -1034,8 +1319,8 @@ class SearchEngine:
             error_msg = self._gen_response_err_msg(response_obj, ayfieStatus)
             log.debug(error_msg)
             if response.status_code >= 500:
-                with open(f"failed-batch-{response.status_code}-error.json", "wb") as f:
-                    f.write(dumps(data).encode('iso-8859-1'))
+                failed_batch_path = join(ROOT_OUTPUT_DIR, f"failed-batch-{response.status_code}-error.json")
+                Os.write_to_file_as_non_root_user(failed_batch_path, dumps(data).encode('iso-8859-1'))
             raise HTTPError(error_msg)
         if id_from_headers and not 'batches' in path:
             return id_from_headers
@@ -1203,7 +1488,7 @@ class SearchEngine:
         
 class Solr(SearchEngine):
 
-    def __init__(self, server, port, user=None, password=None, api_version=None, accessToken=None): 
+    def __init__(self, server, port, user=None, password=None, api_version=None, client_secret=None):     
         SearchEngine.__init__(self, server, port, "solr", {"Content-Type":"application/json"})
          
     def _response_format_converter(self, response_obj):
@@ -1264,7 +1549,7 @@ class Solr(SearchEngine):
         
 class Elasticsearch(Solr):
 
-    def __init__(self, server, port, user=None, password=None, api_version=None):
+    def __init__(self, server, port, user=None, password=None, api_version=None, client_secret=None):
         SearchEngine.__init__(self, server, port, "", {"Content-Type":"application/json"})
         
     def _get_response_object(self, response, verb, endpoint):
@@ -1303,9 +1588,10 @@ class Elasticsearch(Solr):
 
         
 class Inspector(SearchEngine):
-  
-    def __init__(self, server, port, user=None, password=None, api_version='v1', client_secret=None): 
-        SearchEngine.__init__(self, server, port, f"ayfie/{api_version}", {'Content-Type':'application/hal+json'}, user, password)
+        
+    def __init__(self, server, port, user=None, password=None, api_version='v1', client_secret=None):  
+        headers = {'Content-Type':'application/hal+json'}
+        SearchEngine.__init__(self, server, port, f"ayfie/{api_version}", headers, user, password, client_secret)
         
     def engine_is_healthy(self):
         try:
@@ -1715,19 +2001,19 @@ class DataSource():
         if self.data_source_is_prepared:
             return
         if self.config.data_source == None:
-            raise ValueError(f"Parameter 'data_source' is mandatory (but it can point to an empty source)")
+            raise ValueError(f"Parameter 'data_source' is mandatory (but it can be an empty string)")
         if self.config.data_source.startswith('http'):
-            FileHandlingTools().recreate_directory(DOWNLOAD_DIR)
+            Os.recreate_dir(DOWNLOAD_DIR)
             self._print(f"Starting to download '{self.config.data_source}'...")
-            self.config.data_source = WebContent().download(self.config.data_source, DOWNLOAD_DIR)
+            self.config.data_source = WebContent.download(self.config.data_source, DOWNLOAD_DIR)
         if not exists(self.config.data_source):
             raise ValueError(f"There is no file or directory called '{self.config.data_source}'")
         if isdir(self.config.data_source):
             self.data_dir = self.config.data_source
         elif isfile(self.config.data_source):
-            self.data_dir = FileHandlingTools().get_random_path(DATA_DIR)
+            self.data_dir = FileTools.get_random_path(DATA_DIR)
             self.created_temp_data_dir = True
-            FileHandlingTools().recreate_directory(self.data_dir)
+            Os.recreate_dir(self.data_dir)
             self._print("Starting to copy or to unzip data file...")
             if self._unzip(None, self.config.data_source, self.data_dir):
                 self._print("Done unzipping data file")
@@ -1750,17 +2036,17 @@ class DataSource():
 
     def __del__(self):
         if self.created_temp_data_dir:
-            delete_dir_tree(self.data_dir)
+            Os.del_dir(self.data_dir)
             
     def _get_file_type(self, file_path):
-        file_type, encoding = FileHandlingTools().get_file_type(file_path)
+        file_type, encoding = FileTools.get_file_type(file_path)
         if file_type == CSV:
             if self.config.treat_csv_as_text:
                 file_type = TXT
         return file_type, encoding
 
     def _unzip(self, file_type, file_path, unzip_dir):
-        return FileHandlingTools().unzip(file_path, unzip_dir, file_type)
+        return FileTools.unzip(file_path, unzip_dir, file_type)
 
     def _convert_pdf_to_text(self, file_path): 
         install_python_modules("PyPDF2")
@@ -1771,6 +2057,14 @@ class DataSource():
             for page_number in range(pdf.getNumPages()):
                 pages.append(pdf.getPage(page_number).extractText())
             return ' '.join(pages)
+            
+    def _convert_html_to_text(self, file_path, encoding): 
+        install_python_modules("html2text")
+        import html2text
+        with open(file_path, 'rb') as f:
+            h = html2text.HTML2Text()
+            h.ignore_links = True
+            return h.handle(f.read().decode(encoding))
 
     def _get_file_content(self, file_path_or_handle):
         if type(file_path_or_handle) is str:
@@ -1822,7 +2116,7 @@ class DataSource():
         
     def has_numeric_index_keys(self, mappings):
         try:
-            dummy = sum(list(mappings["fields"].values()) + [mappings["id"]])
+            _ = sum(list(mappings["fields"].values()) + [mappings["id"]])
             return True
         except TypeError:
             return False
@@ -1846,9 +2140,11 @@ class DataSource():
                     new_row[k] = "\n".join([row[x] + " " + x for x in values])
                 else:
                     new_row[k] = "\n".join([row[x] for x in values])
+                    if type(v) is list:
+                        new_row[k] = new_row[k].split(self.config.csv_list_value_delimiter)
             fields = {}
             for k,v in mappings["fields"].items():
-                if new_row[k]:
+                if (type(v) is not list and new_row[k]) or (type(v) is list and new_row[k][0]):
                     fields[k] = new_row[k]
             doc = {}
             if self.doc_fields_key:
@@ -1857,7 +2153,7 @@ class DataSource():
                 doc = fields
             doc["id"] = row[mappings['id']] if mappings['id'] else "seq-" + str(self.sequential_number)
             self.sequential_number += 1
-            doc = self._add_preprocess_field(doc)
+            doc = self._add_other_fields(doc)
             yield doc
  
     def _get_document(self, file_path, auto_detected_file_type):
@@ -1894,8 +2190,11 @@ class DataSource():
             }
         with open(file_path, **args) as f:
             if data_type == CSV:
-                for document in self._gen_doc_from_csv(f, self.config.csv_mappings, self.config.format):
-                    yield document
+                if self.config.ignore_csv: 
+                    log.info("Dropping file as not configured to process csv files")
+                else:
+                    for document in self._gen_doc_from_csv(f, self.config.csv_mappings, self.config.format):
+                        yield document                    
             elif data_type == JSON_LINES:
                 for document in self._get_file_content(f).split("\n"):
                     if len(document.strip()):
@@ -1920,6 +2219,12 @@ class DataSource():
                     log.info("Dropping file as not configured to process pdf files")
                 else:
                     yield self._construct_doc(self._gen_id_from_file_path(file_path), self._convert_pdf_to_text(file_path))
+            elif data_type == HTML:
+                id = self._gen_id_from_file_path(file_path)
+                if self.config.convert_html_files: 
+                    yield self._construct_doc(id, self._convert_html_to_text(file_path, encoding))
+                else:
+                    yield self._construct_doc(id, self._get_file_content(file_path))
             elif data_type in [WORD_DOC, XLSX, XML]:
                 log.info(f"Skipping '{file_path}' - conversion of {data_type} still not implemented")
             elif data_type == TXT:
@@ -1929,8 +2234,7 @@ class DataSource():
                 
     def _get_document_fragments(self, document):
         if self.config.fragmented_doc_dir:
-            if not exists(self.config.fragmented_doc_dir):
-                makedirs(self.config.fragmented_doc_dir) 
+            Os.make_dir(self.config.fragmented_doc_dir) 
         fields = [field for field in document['fields'] if field != "content"]
         if not "content" in document['fields']:
             raise DataFormatError("The document has no 'content' field under 'fields'")
@@ -1968,8 +2272,8 @@ class DataSource():
                 split_document["id"] = f'{document["id"]}_{str(i)}'
                 split_document["fields"]["content"] = fragments[i] + fragments[i+1]
                 if self.config.fragmented_doc_dir:
-                    with open(join(self.config.fragmented_doc_dir, split_document["id"] + ".json"), "wb") as f:
-                        f.write(dumps(split_document, indent=4).encode("utf-8"))
+                    Os.write_to_file_as_non_root_user(join(self.config.fragmented_doc_dir, split_document["id"] + ".json"), 
+                                        pretty_formated(split_document).encode("utf-8"))  
                 yield split_document
                    
     def extract_plain_text_email(self, email):
@@ -2026,10 +2330,10 @@ class DataSource():
                 
     def _get_documents_from_zipped_files(self, file_type, file_path, unzip_dir):
         try:
-            FileHandlingTools().recreate_directory(unzip_dir)
+            Os.recreate_dir(unzip_dir)
             log.debug(f"Created output directory '{unzip_dir}' for zip file '{file_path}'")
             self._unzip(file_type, file_path, unzip_dir)
-            for unzipped_file in FileHandlingTools().get_next_file(unzip_dir, None, self.config.file_extension_filter, 
+            for unzipped_file in FileTools.get_next_file(unzip_dir, None, self.config.file_extension_filter, 
                                                                    self.config.min_doc_size, self.config.max_doc_size):
                 file_type, self.detected_encoding = self._get_file_type(unzipped_file)
                 log.debug(f"'{unzipped_file}' auto detected as '{file_type}'")
@@ -2037,7 +2341,7 @@ class DataSource():
                     log.debug(f"'{file_path}' auto detected as '{file_type} and not excluded due to file type filter: {self.config.file_type_filter}")
                     continue
                 if file_type in ZIP_FILE_TYPES:
-                    sub_unzip_dir = FileHandlingTools().get_random_path(unzip_dir)
+                    sub_unzip_dir = FileTools.get_random_path(unzip_dir)
                     for document in self._get_documents_from_zipped_files(file_type, unzipped_file, sub_unzip_dir):
                         yield document
                 else:
@@ -2048,13 +2352,13 @@ class DataSource():
         except:
             raise
         finally:
-            FileHandlingTools().delete_directory(unzip_dir)
+            Os.del_dir(unzip_dir)
             log.debug(f"Deleting directory '{unzip_dir}'")
 
     def _get_unsplit_documents(self):
         self.file_size = {}
         self.file_paths = []
-        for file_path in FileHandlingTools().get_next_file(self.data_dir, None, self.config.file_extension_filter, 
+        for file_path in FileTools.get_next_file(self.data_dir, None, self.config.file_extension_filter, 
                                                            self.config.min_doc_size, self.config.max_doc_size):
             file_type, self.detected_encoding = self._get_file_type(file_path)
             log.debug(f"'{file_path}' auto detected as '{file_type}'")
@@ -2110,14 +2414,17 @@ class DataSource():
                 
     def _construct_doc(self, id, content):
         if self._drop_due_to_size(id, content):
-            return None
-            
+            return None  
         doc = {
             "id": id,
             "fields": {
                 "content": content
             }
         }
+        doc = self._add_other_fields(doc)
+        return doc
+        
+    def _add_other_fields(self, doc):
         if self.config.second_content_field:
             doc["fields"][self.config.second_content_field] = content
         if self.config.document_type:
@@ -2125,7 +2432,11 @@ class DataSource():
                 doc["fields"]['documentType'] = self.config.document_type
             else:
                 raise ConfigError(f"Unknown document type {document_type}")
-        doc = self._add_preprocess_field(doc)
+        if self.config.preprocess:
+            if self.config.preprocess in PREPROCESS_TYPES:
+                doc["fields"]['preprocess'] = self.config.preprocess
+            else:
+                raise ConfigError(f"Unknown preprocess type {preprocess}")
         if self.config.email_address_separator:  
             doc["fields"]['emailAddressSeparator'] = self.config.email_address_separator
         return doc
@@ -2165,15 +2476,23 @@ class SolrDataSource(DataSource):
         
 class EngineConnector():
 
-    def _init(self):
+    def _pre_init(self):
+        pass
+        
+    def _post_init(self):
         pass
     
     def __init__(self, config, data_source=None):
         self.config = config
         self.data_source = data_source
+        self._pre_init()
         args = [
-            self.config.server, self.config.port, self.config.user, 
-            self.config.password, self.config.api_version, self.config.client_secret
+            self.config.server, 
+            self.config.port, 
+            self.config.user, 
+            self.config.password, 
+            self.config.api_version, 
+            self.config.client_secret
         ]
         if self.config.engine == INSPECTOR:
             self.engine = Inspector(*args)
@@ -2183,7 +2502,7 @@ class EngineConnector():
             self.engine = Elasticsearch(*args)
         else:
             raise ValueError(f"Engine {self.config.engine} is not supported")
-        self._init()
+        self._post_init()
         
     def _report_time(self, operation, elapsed_second):        
         message = f"The {operation} operation took {str(elapsed_second)} seconds"
@@ -2217,461 +2536,63 @@ class EngineConnector():
             shuffle(all_ids)
         return all_ids
 
-        
-class Installer():
 
-    def __init__(self, installer_url, download_dir, install_dir, simulation=False, silent_installation=False):
-        self.installer_url = installer_url
-        self.download_dir = download_dir
+class DockerFile:
+
+    def __init__(self, install_dir, yaml_version=None, os=None, filename=None):
         self.install_dir = install_dir
-        self.simulation = simulation
-        self.silent_installation = silent_installation
+        self.yaml_version = yaml_version
+        self.os = HOST_OS
+        if os:
+            self.os = os
+        if not self.os in SUPPORTED_OS:
+            raise ValueError(f"'{self.os}' is not a valid OS") 
+        self.filename = filename
+        if not self.filename:
+            raise ValueError("Name of docker related file not set")
+        self.json_data = []
+        self.yaml_data = []
+        self.data_dict = {}
+
+    def _write_to_file(self, content, directory=None):
+        if not directory:
+            directory = self.install_dir if exists(self.install_dir) else "."
+        Os.make_dir(directory)
+        with change_dir(directory):
+            Os.write_to_file_as_non_root_user(self.filename, content.encode("utf-8"))
+        return join(directory, self.filename)
+
+           
+class DockerEnvFile(DockerFile):  
+
+    def __init__(self, install_dir, version, config, os=None, filename=None): 
+        self.version = version
+        if not filename:
+            filename = ".env"
+        super().__init__(install_dir, None, os, filename)
+        install_python_modules(['numpy', 'PyYAML:yaml']) 
+        self.config = config
         
     def _print(self, message):
-        if not self.silent_installation:
+        if not self.config.silent_mode:
             print(message)
+        log.info(message)
         
-    def _download_and_unzip_installer(self):
-        zipped_installer = WebContent().download(self.installer_url, self.download_dir)
-        fht = FileHandlingTools()
-        if not fht.unzip(zipped_installer, self.install_dir):  
-            raise BadZipFileError(f'File "{zipped_installer}" is not a zip file')
-       
-    def prerequisites(self, groups):
-        raise NotImplementedError
-        
-    def install(self):
-        raise NotImplementedError
-        
-    def _add_custom_files(self, custom_files):
-        for from_file in custom_files:
-            destination_file = join(self.install_dir, from_file)
-            if exists(destination_file):
-                continue
-            if exists(from_file):
-                copy(from_file, destination_file)
-            else:
-                raise FileNotFoundError(f"Could not find '{from_file}' or '{destination_file}'")
-            
-
-class InspectorInstaller(Installer):
-
-    def _init(self):
-        pass
-
-    def __init__(self, installer_url, download_dir, install_dir, docker_registry, docker_compose_yml_files=[], 
-                       files_to_copy=[], dot_env_file_path=None, simulation=False, self_sign_certificate={}, version=None):
-        super().__init__(installer_url, download_dir, install_dir, simulation)
-        self.dot_env_file_path = dot_env_file_path
-        self.docker_registry = docker_registry
-        self.docker_compose_yml_files = docker_compose_yml_files
-        self.files_to_copy = files_to_copy
-        self.self_sign_certificate = self_sign_certificate
-        self.version = version
-        self._init()
-        
-    def _restart_server_if_required(self):
-        pass
-        
-    def _choco_is_required(self):
-        return False
-
-    def prerequisites(self, groups):
-        self.restart_might_be_required = False
-        self._print("Preparing user and host...")
-        self._prepare_user(groups)
-        self._prepare_host()
-        if self._docker_is_installed():
-            self._print("Docker already installed...")
-        else:
-            self._print("Installing docker...")
-            self._install_docker()
-            self.restart_might_be_required = True
-        if self._docker_compose_is_installed():
-            self._print("Docker-compose already installed...")
-        else:
-            if self._choco_is_required():
-                if self._choco_is_installed():
-                    self._print("Choco already installed...")
-                else:
-                    self._print("Installing choco...")
-                    self._install_choco()
-                    self.restart_might_be_required = True
-        if not self._docker_compose_is_installed():
-            if self.restart_might_be_required:
-                self._restart_server_if_required()
-            self._print("Installing docker-compose...")
-            self._install_docker_compose()       
-        self._print("Starting docker...")
-        self._start_docker()    
-        
-    def install(self):
-        self._print("Downloading and unzipping installer...")
-        self._download_and_unzip_installer()
-        if self.files_to_copy:
-            self._print("Copying in custom files...")
-            for file_to_copy in self.files_to_copy:
-                copy(file_to_copy, self.install_dir)
-        
-    def customize(self):
-        self._print("Adding custom files (if any)...")
-        custom_files = []
-        for custom_file in self.docker_compose_yml_files:
-            custom_files.append(custom_file)
-        if self.dot_env_file_path:
-            custom_files.append(self.dot_env_file_path)
-        self._add_custom_files(custom_files)
-        
-    def _get_file_pair(self, template_file_name):
-        return (template_file_name, template_file_name.replace("-template", ""))
-    
-    def _configure_gatekeeper(self):
-        if self.self_sign_certificate: 
-            self._print("Configuring Gatekeeper...")
-            if is_earlier_version(self.version, "2.8.1"):
-                file_pairs = [
-                    self._get_file_pair(CONFIG_TEMPLATE)        
-                ]
-            else:
-                file_pairs = [
-                    self._get_file_pair(FRONTEND_CONFIG_TEMPLATE),
-                    self._get_file_pair(SECURE_API_CONFIG_TEMPLATE)
-                ]
-            with change_dir(join(self.install_dir, SECURITY_ASSETS_DIR)):  
-                for pair in file_pairs:
-                    from_file = pair[0]
-                    to_file = pair[1]
-                    execute(f"cp {from_file} {to_file}")
-                    with open(to_file, "r") as f:
-                        content = f.read()
-                    content = content.replace("auth.localhost", self.self_sign_certificate['domain'])
-                    with open(to_file, "w") as f:
-                        f.write(content)
-
-    def _create_self_sign_certificate(self):
-        if self.self_sign_certificate:
-            self._print("Creating self sign certificate...")
-            x = self.self_sign_certificate
-            with change_dir(join(self.install_dir, SECURITY_ASSETS_DIR)):
-                execute(f"./create_certs.sh -c {x['country']} -st {x['state']} -l {x['city']} -o {x['company']} -cn {x['domain']}")                 
-       
-    def post_install_operations(self):
-        self._configure_gatekeeper()
-        self._create_self_sign_certificate()
-        
-    def _docker_is_installed(self):
-        if self.simulation:
-            return True
-        response = execute("docker -v", return_response=True, ignore_error=True)
-        if response.startswith("Docker version"):
-            return True
-        return False
-        
-    def _docker_compose_is_installed(self):
-        if self.simulation:
-            return True
-        response = execute("docker-compose -v", return_response=True, ignore_error=True)
-        if response.startswith("docker-compose version"):
-            return True
-        return False
-        
-    def _install_docker(self):
-        raise NotImplementedError
-
-    def uninstall_docker(self):
-        raise NotImplementedError
-            
-    def _uninstall_docker(self):
-        raise NotImplementedError
-
-    def _user_already_exists(self, user):
-        raise NotImplementedError 
-            
-    def _group_already_exists(self, group):
-        raise NotImplementedError 
-        
-    def _add_user_to_user_groups(self, user, groups):     
-        raise NotImplementedError
-            
-    def _is_running_as_root_or_in_elevated_mode(self):
-        raise NotImplementedError
-        
-    def _get_actual_user(self):
-        raise NotImplementedError
-        
-    def _prepare_user(self, groups):
-        if not self._is_running_as_root_or_in_elevated_mode():
-            raise ConfigError(f"The installation feature require that one run as root (sudo)/admin") 
-        formal_user = getuser()
-        actual_user = self._get_actual_user()
-        user = formal_user
-        if formal_user == "root" and actual_user and len(actual_user):
-            user = actual_user
-        log.info(f"Formal user: '{formal_user}', Actual user: '{actual_user}', User: '{user}'")
-        self._add_user_to_user_groups(user, groups)
-            
-    def _update_config_file(self, filepath, expression):
-        settings = [expression]
-        with open(filepath, "r") as f:
-            for line in f.read().split('\n'):
-                if line.startswith(expression.split('=')[0]):
-                    continue
-                else:
-                    settings.append(line)
-        with open(filepath, "w") as f:
-            f.write('\n'.join(settings))
-       
-    def _install_docker_compose(self, version=None):
-        raise NotImplementedError        
-
- 
-class LinuxInspectorInstaller(InspectorInstaller):
-
-    def _init(self):
-        linux_distro, version = get_linux_distro_and_version()
-        log.info(f"The OS of the host is {linux_distro} {version}")
-        if linux_distro in DISTROS_USING_YUM:
-            self.packet_manager = YumPackageManager(linux_distro)
-            log.info(f"Instanciated a yum package manager.")
-        elif linux_distro in DISTROS_USING_APT_GET:
-            log.info(f"Instanciated an aft-get package manager.")
-            self.packet_manager = AptGetPackageManager(linux_distro)
-        elif linux_distro in DISTROS_USING_DNF:
-            log.info(f"Instanciated a dnf package manager.")
-            self.packet_manager = AptGetPackageManager(linux_distro)
-        else:
-            raise ValueError(f"There is no packet manager mapping for linux distro '{linux_distro}'")
-
-    def _prepare_host(self):
-        for expression in SYSCTL_SETTINGS:
-            self._update_config_file(SYSCTL_PATH, expression)
-        execute("sysctl -p")
-
-    def _install_docker(self):
-        self.packet_manager.install_docker()
-
-    def uninstall_docker(self):
-        raise NotImplementedError
-        
-    def _start_docker(self):
-        execute("service docker start")
-        result = execute("systemctl enable docker", return_response=True)
-        
-    def _install_docker_compose(self, version=None):
-        ver = "1.24.0"
-        if version:
-            ver = version
-        link = f"https://github.com/docker/compose/releases/download/{ver}/docker-compose-$(uname -s)-$(uname -m)"
-        execute(f'curl -L "{link}" -o {DOCKER_COMPOSE_EXE}')
-        
-    def post_install_operations(self): 
-        self._print("Making scripts executable...")
-        with change_dir(self.install_dir):
-            for item in ["start-ayfie.sh", "stop-ayfie.sh", "ayfie-logs.sh"]:
-                execute(f"chmod +x {item}") 
-        if exists(DOCKER_COMPOSE_EXE):
-            execute(f"chmod +x {DOCKER_COMPOSE_EXE}")
-        security_assets_dir = join(self.install_dir, SECURITY_ASSETS_DIR)
-        if exists(security_assets_dir):
-            with change_dir(security_assets_dir):
-                for item in ["create_certs.sh"]:
-                    execute(f"chmod +x {item}") 
-        super().post_install_operations()
+    def _add_docker_compose_yml_file(self, enable_feature, custom_file):       
+        if enable_feature:
+            if not custom_file in self.docker_compose_custom_files:
+                self.docker_compose_custom_files.append(custom_file)
                 
-    def _user_already_exists(self, user):
-        try:
-            getpwnam(user)
-            log.debug(f'User "{user}" exists')
-            return True
-        except KeyError:
-            log.debug(f'User "{user}" does not exists')
-            return False
-            
-    def _group_already_exists(self, group):
-        try:
-            getgrnam(group)
-            log.debug(f'User group "{group}" exists')
-            return True
-        except KeyError:
-            log.debug(f'User group "{group}" does not exist')
-            return False
-
-    def _add_user_to_user_groups(self, user, groups):
-        for group in groups:
-            if not self._group_already_exists(group):
-                cmd = f"groupadd {group}"
-                log.debug(f'Creating group: "{cmd}"')
-                execute(cmd)
-            cmd = f"usermod -a -G {group} {user}"
-            log.debug(f'Adding member to group: "{cmd}"')
-            execute(cmd) 
-            
-    def _get_actual_user(self):
-        return environ['SUDO_USER']
-
-    def _is_running_as_root_or_in_elevated_mode(self):
-        if geteuid() == 0:  
-            return True
+    def _remove_docker_compose_yml_file(self, custom_file, first_version_to_not_remove=None):
+        remove_file = False
+        if first_version_to_not_remove:
+            if self.version and is_earlier_version(self.version, first_version_to_not_remove):
+                remove_file = True
         else:
-            return False  
-
-class WindowsInspectorInstaller(InspectorInstaller):  
-
-    def _prepare_host(self):
-        pass
-        
-    def _install_docker(self):
-        execute("powershell.exe Find-PackageProvider -Name 'Nuget' -ForceBootstrap -IncludeDependencies")
-        execute("powershell.exe Install-Module DockerMsftProvider -Force")
-        execute("powershell.exe Install-Package Docker -ProviderName DockerMsftProvider -Force")
-       
-    def _start_docker(self):
-        if self.simulation:
-            self._print("Simulating Docker start up")
-        else:    
-            execute("powershell.exe Start-Service Docker")
-        
-    def _restart_server_if_required(self):
-        input("Press Enter to do a required restart. Once back up again, run the same command line again.")
-        execute("powershell.exe Restart-Computer")
-        sys.exit()
-        
-    def _install_docker_compose(self, version=None):
-        if not self.simulation:
-            execute("powershell.exe Set-ExecutionPolicy Bypass -Scope Process -Force") 
-            execute("powershell.exe Invoke-Expression((new-object net.webclient).DownloadString('https://chocolatey.org/install.ps1'))")
-            execute("choco install docker-compose -y")
+            remove_file = True
+        if remove_file and custom_file in self.docker_compose_custom_files:
+            self.docker_compose_custom_files.remove(custom_file)
             
-    def _choco_is_required(self):
-        return True
-            
-    def _choco_is_installed(self):
-        if self.simulation:
-            return True
-        response = execute("choco -v", return_response=True, ignore_error=True)
-        if response.startswith("0."):
-            return True
-        return False   
-
-    def _install_choco(self):
-        execute('powershell.exe -NoProfile -InputFormat None -ExecutionPolicy Bypass -Command "iex ((New-Object System.Net.WebClient).DownloadString(\'https://chocolatey.org/install.ps1\'))" && SET "PATH=%PATH%;%ALLUSERSPROFILE%\chocolatey\bin"')
-        
-    def _user_already_exists(self, user):
-        raise NotImplementedError
-        
-    def _group_already_exists(self, group):
-        raise NotImplementedError
-        
-    def _add_user_to_user_groups(self, user, groups):
-        groups_str = '","'.join(groups)
-        log.debug(f'Adding user "{user}" to the groups "{groups_str}" is skipped on Windows')
-        
-    def _get_actual_user(self):
-        return getuser()
-        
-    def _is_running_as_root_or_in_elevated_mode(self):
-        if windll.shell32.IsUserAnAdmin() != 0:  
-            return True
-        else:
-            return False
-
-class RemoteServer():
-
-    def __init__(self, server, username, port=22):
-        install_python_modules(["paramiko", "scp"])
-        import paramiko
-        import scp
-        self.ssh = paramiko.SSHClient()
-        self.ssh.load_system_host_keys()
-        self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        params = {
-            "hostname": server,
-            "username": username,
-            "port": port
-        }
-        try: 
-            self.ssh.connect(**params)
-        except paramiko.ssh_exception.SSHException as e:
-            raise paramiko.ssh_exception.SSHException(f"Pageant, putty or whatever ssh tool used does not currently seem to have access to the private key: '{str(e)}'")
-
-    def _execute_command(self, command):
-        stdin, stdout, stderr = self.ssh.exec_command(command)
-        return stdout.read()
-
-    def find_files(self, start_directory, file_pattern):
-        response = self._execute_command(f'find {start_directory} -name "{file_pattern}"')
-        return [ line.decode('utf-8') for line in response.splitlines()]
-
-    def copy_file_from_remote(self, from_path, to_path, max_numb_of_retries=5):
-        import scp
-        retry = 0
-        while retry < max_numb_of_retries:
-            retry += 1
-            with scp.SCPClient(self.ssh.get_transport()) as scp_client:
-                try:
-                    scp_client.get(from_path, to_path)
-                except scp.SCPException as e:
-                    pause = 60 * retry
-                    print(f"Exception: '{str(e)}'. Trying again in {pause} seconds")
-                    sleep(pause)
-                
-    def copy_file_to_remote(self, from_path, to_path):
-        import scp
-        with scp.SCPClient(self.ssh.get_transport()) as scp_client:
-            scp_client.put(from_path, to_path)
-            
-
-class Operational(EngineConnector):
-
-    def _init(self):
-        install_python_modules(['numpy', 'PyYAML:yaml']) 
-        import numpy
-        if self.config.install_dir:
-            self.install_dir = self.config.install_dir
-        else:
-            try:
-                self.install_dir = self._extract_version_number()
-            except ValueError:
-                self.install_dir = None
-        self.self_sign_certificate = {}
-        self.lets_encrypt_certificate = {}
-        if self.config.security:
-            self.self_sign_certificate = self._get_security_parameters(self.config.security, SELF_SIGNED_CERTIFICATE,
-                                                                        ["domain", "country", "state", "city", "company"])
-            self.lets_encrypt_certificate = self._get_security_parameters(self.config.security, LETS_ENCRYPT_CERTIFICATE,
-                                                                        ["domain", "acme_domains", "acme_email"])
-            if str(self.engine.port) != "443": 
-                raise ValueError("The port has to be set to 443 when security is enabled (both 80 and 443 will be used)")
-        else:
-            self.self_sign_certificate = {}
-            self.lets_encrypt_certificate = {}
-        self.host_os = get_host_os()
-        if not self.host_os in [OS_WINDOWS, OS_LINUX]:
-            raise OSError(f"'{os}' is not a supported operation system")
-        self.docker_registry = None
-        self.script_extension = None
-        if self.host_os == OS_LINUX:
-            self.docker_registry = LINUX_DOCKER_REGISTRY
-            self.script_extension = "sh"
-        elif self.host_os == OS_WINDOWS:
-            self.docker_registry = WIN_DOCKER_REGISTRY 
-            self.script_extension = "cmd"
-        self.docker_compose_custom_files = self.config.docker_compose_yml_files
-        self._add_docker_compose_custom_file(self.config.enable_frontend, DOCKER_COMPOSE_FRONTEND_FILE)
-        self._add_docker_compose_custom_file(self.config.security, DOCKER_COMPOSE_SECURITY_FILE)
-        self._add_docker_compose_custom_file(self.self_sign_certificate, DOCKER_COMPOSE_SELF_SIGNED_FILE)
-        if self.host_os == OS_WINDOWS:
-            self._remove_docker_compose_custom_file(DOCKER_COMPOSE_FRONTEND_FILE, "2.6.1")
-            self._remove_docker_compose_custom_file(DOCKER_COMPOSE_SECURITY_FILE)
-            self._remove_docker_compose_custom_file(DOCKER_COMPOSE_SELF_SIGNED_FILE)   
-        elif self.host_os == OS_LINUX:
-            self._remove_docker_compose_custom_file(DOCKER_COMPOSE_SECURITY_FILE, "2.8.0")
-            self._remove_docker_compose_custom_file(DOCKER_COMPOSE_SELF_SIGNED_FILE, "2.8.0")
-        self.gdpr_enabled = False
-        self.email_treading_enabled = False
-        self.application_custom_file_content = ""
-        self.yml_content_as_json = {}
-        
     def _get_security_parameters(self, security, certificate_type, valid_keys):
         parameters = {}
         if security:
@@ -2690,26 +2611,1461 @@ class Operational(EngineConnector):
                     value = ",".join(value)
                 parameters[key] = value
         return parameters
+        
+    def _prepare_install_or_env_file_creation(self):
+        self.self_sign_certificate = {}
+        self.lets_encrypt_certificate = {}
+        if self.config.security:
+            self.self_sign_certificate = self._get_security_parameters(self.config.security, SELF_SIGNED_CERTIFICATE,
+                                                                        ["domain", "country", "state", "city", "company"])
+            self.lets_encrypt_certificate = self._get_security_parameters(self.config.security, LETS_ENCRYPT_CERTIFICATE,
+                                                                        ["domain", "acme_domains", "acme_email"])
+            if str(self.config.port) != "443": 
+                raise ValueError("The port has to be set to 443 when security is enabled (both 80 and 443 will be used)")
+        is_primary_node = False 
+        self.is_processor_node = False 
+        if self.config.primary_node and self.config.processor_node:
+            raise ValueError("A node can be a primary node or a processor node, not both")
+        if self.config.processor_node and not self.config.primary_node_IP_or_FQDN:
+            raise ValueError("A processor node must be configured with the IP or the FQDN of the primary node")
+        if is_earlier_version(self.version, "2.9.0"): 
+            self._print("Starting a single node installation..")
+        elif self.config.primary_node:        
+            is_primary_node = True
+            self._print("Starting a primary node installation..")
+        elif self.config.processor_node:
+            self.is_processor_node = True
+            self._print(f"Starting a processor node installation (primary node at '{self.config.primary_node_IP_or_FQDN}')...")
+        else:
+            self._print("Starting a single node installation...") 
+        self.docker_compose_custom_files = self.config.docker_compose_yml_files 
+        self._add_docker_compose_yml_file(self.config.external_network, DOCKER_COMPOSE_NETWORK_FILE)
+        if self.is_processor_node:
+            self._add_docker_compose_yml_file(self.is_processor_node, DOCKER_COMPOSE_PROCESSOR_FILE)
+            self._remove_docker_compose_yml_file(DOCKER_COMPOSE_FILE)
+        else:
+            self._add_docker_compose_yml_file(self.config.enable_frontend, DOCKER_COMPOSE_FRONTEND_FILE)
+            self._add_docker_compose_yml_file(self.config.enable_grafana, DOCKER_COMPOSE_METRICS_FILE)
+            self._add_docker_compose_yml_file(self.config.enable_feeder, DOCKER_COMPOSE_FEEDER_FILE)
+            self._add_docker_compose_yml_file(self.config.security, DOCKER_COMPOSE_SECURITY_FILE)
+            self._add_docker_compose_yml_file(self.self_sign_certificate, DOCKER_COMPOSE_SELF_SIGNED_FILE)
+            self._add_docker_compose_yml_file(is_primary_node, DOCKER_COMPOSE_PRIMARY_FILE)
+        if self.os == OS_WINDOWS:
+            self._remove_docker_compose_yml_file(DOCKER_COMPOSE_FRONTEND_FILE, "2.6.1")
+            self._remove_docker_compose_yml_file(DOCKER_COMPOSE_SECURITY_FILE)
+            self._remove_docker_compose_yml_file(DOCKER_COMPOSE_SELF_SIGNED_FILE)   
+            self._remove_docker_compose_yml_file(DOCKER_COMPOSE_METRICS_FILE)
+        elif self.os == OS_LINUX:
+            self._remove_docker_compose_yml_file(DOCKER_COMPOSE_SECURITY_FILE, "2.8.0")
+            self._remove_docker_compose_yml_file(DOCKER_COMPOSE_SELF_SIGNED_FILE, "2.8.0")
+            self._remove_docker_compose_yml_file(DOCKER_COMPOSE_METRICS_FILE, "2.0.3")
+        self._remove_docker_compose_yml_file(DOCKER_COMPOSE_FEEDER_FILE, "2.10.0")
+        self.report_container_status()
+        
+    def report_container_status(self):
+        enabled_components = []
+        disabled_components = []
+        components = [
+            (DOCKER_COMPOSE_FRONTEND_FILE, "Frontend"), 
+            (DOCKER_COMPOSE_SECURITY_FILE, "Security"), 
+            (DOCKER_COMPOSE_METRICS_FILE, "Grafana"), 
+            (DOCKER_COMPOSE_FEEDER_FILE, "Feeder (Enrichor)"),            
+        ]
+        for component in components:
+            if component[0] in self.docker_compose_custom_files:
+                enabled_components.append(component[1])
+            else:
+                disabled_components.append(component[1])
+        self._report_component_status(enabled_components, "enabled")
+        self._report_component_status(disabled_components, "disabled")
 
-    def _add_docker_compose_custom_file(self, enable_feature, custom_file):       
+    def _report_component_status(self, component_list, component_status):
+        if len(component_list):
+            msg = ""
+            if len(component_list) > 2: 
+                msg = f"{', '.join(component_list[:-2])}, "
+            msg += f"{' and '.join(component_list[-2:])} {component_status}"
+            self._print(msg)
+        
+    def add_variable(self, name, value):
+        self.data_dict[name] = value
+        
+    def _get_mem_limit(self, limit_64_ram, limit_128_ram, ram_on_host):
+        import numpy
+        coefs, _, _, _, _ = numpy.polyfit([64, 128], [limit_64_ram, limit_128_ram], deg=1, full=True)
+        mem_limit = int(round(ram_on_host * coefs[0] + coefs[1]))
+        if mem_limit < self.minimum_ram_allocation:
+            mem_limit = self.minimum_ram_allocation
+        return mem_limit
+        
+    def _gen_mem_limits(self):
+        main_version = self.version.split(".")[0]
+        if not main_version in ["1", "2"]:
+            raise ValueError(f"There is no main version number '{str(main_version)}' of the ayfie Inspector")
+        self.minimum_ram_allocation = 1
+        freed_up_ram = 0
+        for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
+            if variable == "SUGGEST_MEM_LIMIT" and self.config.no_suggest_index:
+                freed_up_ram += self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host)
+                freed_up_ram -= self.minimum_ram_allocation
+            if variable == "ELASTICSEARCH_MEM_LIMIT":
+                mem_limit = self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host)
+                if mem_limit > ELASTICSEARCH_MAX_MEM_LIMIT:
+                    freed_up_ram += mem_limit - ELASTICSEARCH_MAX_MEM_LIMIT
+        mem_limits = []
+        for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
+            if self.config.no_suggest_index and "SUGGEST" in variable:
+                mem_limit = self.minimum_ram_allocation
+            else:
+                mem_limit = self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host + freed_up_ram)
+                if variable == "ELASTICSEARCH_MEM_LIMIT" and mem_limit > ELASTICSEARCH_MAX_MEM_LIMIT:
+                    mem_limit = ELASTICSEARCH_MAX_MEM_LIMIT
+                if variable == "ELASTICSEARCH_MX_HEAP" and mem_limit > ELASTICSEARCH_MAX_MX_HEAP:
+                    mem_limit = ELASTICSEARCH_MAX_MX_HEAP
+            self.add_variable(variable, f"{mem_limit}G") 
+        
+    def _get_lets_encrypt_certificate_dot_env_settings(self):
+        if self.lets_encrypt_certificate: 
+            for key in self.lets_encrypt_certificate:
+                value = self.lets_encrypt_certificate[key]
+                if type(value) is list:
+                    value = ",".join(value)
+                self.add_variable(key.upper(), value)
+        
+    def _get_self_sign_certificate_dot_env_settings(self):
+        if self.self_sign_certificate:
+            if "domain" in self.self_sign_certificate:
+                self.add_variable("DOMAIN", self.self_sign_certificate["domain"])
+        
+    def _get_processor_node_dot_env_settings(self):
+        if self.is_processor_node:
+            self.add_variable("SERVICES_SUGGEST_URL", f"http://{self.config.primary_node_IP_or_FQDN}:9090")
+            self.add_variable("SERVICES_RECOGNITION_URL", f"http://{self.config.primary_node_IP_or_FQDN}:2323")
+            self.add_variable("MESSAGING_HOST", self.config.primary_node_IP_or_FQDN)
+            self.add_variable("ELASTICSEARCH_HOST", self.config.primary_node_IP_or_FQDN)
+        
+    def order_yml_file_list(self, unordered_yml_file_list):
+        ordered_list = []
+        tail_items = []
+        unordered_yml_file_list = list(set(unordered_yml_file_list))
+        for item in unordered_yml_file_list:
+            if "security.yml" in item:
+                tail_items = [item] + tail_items
+            elif "signed.yml" in item:
+                tail_items = tail_items + [item]
+            else:
+                ordered_list.append(item)
+        return ordered_list + tail_items
+        
+    def _merge_yaml_dict_structures(self, existing, addition, path=None):
+        if path is None: 
+            path = []
+        for key in addition:
+            if key in existing:
+                if isinstance(existing[key], dict) and isinstance(addition[key], dict):
+                    self._merge_yaml_dict_structures(existing[key], addition[key], path + [str(key)])
+                elif existing[key] == addition[key]:
+                    pass
+                else:
+                    raise Exception('Conflict at %s' % '.'.join(path + [str(key)]))
+            else:
+                existing[key] = addition[key]
+        return existing  
+        
+    def _gen_content(self):
+        custom_files = [DOCKER_COMPOSE_FILE]
+        docker_compose_custom_files = self.docker_compose_custom_files[:]
+        if self.config.enable_gdpr or self.config.enable_frontend:
+            docker_compose_custom_files.append(DOCKER_COMPOSE_CUSTOM_FILE)
+        self.add_variable("COMPOSE_FILE", self.order_yml_file_list(docker_compose_custom_files))
+        if self.config.security:
+            self.add_variable("AYFIE_PORT", "80")
+            self.add_variable("AYFIE_HTTPS_PORT", "443")
+        else:
+            self.add_variable("AYFIE_PORT", self.config.port)
+        self._gen_mem_limits()
+        self._get_lets_encrypt_certificate_dot_env_settings()
+        self._get_self_sign_certificate_dot_env_settings()
+        self._get_processor_node_dot_env_settings()
+
+    def generate_file(self):
+        self._prepare_install_or_env_file_creation()
+        self._gen_content()
+        if self.os == OS_LINUX:
+            delimiter = ":"
+        elif self.os == OS_WINDOWS:
+            delimiter = ";"   
+        content = ""
+        for name in self.data_dict:
+            value = self.data_dict[name]
+            if type(value) is list:
+                value = delimiter.join(value)
+            content += f"{name}={value}\n"
+        return self._write_to_file(content, self.install_dir)        
+
+        
+class DockerYamlFile(DockerFile):
+
+    def __init__(self, install_dir, yaml_version=None, os=None, filename=None):
+        install_python_modules(['numpy', 'PyYAML:yaml'])
+        super().__init__(install_dir, yaml_version, os, filename)
+        
+    def _convert_json_to_yaml(self, json_content):
+        import yaml
+        return yaml.dump(json_content, default_flow_style=False)
+
+    def _write_json_as_yaml_to_file(self, json_content): 
+        self._write_yaml_to_file(self, self._convert_json_to_yaml(json_content, default_flow_style=False))
+                  
+    def _write_yaml_to_file(self, yml_content, directory=None):
+        if yml_content:
+            self._write_to_file(f"version: '{self.yaml_version}'\n{yml_content}", directory)
+        
+    def generate_file(self):
+        self._write_yaml_to_file(self._get_yml_content())
+        
+    def _get_yml_content(self):
+        raise NotImplementedError
+        
+
+class DockerComposeCustomYamlFile(DockerYamlFile):
+
+    def __init__(self, install_dir, yaml_version=None, os=None, filename=None):
+        super().__init__(install_dir, yaml_version, os, DOCKER_COMPOSE_CUSTOM_FILE)
+        self.data = []
+        
+    def add_file_copy_operation(self, service, external_file_path, internal_file_path):
+        self.data.append({
+            "service": service,
+            "external_file_path": external_file_path, 
+            "internal_file_path": internal_file_path
+        })
+        
+    def _get_yml_content(self):
+        indent = "  "
+        content = "services:\n"
+        for copy_operation in self.data:
+            content += f'{indent}{copy_operation["service"]}:\n'
+            content += f'{indent}{indent}volumes:\n'
+            content += f'{indent}{indent}{indent}- {copy_operation["external_file_path"]}:{copy_operation["internal_file_path"]}\n'
+        return content
+
+        
+class ApplicationYamlFile(DockerYamlFile):
+
+    def __init__(self, install_dir, yaml_version=None, os=None, filename=None):
+        super().__init__(install_dir, yaml_version, os, APPLICATION_CUSTOM_FILE)
+        self.dockerComposeCustomYamlFile = None
+        self.container_names = []
+
+    def _configure_extractors_to_skip(self, extractors_to_skip):
+        self.json_data.append({
+            "digestion": {
+                "processing": {
+                    "entityExtraction": {
+                        "skipExtractors": extractors_to_skip
+                    }
+                }
+            }
+        })
+        
+    def _configure_email_treading(self, skipCloneEvaluation, skipMailEvaluation, mailTreadEvaluation):
+        self.json_data.append({
+            "digestion": {
+                "processing": {
+                    "cloneEvaluation": {
+                        "skip": skipCloneEvaluation
+                    },
+                    "mailEvaluation": {
+                        "skip": skipMailEvaluation
+                    },
+                    "mailThreadEvaluation": {
+                        "skip": mailTreadEvaluation
+                    }
+                }
+            }
+        })
+        
+    def _configure_admin_page(self, hideNavbar, admin_visible, jobs, collections):
+        self.json_data.append({
+            "frontendConfig": {
+                "hideNavbar": hideNavbar, 
+                "adminConfig" : {
+                    "visible": admin_visible,
+                    "jobs": jobs,
+                    "collections": collections
+                }
+            }
+        })
+        
+    def _read_yaml_segment_from_file(self, filename):
+        with change_dir(self.install_dir):
+            with open(filename, "rb") as f:
+                self.yaml_data.append(f.read().decode("utf-8"))
+                
+    def _get_yml_content(self):
+        content = ""
+        if self.json_data or self.yaml_data:
+            indent = "  "
+            content += f"services:\n"
+            for json_data in self.json_data:
+                content += self._convert_json_to_yaml(json_data) + "\n"
+            for yaml_data in self.yaml_data:
+                content += yaml_data
+        return content
+ 
+    def _copy_application_file_into_container(self, container_name):
+        if container_name in self.container_names:
+            return
+        self.container_names.append(container_name)
+        if not self.dockerComposeCustomYamlFile:
+            self.dockerComposeCustomYamlFile = DockerComposeCustomYamlFile(self.install_dir, self.yaml_version, os=self.os)
+        if self.os == OS_LINUX:
+            from_path = f"./{APPLICATION_CUSTOM_FILE}"
+            if container_name == "api":
+                to_path = "/home/dev/restapp/application-custom.yml"
+            elif container_name == "frontend":
+                to_path = "/dist/browser/custom-config/application-custom.yml"
+        elif self.os == OS_WINDOWS: 
+            from_path = f"./{DOCKER_WINDOW_CONFIG_DIR}"
+            to_path = "c:\\ayfie\\config" 
+        else:
+            raise ValueError(f"'{self.os}' is not a valid OS")
+        self.dockerComposeCustomYamlFile.add_file_copy_operation(container_name, from_path, to_path)
+        
+    def enable_gdpr(self):
+        self._read_yaml_segment_from_file(APPL_PII_TEMPLATE_FILE)      
+        self._configure_extractors_to_skip([]) 
+        self._copy_application_file_into_container("api")
+        
+    def enable_email_treading(self):
+        self._configure_email_treading(False, False, False)
+        self._copy_application_file_into_container("api")
+        
+    def enable_admin_page(self):
+        self._configure_admin_page(False, True, True, True)
+        self._copy_application_file_into_container("frontend")
+
+    def generate_file(self):
+        if self.os == OS_WINDOWS:
+            self._write_yaml_to_file(self._get_yml_content(), join(self.install_dir, DOCKER_WINDOW_CONFIG_DIR))
+        elif self.os == OS_LINUX:
+            self._write_yaml_to_file(self._get_yml_content())
+        else:
+            raise ValueError(f"'{self.os}' is not a supported OS")
+        if self.dockerComposeCustomYamlFile:
+            self.dockerComposeCustomYamlFile.generate_file()                 
+
+
+class Application:
+
+    def __init__(self, simulate_execution=False, simulation_config={}, silent=False):
+        self.count = 0
+        self.simulate_execution = simulate_execution
+        self.simulation_config = deepcopy(simulation_config)
+        self.original_simulation_config = deepcopy(simulation_config)
+        self.silent = silent
+        self.requires_restart = False
+        if self.simulate_execution:
+            if not self.simulation_config:
+                self.simulation_config["installed"] = False
+                self.simulation_config["running"] = False
+                self.simulation_config["os"] = HOST_OS
+                self.simulation_config["linux_distro"] = None
+                if HOST_OS == OS_LINUX:
+                    self.simulation_config["linux_distro"], _ = Os.get_linux_distro_and_version()
+            self._print(f"Simulation turned ON for {self.APPLICATION_NAME} with these initial simulated states/settings:")
+            self._pretty_print(self.simulation_config)
+            self.os = self.simulation_config["os"]
+            self.linux_distro = self.simulation_config["linux_distro"] 
+        else:
+            self.os = HOST_OS
+            if self.os == OS_LINUX:
+                self.linux_distro, _ = Os.get_linux_distro_and_version()
+            else:
+                self.linux_distro = None
+        if self.linux_distro:
+            if self.linux_distro in DISTROS_USING_APT:
+                self.package_manager = APT_MANAGER
+            elif self.linux_distro in DISTROS_USING_YUM:
+                self.package_manager = YUM_MANAGER
+            else:
+                raise NotImplementedError(f"Distro '{self.linux_distro}' is not supported")
+                
+    def install(self):
+        if self._install_is_verifiable() and self._is_installed():
+            self._print(f"{self.APPLICATION_NAME} already installed...")
+            return
+        self._prerequisites()
+        self._install()
+        self.simulation_config["installed"] = True
+        if not self.requires_restart:
+            if self._install_is_verifiable() and not self._is_installed():
+                raise BadStateError(self._get_logged_msg(f"Failed to install {self.APPLICATION_NAME}"))
+        self._post_install()
+        
+    def _install(self):
+        raise NotImplementedError()
+        
+    def _install_is_verifiable(self):
+        return True
+        
+    def _running_is_verifiable(self):
+        return False
+       
+    def _is_installed(self):
+        raise NotImplementedError
+        
+    def _prerequisites(self):
+        pass
+        
+    def _post_install(self):
+        pass
+    
+    def uninstall(self):
+        if self._install_is_verifiable() and not self._is_installed():
+            self._print(f"{self.APPLICATION_NAME} not installed...")
+            return
+        if self._running_is_verifiable() and self._is_running():
+            raise BadStateError(self._get_logged_msg(f"{self.APPLICATION_NAME} must be stopped before it can be uninstalled."))
+        self._print(f"Uninstalling {self.APPLICATION_NAME}...")
+        self._uninstall()
+        self.simulation_config["installed"] = False
+        if self._install_is_verifiable() and self._is_installed():
+            raise BadStateError(self._get_logged_msg(f"Failed to uninstall {self.APPLICATION_NAME}."))
+            
+    def _uninstall(self):
+        raise NotImplementedError()
+        
+    def start(self):
+        pass
+        
+    def stop(self):
+        pass
+    
+    def _print(self, message):
+        if not self.silent:
+            print(message)
+        log.info(message)
+        
+    def _pretty_formated(self, input):
+        obj = input
+        if type(input) is str:
+            if not len(input):
+                raise ValueError('json string cannot be empty string')
+            obj = loads(input)
+        return dumps(obj, indent=4)    
+        
+    def _pretty_print(self, input):
+        self._print(self._pretty_formated(input))
+ 
+    def _write_to_file(self, filepath, content, mode="w", encoding=None):
+        if self.simulate_execution:
+            self._print(f"Simulating file write operation to file: {filepath}")
+            self._print(f"---------------\n{content}\n---------------")
+        else:
+            with open(filepath, mode) as f:
+                if encoding:
+                    content = content.encode(encoding)
+                f.write(content)
+            
+    def _pretty_write_to_file(self, filepath, content, mode="w", encoding=None):
+        self._write_to_file(filepath, self._pretty_formated(content), mode, encoding)
+        
+    def _read_from_file(self, filepath, mode="r", encoding=None, fake_content=None):
+        if self.simulate_execution:
+            self._print(f"Simulating read operation from file '{filepath}':")
+            self._print(f"---------------\n{fake_content}\n---------------")
+            content = fake_content
+        elif exists(filepath):
+            with open(filepath, mode) as f:
+                content = f.read()
+                if encoding:
+                    content = content.decode(encoding)
+        else:
+            content = ""
+        return content
+        
+    def _read_json_from_file(self, filepath, mode="r", encoding=None, fake_content=None):
+        content = self._read_from_file(filepath, mode, encoding, fake_content)
+        return loads(content) if len(content) else {}
+        
+    def _make_dir(self, directory):
+        Os.make_dir(directory, simulate=self.simulate_execution)
+         
+    @classmethod
+    def gen_simulation_config(cls, installed=False, running=False, os=OS_LINUX, linux_distro=DISTRO_UBUNTU):
+        return {
+            "installed": installed,
+            "running": running,
+            "os": os,
+            "linux_distro": linux_distro
+        }
+        
+    def change_simulation_config(self, config):
+        for key in config:
+            self.simulation_config[key] = config[key]
+            
+    def get_current_simulation_config(self):
+        return self.simulation_config
+        
+    def _execute(self, *args, **kwargs):
+        return execute(*args, simulation=self.simulate_execution, **kwargs)
+        
+    def _get_logged_msg(self, msg, log_level="ERROR"):
+        log_level = log_level.lower()
+        if log_level == "error":
+            log.error(msg)
+        return msg
+        
+    def is_requiring_restart(self):
+        return self.requires_restart
+        h
+    def _restart_server(self):
+        if self.os == OS_WINDOWS:
+            args = ' '.join(sys.argv[1:])
+            input("Press Enter to reboot the server. The script will automtically restart.")
+            runonce_key = r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
+            reg_entry = f'reg add {runonce_key} /v ayfie_installer /t REG_SZ /d "{abspath(__file__)} {args}" /f'
+            self._execute(reg_entry)
+            self._execute("powershell.exe Restart-Computer")
+ 
+ 
+class Daemon(Application): 
+
+    def _running_is_verifiable(self):
+        return True
+
+    def start(self):
+        if self._install_is_verifiable() and not self._is_installed(): 
+            raise BadStateError(self._get_logged_msg(f"{self.APPLICATION_NAME} not installed"))
+        if self._running_is_verifiable() and self._is_running():
+            self._print(f"{self.APPLICATION_NAME} running...")
+            return
+        if not Os.is_root_or_elevated_mode():
+            raise PermissionError(self._get_logged_msg(f"Root or elavated mode required to start {self.APPLICATION_NAME}"))
+        self._start()
+        self.simulation_config["running"] = True
+        if self._running_is_verifiable() and not self._is_running():
+            raise BadStateError(self._get_logged_msg(f"Failed to start {self.APPLICATION_NAME}"))
+        
+    def stop(self):
+        if self._install_is_verifiable() and not self._is_installed():
+            raise BadStateError(self._get_logged_msg(f"{self.APPLICATION_NAME} not installed"))
+        if self._running_is_verifiable() and not self._is_running():
+            self._print(f"{self.APPLICATION_NAME} already stopped...")
+            return
+        if not Os.is_root_or_elevated_mode():
+            raise PermissionError(self._get_logged_msg(f"Root or elavated mode required to stop {self.APPLICATION_NAME}"))
+        self._stop() 
+        self.simulation_config["running"] = False
+        if self._running_is_verifiable() and self._is_running():
+            raise BadStateError(self._get_logged_msg(f"Failed to stop {self.APPLICATION_NAME}")) 
+
+    def _is_running(self):
+        fake_response = None
+        if self.os == OS_LINUX:
+            if self.simulate_execution:
+                print(self.simulation_config)
+                fake_response = "active" if self.simulation_config["running"] else "inactive"
+            response = self._execute(f"systemctl is-active {self.SERVICE_NAME}", return_response=True, fake_response=fake_response, success_codes=[0,3])
+            if response.strip() == 'active':
+                return True
+            elif response.strip() == 'inactive':
+                return False
+        elif self.os == OS_WINDOWS:
+            if self.simulate_execution:
+                fake_response = "Status\nRunning " if self.simulation_config["running"] else "Status\nStopped "
+            response = self._execute(f"powershell.exe Get-Service {self.SERVICE_NAME}", return_response=True, fake_response=fake_response)
+            if "Running" in response:
+                return True
+            elif "Stopped" in response:
+                return False            
+        
+  
+class Docker(Daemon):
+
+    APPLICATION_NAME          = "Docker"
+    SERVICE_NAME              = "docker"
+    DOCKER_USER_GROUP         = "docker"
+    DEFAULT_DATA_ROOT_LINUX   = "/var/lib/docker" 
+    DEFAULT_DATA_ROOT_WINDOWS = "C:/ProgramData/Docker"
+    SYSCTL_SETTINGS           = ["vm.max_map_count=262144", "vm.swappiness=1"]
+    SYSCTL_PATH               = "/etc/sysctl.conf"
+    SUPPORTED_OS              = [OS_WINDOWS, OS_LINUX]
+    SUPPORTED_DISTROS         = [DISTRO_CENTOS, DISTRO_UBUNTU]
+    SERVICE                   = "service"
+    SYSTEMCTL                 = "systemctl"
+    SYSTEM_MANAGER            = SERVICE
+    VIRTUAL_MEMORY_FILE       = "/var/run/docker.sock"
+        
+    def __init__(self, simulate_execution=False, simulation_config={}, silent=False, data_root=None):
+        super().__init__(simulate_execution, simulation_config, silent)
+        if data_root:
+            self.data_root = data_root
+        else:
+            config = self._get_config_file_content()
+            if "data-root" in config:
+                self.data_root = config["data-root"]
+            elif self.os == OS_LINUX:
+                self.data_root = self.DEFAULT_DATA_ROOT_LINUX
+            elif self.os == OS_WINDOWS:
+                self.data_root = self.DEFAULT_DATA_ROOT_WINDOWS    
+        repro_url_prefix = "https://download.docker.com/linux"
+        self.gpg_url = None
+        self.package_manager = None
+        self.repo_url = None
+        if not self.os in self.SUPPORTED_OS:
+            raise NotSupported(self._get_logged_msg(f"'{self.os}' is not a supported OS"))             
+        if self.os == OS_LINUX: 
+            if not self.linux_distro in self.SUPPORTED_DISTROS:
+                raise NotSupported(self._get_logged_msg(f"'{self.linux_distro}' is not a supported Linux Distro"))
+            self.repo_url = f"{repro_url_prefix}/{self.linux_distro}"
+            if self.linux_distro in DISTROS_USING_APT:
+                self.package_manager = APT_MANAGER
+            elif self.linux_distro in DISTROS_USING_YUM:
+                self.package_manager = YUM_MANAGER
+            else:
+                raise NotImplementedError(self._get_logged_msg(f"Distro '{self.linux_distro}' is not supported"))
+            self.gpg_url = f"{self.repo_url}/gpg"
+            
+    def _start(self): 
+        self._print(f"Starting {self.APPLICATION_NAME}...")
+        if self.os == OS_WINDOWS:    
+            self._execute("powershell.exe Start-Service Docker")
+        elif self.os == OS_LINUX:
+            self._execute(self._get_commandline("start"))
+                
+    def _stop(self):
+        self._print(f"Stopping {self.APPLICATION_NAME}...")
+        if self.os == OS_WINDOWS:    
+            self._execute("powershell.exe Stop-Service Docker")  
+        elif self.os == OS_LINUX:
+            self._execute(self._get_commandline("stop"))
+            
+    def _uninstall(self):
+        if self.os == OS_WINDOWS:
+             self._execute("powershell.exe Uninstall-package docker")
+             self._execute("powershell.exe Uninstall-Module dockerprovider")
+        elif self.package_manager == APT_MANAGER:
+            self._execute(f"apt-get purge -y docker-engine docker docker.io docker-ce docker-ce-cli")
+            self._execute(f"apt-get autoremove -y --purge docker-engine docker docker.io docker-ce docker-ce-cli")
+        elif self.package_manager == YUM_MANAGER:
+            self._execute("yum remove -y docker-ce")
+            
+    def _find_docker_root_dirs(self):
+        if self.os == OS_LINUX:
+            if not Os.is_root_or_elevated_mode():
+                raise PermissionError("Root user mode required for finding Docker directories")
+            paths = []
+            for directory in ["volumes", "overlay2", "image", "containers", "network", "plugins", "builder"]:
+                response = self._execute(f"find / -name {directory} -user root -print", return_response=True)  
+                paths += ['/'.join(directory.split('/')[:-1]) for directory in response.split('\n') if directory.endswith(directory)]
+            dir_paths = []
+            for dir_path in set(paths):
+                if len([path for path in paths if path == dir_path and path != '']) >= 4:
+                    dir_paths.append(dir_path)
+            return dir_paths
+        return []
+        
+    def _user_approved_data_removal(self, dir_path):
+        if exists(dir_path):
+            while True:
+                response = input(f"Do you want to delete everything under '{dir_path}'(y/n)? ")
+                letter = response.lower()
+                if letter in ['y', 'n']:
+                    if letter == 'y':
+                        self._print(f"Deleting all data under directory '{dir_path}'...")
+                        #self._execute(f"rm -rf {dir_path}")
+                        Os.del_dir(dir_path)
+                    elif letter == 'n':
+                        self._print(f"Skipping deletion of directory '{dir_path}'")
+                    break
+ 
+    def _possible_data_removal(self, detected_docker_root_dirs, possible_data_root, is_default=False): 
+        if is_default:
+            dir_type = "default"
+        else:
+            dir_type = "configured" 
+        if possible_data_root in detected_docker_root_dirs:
+            self._print(f"The {dir_type} Docker data directory detected at '{possible_data_root}'")
+            self._user_approved_data_removal(possible_data_root)
+            detected_docker_root_dirs.remove(possible_data_root)                 
+        elif exists(possible_data_root):
+            self._print(f"The {dir_type} Docker data directory at '{possible_data_root}' does not seem to be complete")
+            self._user_approved_data_removal(possible_data_root)
+        else:
+            self._print(f"The {dir_type} Docker data directory '{possible_data_root}' does not exists")
+        return detected_docker_root_dirs
+                    
+    def nuke_everything(self):
+        if self._is_installed:
+            self.uninstall()
+        default_data_root = None
+        configured_data_root = None
+        config_file_path = self._get_config_file_path() 
+        if exists(config_file_path):
+            config = self._read_json_from_file(config_file_path, fake_content='{"data-root":self.data_root}')
+            if "data-root" in config:
+                configured_data_root = config["data-root"]
+            else:
+                self._print(f"No data-root configuration in '{config_file_path}'")
+        else:
+            self._print(f"No Docker configuration file to delete at '{config_file_path}'")
+            default_data_root = self.data_root
+        detected_docker_root_dirs = self._find_docker_root_dirs()
+        if configured_data_root:
+            detected_docker_root_dirs = self._possible_data_removal(detected_docker_root_dirs, configured_data_root, False)
+        if default_data_root:
+            detected_docker_root_dirs = self._possible_data_removal(detected_docker_root_dirs, default_data_root, True)
+        if len(detected_docker_root_dirs):
+            for directory in detected_docker_root_dirs:
+                self._print(f"A possible Docker data directory not in the docker confifguration detected at '{directory}'")
+                self._user_approved_data_removal(directory)
+        if self.os == OS_LINUX:
+            if Os.group_exists(self.DOCKER_USER_GROUP, self.simulate_execution, fake_response=True):
+                self._print(f"Deleting user group 'docker'...")
+                Os.delete_group(self.DOCKER_USER_GROUP, simulate=self.simulate_execution) 
+            self._print(f"Deleting virtual memory file '{self.VIRTUAL_MEMORY_FILE}'...")
+            self._execute(f"rm -rf {self.VIRTUAL_MEMORY_FILE}") 
+            config_dir = self._get_config_file_dir_path()
+            self._print(f"Deleting config directory '{config_dir}'...")
+            self._execute(f"rm -rf {config_dir}")
+            
+    def _get_commandline(self, cmd):
+        if self.SYSTEM_MANAGER == self.SERVICE:
+            return f"{self.SYSTEM_MANAGER} docker {cmd}"
+        elif self.SYSTEM_MANAGER == self.SYSTEMCTL:
+            return f"{self.SYSTEM_MANAGER} {cmd} docker"
+            
+    def _prerequisites(self):
+        self._print(f"Preparing to install {self.APPLICATION_NAME}...")   
+        self._prepare_user()
+        self._prepare_host()
+        self._setup_repository()
+        self._update_docker_config_file(self._gen_config(self.data_root, "overlay2"))
+        
+    def _post_install(self):
+        self._enable_auto_start()
+        self._enable_user()
+        
+    def _enable_user(self):
+        if self.os == OS_LINUX:
+            self._print("Enable user to run Docker command line tool...")
+            path = "/home/{user}/.docker"
+            user = Os.get_actual_user()
+            Os.change_owner(path, user, user, True)
+            Os.change_mode(path, 'g+rwx', True)
+
+    def _update_sysctl_conf_file(self):
+        settings = self.SYSCTL_SETTINGS
+        content = self._read_from_file(self.SYSCTL_PATH, fake_content="vm.swappiness = 10\n\n# comment\nvm.dirty_ratio = 80")
+        variables = [assignment.split('=')[0].strip() for assignment in self.SYSCTL_SETTINGS]
+        lines = content.split('\n')
+        for line in lines:
+            keep_line = True
+            for variable in variables:
+                if line.startswith(variable):
+                    keep_line = False
+                    break
+            if keep_line:
+                settings.append(line)
+        self._write_to_file(self.SYSCTL_PATH,'\n'.join(settings))
+            
+    def _prepare_host(self):
+        if self.os == OS_LINUX:
+            self._print("Preparing host...")
+            self._update_sysctl_conf_file()
+            self._execute("sysctl -p")
+            
+    def _prepare_user(self):
+        if self.os == OS_LINUX:
+            self._print("Preparing user...")
+            formal_user = getuser()
+            actual_user = Os.get_actual_user()
+            if formal_user == "root" and actual_user and len(actual_user):
+                user = actual_user
+            else:
+                user = formal_user
+            log.info(f"Formal user: '{formal_user}', Actual user: '{actual_user}', User: '{user}'")
+            Os.add_user_to_groups(user, "docker", self.simulate_execution)
+
+    def _is_installed(self):
+        fake_response = None
+        if self.simulate_execution:
+            if self.simulation_config["installed"]:
+                fake_response = "Docker version 19.03.12, build 48a66213fe"
+            elif self.simulation_config["os"] == OS_LINUX:
+                fake_response = "\nCommand 'docker' not found, but can be installed with:\n\nsudo snap install docker"
+            else:
+                fake_response = "'docker' is not recognized as an internal or external command,\noperable program or batch file."
+        response = self._execute("docker -v", return_response=True, ignore_error=True, fake_response=fake_response)
+        if response.startswith("Docker version"):
+            return True
+        return False 
+       
+    def _update_package_index(self):
+        if self.package_manager == APT_MANAGER:
+            self._execute("apt-get update")
+        elif self.package_manager == YUM_MANAGER:
+            self._execute("yum -y update")
+            
+    def _install_repository_tools(self):
+        if self.package_manager == APT_MANAGER:
+            self._execute("apt-get install apt-transport-https ca-certificates curl gnupg-agent software-properties-common --assume-yes")  
+        elif self.package_manager == YUM_MANAGER:
+            self._execute("yum install -y yum-utils device-mapper-persistent-data lvm2") 
+            
+    def _add_gpg_key(self):
+        if self.package_manager == APT_MANAGER:
+            self._execute(f"curl -fsSL {self.gpg_url} | apt-key add -")
+            self._execute("apt-key fingerprint 0EBFCD88")  
+        
+    def _add_repository(self):
+        if self.package_manager == APT_MANAGER:
+            self._execute(f'add-apt-repository "deb [arch=amd64] {self.repo_url} $(lsb_release -cs) stable"')
+        elif self.package_manager == YUM_MANAGER:
+            self._execute(f"yum-config-manager --add-repo {self.repo_url}/docker-ce.repo")
+        
+    def _get_latest_available_version(self):
+        version_string = None
+        fake_response = "docker-ce | 5:19.03.12~3-0~ubuntu-bionic | https://download.docker.com/linux/ubuntu bionic/stable amd64 Packages"
+        response = self._execute("apt-cache madison docker-ce", return_response=True, fake_response=fake_response)
+        log.debug(response)
+        for line in response.split("\n"):
+            regex = f"^docker-ce \| (.*) \| {self.repo_url} bionic/stable amd64 Packages$"
+            m = match(regex, line.strip())
+            if m:
+                version_string = m.group(1)
+                break
+        return version_string
+        
+    def _setup_repository(self):
+        if self.os == OS_LINUX:
+            self._print("Setting up Docker repository...")
+            self._update_package_index()
+            self._install_repository_tools()
+            self._add_gpg_key()
+            self._add_repository()
+            
+    def _update_docker_config_file(self, settings):
+        config = self._get_config_file_content()
+        for key in settings.keys():
+            config[key] = settings[key]
+        if config:
+            dir_path = self._get_config_file_dir_path()
+            if not exists(dir_path):
+                self._make_dir(dir_path)
+            self._pretty_write_to_file(self._get_config_file_path(), config)
+                
+    def _get_config_file_path(self):
+        return join(self._get_config_file_dir_path(), "daemon.json")
+        
+    def _get_config_file_content(self):
+        return self._read_json_from_file(self._get_config_file_path(), fake_content='{"debug": false}')     
+         
+    def _get_config_file_dir_path(self):
+        if self.os == OS_LINUX: 
+            return "/etc/docker"
+        elif self.os == OS_WINDOWS:
+            if self.simulate_execution:
+                return join("C:/Programdata/docker/config")
+            else:
+                return join(environ['programdata'], "docker", "config")
+        raise NotSupported("'{self.os}' is not a supported OS")
+            
+    def _gen_config(self, data_root=None, storage_driver=None):
+        config = {}
+        if data_root:
+            config["data-root"] = data_root
+        if storage_driver:
+            config["storage-driver"] = storage_driver
+        return config
+
+    def _install(self):
+        self._print("Installing Docker...")
+        if self.os == OS_WINDOWS:       
+            #self._execute("powershell.exe Find-PackageProvider -Name 'Nuget' -ForceBootstrap -IncludeDependencies")
+            self._execute("powershell.exe Install-PackageProvider -Name NuGet -Force")
+            self._execute("powershell.exe Install-Module DockerMsftProvider -Force")
+            self._execute("powershell.exe Install-Package Docker -ProviderName DockerMsftProvider -Force -RequiredVersion 19.03")
+            self.requires_restart = True
+        elif self.package_manager == APT_MANAGER:
+            version = self._get_latest_available_version()
+            log.debug(f"Latest available docker version is '{version}'")
+            if version:
+                self._execute(f"apt-get install docker-ce={version} docker-ce-cli={version} containerd.io --assume-yes")
+            else:
+                self._execute("apt-get install docker-ce docker-ce-cli containerd.io --assume-yes") 
+        elif self.package_manager == YUM_MANAGER:
+            self._execute("yum install -y docker-ce docker-ce-cli containerd.io")
+                  
+    def _enable_auto_start(self): 
+        if self.os == OS_LINUX:
+            self._print("Enabling auto start...") 
+            self._execute("systemctl enable docker")
+
+
+class DockerCompose(Application): 
+
+    APPLICATION_NAME = "Docker-Compose"
+    
+    def install(self):
+        if self._is_installed():
+            self._print(f"{self.APPLICATION_NAME} already installed")
+        else:
+            if self.os == OS_WINDOWS:
+                choco = Choco(self.simulate_execution, self.original_simulation_config)
+                choco.install()
+                if choco.is_requiring_restart():
+                    self._restart_server()
+            self._install()
+        
+    def uninstall(self):
+        if not self._is_installed():
+            self._print(f"{self.APPLICATION_NAME} not installed")
+            return
+        self._print(f"Uninstalling {self.APPLICATION_NAME}...")
+        if self.os == OS_WINDOWS:  
+            raise NotImplementedError
+        elif self.os == OS_LINUX:
+            self._execute("rm $(which docker-compose)")  
+
+    def _is_installed(self):
+        fake_response = None
+        if self.simulate_execution:
+            if self.simulation_config["installed"]:
+                fake_response = "docker-compose version 1.24.1, build 4667896b"
+            else:
+                fake_response = "'docker-compose' is not recognized"
+        response = self._execute("docker-compose -v", return_response=True, ignore_error=True, fake_response=fake_response)
+        if response.startswith("docker-compose version"):
+            return True
+        return False
+        
+    def _prerequisites(self):
+        Choco(self.simulate_execution, self.original_simulation_config).install()
+
+    def _install(self, version=None): 
+        if self.os == OS_WINDOWS:  
+            self._execute("choco install docker-compose -y")
+        elif self.os == OS_LINUX:
+            ver = "1.24.0"
+            if version:
+                ver = version
+            link = f"https://github.com/docker/compose/releases/download/{ver}/docker-compose-$(uname -s)-$(uname -m)"
+            self._execute(f'curl -L "{link}" -o {DOCKER_COMPOSE_EXE}')          
+
+
+class Choco(Application):
+
+    APPLICATION_NAME = "Choco"
+            
+    def _is_installed(self):
+        fake_response = None
+        if self.simulate_execution:
+            if self.simulation_config["installed"]:
+                fake_response = "0.10.15"
+            else:
+                fake_response = "'choco' is not recognized"
+        response = self._execute("choco -v", return_response=True, ignore_error=True, fake_response=fake_response)
+        if response.startswith("0.") or response.startswith("1."):
+            return True
+        return False   
+         
+    def install(self):
+        if self.os == OS_WINDOWS:
+            if self._is_installed():
+                self._print("Choco already installed")
+            else:
+                self._print("Installing Choco...")
+                self._execute("powershell.exe Set-ExecutionPolicy Bypass -Scope Process -Force")
+                self._execute("powershell.exe Invoke-Expression((new-object net.webclient).DownloadString('https://chocolatey.org/install.ps1'))")
+                self.requires_restart = True
+
+
+class DockerComposeApp(Daemon):
+
+    def __init__(self, install_dir, docker_credentials, simulate_execution=False, simulation_config={}, silent=False):
+        super().__init__(simulate_execution, simulation_config, silent)
+        self.install_dir = install_dir
+        self.docker_credentials = docker_credentials
+
+    def start(self):
+        self._docker_login()
+        with change_dir(self.install_dir):
+            self._print(f"Starting {self.APPLICATION_NAME} (this may take many minutes the first time)...")
+            try:
+                self._execute("docker-compose up -d")
+            except:
+                raise
+        
+    def stop(self):
+        if self._is_running():
+            with change_dir(self.install_dir):
+                self._print(f"Stopping {self.APPLICATION_NAME}...")
+                self._execute("docker-compose down")
+        
+    def _is_running(self):
+        docker_compose_running = "NameCommandStatePorts"
+        inspector_running = "_api_"
+        fake_response = None
+        if self.simulate_execution:
+            fake_response = docker_compose_running + inspector_running if self.simulation_config["running"] else 'bad response'
+        with change_dir(self.install_dir):
+            response = self._execute(f"docker-compose ps", return_response=True, fake_response=fake_response, success_codes=[0,3])
+            response = (' '.join([line.replace(' ', '').replace('\t', '') for line in response.split('\n')]))
+            if docker_compose_running in response and inspector_running in response:
+                return True
+        return False
+                
+    def _docker_login(self):
+        if self.docker_registry and self.docker_credentials:
+            user = self.docker_credentials["user"]
+            password = PWD_START_STOP_TOKEN + docker_credentials["password"] + PWD_START_STOP_TOKEN
+            self._execute(f'docker login -u "{user}" -p "{password}" {self.docker_registry}') 
+
+    
+class InspectorDockerApp(DockerComposeApp):   
+
+    APPLICATION_NAME       = "ayfie Inspector"
+    LINUX_DOCKER_REGISTRY  = "quay.io" 
+    WIN_DOCKER_REGISTRY    = "index.docker.io"
+    INSPECTOR_BASH_SCRIPTS = ["start-ayfie.sh", "stop-ayfie.sh", "ayfie-logs.sh", "create_certs.sh"] 
+    SECURITY_ASSETS_DIR    = "security-assets"   
+    DOCKER_COMPOSE_EXE     = "/usr/bin/docker-compose"
+        
+    def __init__(self, installer_url=None, download_dir=None, install_dir=None, docker_credentials=None, docker_compose_yml_files=[], 
+                       simulate_execution=False, simulation_config={}, silent=False, files_to_copy=[], dot_env_file_path=None, 
+                       self_sign_certificate={}, version=None, post_install_user=None, docker_data_dir=None):
+        super().__init__(install_dir, docker_credentials, simulate_execution, simulation_config, silent)
+        self.installer_url = installer_url
+        if self.os == OS_LINUX:
+            self.docker_registry = self.LINUX_DOCKER_REGISTRY
+        elif self.os == OS_WINDOWS:
+            self.docker_registry = self.WIN_DOCKER_REGISTRY 
+        self.download_dir = download_dir
+        self.install_dir = install_dir
+        self.docker_compose_yml_files = docker_compose_yml_files
+        self.files_to_copy = files_to_copy
+        self.dot_env_file_path = dot_env_file_path
+        self.self_sign_certificate = self_sign_certificate
+        self.version = version
+        self.post_install_user = post_install_user
+        self.docker_data_dir = docker_data_dir
+        
+    def _add_custom_files(self, custom_files):
+        files_to_copy = []
+        for from_file in custom_files:
+            destination_file = join(self.install_dir, from_file)
+            if exists(destination_file):
+                continue
+            if exists(from_file):
+                files_to_copy.append((from_file, destination_file))
+                copy(from_file, destination_file)
+            else:
+                raise FileNotFoundError(f"Could not find '{from_file}' or '{destination_file}'")
+        if files_to_copy:
+            files = "', '".join([file[0] for file in files_to_copy])
+            self._print(f"Copying in custom file(s): {files}...")
+            for from_file, destination_file in files_to_copy:
+                copy(from_file, destination_file)
+            
+    def _prerequisites(self):
+        docker = Docker(self.simulate_execution, self.original_simulation_config, data_root=self.docker_data_dir)
+        docker.install()
+        if not docker.is_requiring_restart():   
+            docker.start()
+        DockerCompose(self.simulate_execution, self.original_simulation_config).install()       
+        
+    def _install_is_verifiable(self):
+        return False 
+
+    def _install_is_runnable(self):
+        return False        
+
+    def _install(self): 
+        if not self.download_dir or not self.install_dir:
+            raise NotEnoughInformation("download and/or install directory not set")
+        self._print("Downloading and unzipping the ayfie Inspector installer...")
+        zipped_installer = WebContent.download(self.installer_url, self.download_dir)
+        if not FileTools.unzip(zipped_installer, self.install_dir):  
+            raise BadZipFileError(f'File "{zipped_installer}" is not a zip file')
+        if self.files_to_copy:
+            self._print("Copying in custom files...")
+            for file_to_copy in self.files_to_copy:
+                copy(file_to_copy, self.install_dir)
+
+    def _uninstall(self): 
+        Os.del_dir(self.install_dir) 
+        
+    def _prune_system(self): 
+        execute("docker system prune --volumes --force", timeout=60)
+        
+    def nuke_everything(self):  
+        docker = Docker(self.simulate_execution, self.original_simulation_config, data_root=self.docker_data_dir)
+        docker.stop()
+        docker.nuke_everything()
+         
+    def _customize(self):
+        custom_files = []
+        for custom_file in self.docker_compose_yml_files:
+            custom_files.append(custom_file)
+        if self.dot_env_file_path:
+            custom_files.append(self.dot_env_file_path)
+        self._add_custom_files(custom_files)
+        
+    def _get_file_pair(self, template_file_name):
+        return (template_file_name, template_file_name.replace("-template", ""))
+    
+    def _configure_gatekeeper(self):
+        if self.self_sign_certificate: 
+            self._print("Configuring Gatekeeper...")
+            if is_earlier_version(self.version, "2.8.1"):
+                file_pairs = [
+                    self._get_file_pair(CONFIG_TEMPLATE)        
+                ]
+            elif is_earlier_version(self.version, "2.9.0"):
+                file_pairs = [
+                    self._get_file_pair(FRONTEND_CONFIG_TEMPLATE),
+                    self._get_file_pair(SECURE_API_CONFIG_TEMPLATE)
+                ]
+            else:
+                return
+            with change_dir(join(self.install_dir, SECURITY_ASSETS_DIR)):  
+                for pair in file_pairs:
+                    from_file = pair[0]
+                    to_file = pair[1]
+                    self._execute(f"cp {from_file} {to_file}")
+                    content = self._read_from_file(to_file)
+                    content = content.replace("auth.localhost", self.self_sign_certificate['domain'])
+                    self._write_to_file(to_file, content)
+
+    def _create_self_sign_certificate(self):
+        self._print("Creating self sign certificate...")
+        x = self.self_sign_certificate
+        with change_dir(join(self.install_dir, SECURITY_ASSETS_DIR)):
+            self._execute(f"./create_certs.sh -c {x['country']} -st {x['state']} -l {x['city']} -o {x['company']} -cn {x['domain']}") 
+                      
+    def _prepare_security(self):
+        if self.self_sign_certificate:
+            self._create_self_sign_certificate()
+        security_assets_dir = join(self.install_dir, self.SECURITY_ASSETS_DIR)
+                    
+    def make_scripts_executable(self):
+        if self.os == OS_LINUX:
+            self._print("Making scripts executable...")
+            for directory in [self.install_dir, join(self.install_dir, self.SECURITY_ASSETS_DIR)]:
+                if exists(directory):
+                    with change_dir(directory):
+                        for item in self.INSPECTOR_BASH_SCRIPTS:
+                            if exists(item):
+                                self._execute(f"chmod +x {item}") 
+            if exists(self.DOCKER_COMPOSE_EXE):
+                fake_response = "-rw-r--r-- 1 root root 16154160 Aug 14 03:10 /usr/bin/docker-compose"
+                file_listing = self._execute(f"ls -l {self.DOCKER_COMPOSE_EXE}", return_response=True, fake_response=fake_response)
+                if file_listing.split()[0].count('x') !=  3:
+                    self._execute(f"chmod +x {self.DOCKER_COMPOSE_EXE}")
+                
+    def _post_install(self): 
+        self._prepare_security()
+        self.make_scripts_executable()
+        self._customize()
+        self._configure_gatekeeper()
+        user = Os.get_actual_user()
+        user_docker_dir = f"/home/{user}/.docker"        
+        Os.change_owner(user_docker_dir, user, user, True) 
+        Os.change_mode(user_docker_dir, "g+rwx", True)
+        docker_file = join(user_docker_dir, "config.json")   
+        Os.change_owner(docker_file, user, user) 
+
+
+class Installation(EngineConnector):
+
+    def _post_init(self):
+        if self.config.installer or self.config.uninstaller:
+            try:
+                self.version = self._extract_version_number()
+            except ValueError:
+                self.version = None
+            self.host_os = HOST_OS
+            if not self.host_os in [OS_WINDOWS, OS_LINUX]:
+                raise OSError(f"'{os}' is not a supported OS")
+            if self.config.install_dir:
+                self.install_dir = self.config.install_dir
+            else:
+                self.install_dir = self.version
+            if self.host_os == OS_LINUX:
+                self.docker_registry = LINUX_DOCKER_REGISTRY
+            elif self.host_os == OS_WINDOWS:
+                self.docker_registry = WIN_DOCKER_REGISTRY
+            self.inspector_instance = self._get_inspector_instance()
+            
+    def _extract_version_number(self):
+        if self.config.version:
+            return self.config.version
+        err_msg = "Version number not provided"
+        if self.config.installer_zip_file:
+            m = match("^.*([1-2]\.[0-9]+.[0-9]+).*$", self.config.installer_zip_file)
+            if m:
+                return m.group(1)
+            err_msg += " and unable to extract the version from the installer url."
+        else:
+            err_msg += " and also no installer url to extract the version info from."
+        raise ValueError(err_msg)
+        
+    def _double_report(self, message):
+        log.info(message)
+        print(message) 
+
+    def operate(self):
+        if self.config.stop or self.config.uninstall or self.config.nuke_everything:
+            self.inspector_instance.stop()
+        if self.config.uninstall or self.config.nuke_everything:
+            self.inspector_instance.uninstall()
+        if self.config.nuke_everything:
+            self.inspector_instance.nuke_everything()
+            
+            
+class Uninstaller(Installation):
+
+    def _get_inspector_instance(self):
+        return InspectorDockerApp(
+            install_dir=self.install_dir, 
+            simulate_execution=self.config.simulation,
+            simulation_config={},  
+            version=self.version,
+            docker_data_dir=self.config.docker_data_dir
+        )
+
+
+class Installer(Installation): 
+
+    def _get_inspector_instance(self):
+        return InspectorDockerApp(
+            installer_url=self._get_installer_url(),
+            download_dir='.', 
+            install_dir=self.install_dir,
+            docker_credentials=self.config.docker_registry, 
+            docker_compose_yml_files=[],
+            simulate_execution=self.config.simulation,
+            simulation_config={}, 
+            #files_to_copy=self.config.copy_to_install_dir,
+            #dot_env_file_path=dot_env_file_path,                        
+            #self_sign_certificate=self.self_sign_certificate, 
+            version=self.version,
+            post_install_user=None,
+            docker_data_dir=self.config.docker_data_dir
+        )
+                    
+    def _disable_defender(self):
+        if self.host_os == OS_WINDOWS:
+            if self.config.defender_exclude_paths:
+                for path in self.config.defender_exclude_paths:
+                    msg = f"Windows Defender realtime scanning disabled for directory '{path}'"
+                    if self.config.simulation:
+                        msg = f"Simulating: {msg}"
+                    else:
+                        execute(f'powershell -Command Add-MpPreference -ExclusionPath "{path}"')
+                    print(msg)
+            else:              
+                msg = "Windows Defender realtime scanning disabled"
+                if self.config.simulation:
+                    msg = f"Simulating: {msg}"
+                else:
+                    execute(f'powershell -Command Set-MpPreference -DisableRealtimeMonitoring $true')
+                print(msg)
+                
+    def _gen_application_custom_file(self):
+        yaml_version = self._get_docker_compose_format_version()
+        applicationYamlFile = ApplicationYamlFile(self.install_dir, yaml_version, self.host_os)
+        if self.config.enable_gdpr:
+            applicationYamlFile.enable_gdpr() 
+        if self.config.enable_alt_threading:
+            applicationYamlFile.enable_email_treading()
+        if self.config.enable_admin_page and self.config.enable_frontend:
+            applicationYamlFile.enable_admin_page()
+        applicationYamlFile.generate_file()
+
+    def _wait_until_engine_ready(self, timeout=None):
+        waited_so_far = 0
+        pull_interval = 1
+        while not self.engine.engine_is_healthy():
+            if timeout and waited_so_far > timeout:
+                raise TimeoutError("Giving up waiting for engine to become ready")
+            sleep(pull_interval)
+            waited_so_far += pull_interval       
+
+    def operate(self):
+        app_down = True
+        if self.config.install:
+            if self.config.disable_defender:
+                self._disable_defender()
+            self.inspector_instance.install()
+            self._gen_application_custom_file()  
+            self.docker_env_file = DockerEnvFile(self.install_dir, self.version, self.config, os=self.host_os, filename=DOCKER_DOT_ENV_FILE)
+            self.docker_env_file.generate_file()
+        if self.config.start: 
+            self._double_report("Starting the Inspector - downloading any required Docker images not already downloaded. This could take many minutes...")        
+            self.start_inspector()
+            self._double_report("Docker image download (if any) completed. Now waiting for Elasticsearch to come up...")
+            if self.config.security:
+                input("Manual Keyecloak operations are now required. CLICK ENTER WHEN READY TO CONTINUE.")
+            self._wait_until_engine_ready()
+            self._double_report("The ayfie Inspector is now up and ready")
+            app_down = False
+        if app_down:
+            raise EngineDown
+  
+    def _get_concluded_os(self):
+        if not self.config.os in SUPPORTED_OS_VALUES:
+            raise ValueError("f{self.config.os} is not a supported OS")
+        if self.config.os:
+            if self.config.os == OS_AUTO:
+                if self.config.installer_zip_file:
+                    m = match(f"^.*ayfie-({OS_WINDOWS}|)(|-)installer.*.zip$", self.config.installer_zip_file)
+                    if m:
+                        if m.group(1) == "":
+                            return OS_LINUX
+                        return m.group(1)
+                elif self.host_os in [OS_WINDOWS, OS_LINUX]:
+                    return self.host_os
+                else:
+                    raise OSError(f"'{self.host_os}' is not a supported OS'")
+            else:
+                return self.config.os
+        raise AutoDetectionError("Unable to obtain OS")
+
+    def _add_docker_compose_yml_file(self, enable_feature, custom_file):       
         if enable_feature:
             if not custom_file in self.docker_compose_custom_files:
                 self.docker_compose_custom_files.append(custom_file)
-        
-    def _remove_docker_compose_custom_file(self, custom_file, first_version_to_not_remove=None):
-        remove_file = False
-        if first_version_to_not_remove:
-            try:
-                current_version = self._extract_version_number()
-            except ValueError:
-                current_version = None
-            if current_version and is_earlier_version(current_version, first_version_to_not_remove):
-                remove_file = True
+                 
+    def _inspector_operation(self, operation):
+        if not self.install_dir:
+            if self.config.version:
+                print("No install directory given, will try with version number as directory name") 
+                self.install_dir = self.config.version
+            else:
+                raise NotEnoughInformation("Do not know and are unable to guess where ayfie Inspector is installed")
+        with change_dir(self.install_dir):
+            script = f"{operation}-ayfie.{Os.get_script_extension()}"
+            result = execute(join(".", script), return_response=True).lower()
+            if "error" in result:
+                if "bind: address already in use" in result:
+                    raise ConfigError("The selected port is already being used by some other application. Check the logs for more details.")
+                else:
+                    print(f"WARNING: The output from '{script}' seems to contain an error message. Check the logs for details.")
+
+    def _do_docker_login(self):
+        if not self.config.docker_registry:
+            log.warning("No docker registry user credentials")
+            return
+        if len(self.config.docker_registry) == 1:
+            if not "os" in self.config.docker_registry[0]:
+                self.config.docker_registry[0]["os"] = self._get_concluded_os()
+        elif len(self.config.docker_registry) > 1: 
+            for docker_registry in self.config.docker_registry:
+                if not "os" in docker_registry:
+                    raise ValueError(f"If credentials for more than one docker regitry is given, then the OS has to also be given")
+        for docker_registry in self.config.docker_registry:
+            for item in ["user", "password", "os"]:
+                if not item in docker_registry:
+                    raise ValueError(f"Bad account data: {str(docker_registry)}")
+            if docker_registry["os"] == self._get_concluded_os():
+                user = docker_registry["user"]
+                password = PWD_START_STOP_TOKEN + docker_registry["password"] + PWD_START_STOP_TOKEN
+                
+                if self.config.simulation:
+                    print(f'docker login -u "{user}" -p "{password}" {self.docker_registry}')
+                else:
+                    execute(f'docker login -u "{user}" -p "{password}" {self.docker_registry}')
+                break
         else:
-            remove_file = True
-        if remove_file and custom_file in self.docker_compose_custom_files:
-            self.docker_compose_custom_files.remove(custom_file)
-      
+            log.warning("No docker registry user credentials")
+                     
+    def start_inspector(self): 
+        self._do_docker_login()      
+        self._inspector_operation("start")
+        
+    def _get_mem_limit(self, limit_64_ram, limit_128_ram, ram_on_host):
+        import numpy
+        coefs, _, _, _, _ = numpy.polyfit([64, 128], [limit_64_ram, limit_128_ram], deg=1, full=True)
+        mem_limit = int(round(ram_on_host * coefs[0] + coefs[1]))
+        if mem_limit < self.minimum_ram_allocation:
+            mem_limit = self.minimum_ram_allocation
+        return mem_limit
+
+    def _gen_mem_limits(self):
+        main_version = self.version.split(".")[0]
+        if not main_version in ["1", "2"]:
+            raise ValueError(f"There is no main version number '{str(main_version)}' of the ayfie Inspector")
+        self.minimum_ram_allocation = 1
+        freed_up_ram = 0
+        for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
+            if variable == "SUGGEST_MEM_LIMIT" and self.config.no_suggest_index:
+                freed_up_ram += self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host)
+                freed_up_ram -= self.minimum_ram_allocation
+            if variable == "ELASTICSEARCH_MEM_LIMIT":
+                mem_limit = self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host)
+                if mem_limit > ELASTICSEARCH_MAX_MEM_LIMIT:
+                    freed_up_ram += mem_limit - ELASTICSEARCH_MAX_MEM_LIMIT
+        mem_limits = []
+        for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
+            if self.config.no_suggest_index and "SUGGEST" in variable:
+                mem_limit = self.minimum_ram_allocation
+            else:
+                mem_limit = self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host + freed_up_ram)
+                if variable == "ELASTICSEARCH_MEM_LIMIT" and mem_limit > ELASTICSEARCH_MAX_MEM_LIMIT:
+                    mem_limit = ELASTICSEARCH_MAX_MEM_LIMIT
+                if variable == "ELASTICSEARCH_MX_HEAP" and mem_limit > ELASTICSEARCH_MAX_MX_HEAP:
+                    mem_limit = ELASTICSEARCH_MAX_MX_HEAP
+            self.docker_env_file.add_variable(variable, f"{mem_limit}G")
+        
+    def _retrieve_mem_limits_from_config(self, config_file_path):
+        settings = []
+        for line in open(config_file_path, "r").read().split('\n'):
+            m = match("^.*- (.+)=\$\{.+:-(.+G)|^.*mem_limit: \$\{(.+):-(.+G)\}", line)
+            if m:
+                settings.append('='.join([x for x in m.groups() if x]))
+        return list(set(settings))
+        
+    def _get_installer_url(self):
+        if self.config.installer_zip_file:
+            return self.config.installer_zip_file
+        if not self.version:
+            raise NotEnoughInformation("Needs Inspector installer zip file path or version number")
+        concluded_os = self._get_concluded_os()
+        zip_file_name = "ayfie-"
+        if is_earlier_version(self.version, "2.12.0"):
+            if concluded_os == OS_WINDOWS:
+                zip_file_name += f"{concluded_os}-"
+        else:
+            zip_file_name += f"oem-{concluded_os}-"
+        zip_file_name += f"installer-{self.version}.zip"
+        return f"http://docs.ayfie.com/ayfie-platform/release/{zip_file_name}"
+        
+    def _get_docker_compose_format_version(self):
+        os = self._get_concluded_os()
+        if os == OS_LINUX:
+            version_that_format_version_changed = "2.8.1"
+        elif os == OS_WINDOWS:
+            version_that_format_version_changed = "2.8.0"
+        else:
+            raise ValueError(f"'{os}' is not a supported OS")
+        if is_earlier_version(self.version, version_that_format_version_changed):
+            return "2.1"
+        else:
+            return "2.4"
+          
+
+class Operational(EngineConnector):
+
+    """
+            if operation == OP_FILE_TRANSFER:
+                self._file_transfer(self.config.file_transfer)
+    """
+                 
     def _file_transfer(self, transfer_config):
         for config in transfer_config:
             try:
@@ -2744,7 +4100,7 @@ class Operational(EngineConnector):
                     url_path = f"{protocol}://{server}:{port}/{path}/"
                     for filename in listify(filename):
                         url = url_path + filename
-                        WebContent().download(url, local_dir)
+                        WebContent.download(url, local_dir)
             elif protocol == 'ssh':
                 remote_server = RemoteServer(server, user)
                 if direction == "from_remote":
@@ -2764,428 +4120,52 @@ class Operational(EngineConnector):
                     else:
                         print(f"Copying '{local_path}' to server '{server}' to as '{remote_path}'")
                         remote_server.copy_file_to_remote(local_path, remote_path)
-        
-    def _inspector_operation(self, operation):
-        with change_dir(self.install_dir):
-            script = f"{operation}-ayfie.{self.script_extension}"
-            result = execute(join(".", script), return_response=True)
-            if "error" in result.lower():
-                print(f"WARNING: The output from '{script}' seems to contain an error message. Check the logs for details.")
+ 
+class ResourceAnalyzer(): 
 
-    def _do_docker_login(self):
-        if not self.config.docker_registry:
-            log.warning("No docker registry user credentials")
-            return
-        if len(self.config.docker_registry) == 1:
-            if not "os" in self.config.docker_registry[0]:
-                self.config.docker_registry[0]["os"] = self._get_concluded_os()
-        elif len(self.config.docker_registry) > 1: 
-            for docker_registry in self.config.docker_registry:
-                if not "os" in docker_registry:
-                    raise ValueError(f"If credentials for more than one docker regitry is given, then the OS has to also be given")
-        for docker_registry in self.config.docker_registry:
-            for item in ["user", "password", "os"]:
-                if not item in docker_registry:
-                    raise ValueError(f"Bad account data: {str(docker_registry)}")
-            if docker_registry["os"] == self._get_concluded_os():
-                user = docker_registry["user"]
-                password = PWD_START_STOP_TOKEN + docker_registry["password"] + PWD_START_STOP_TOKEN
-                if self.config.simulation:
-                    print(f'docker login -u "{user}" -p "{password}" {self.docker_registry}')
-                else:
-                    execute(f'docker login -u "{user}" -p "{password}" {self.docker_registry}')
-                break
-        else:
-            log.warning("No docker registry user credentials")
-                     
-    def start_inspector(self): 
-        self._do_docker_login()      
-        self._inspector_operation("start")
-            
-    def stop_inspector(self): 
-        self._inspector_operation("stop")
-     
-    def uninstall_inspector(self):
-        FileHandlingTools().delete_directory(self.install_dir) 
-
-    def prune_system(self): 
-        execute("docker system prune --volumes --force", timeout=60)    
-
-    def _get_mem_limit(self, limit_64_ram, limit_128_ram, ram_on_host):
-        import numpy
-        coefs, _, _, _, _ = numpy.polyfit([64, 128], [limit_64_ram, limit_128_ram], deg=1, full=True)
-        mem_limit = int(round(ram_on_host * coefs[0] + coefs[1]))
-        if mem_limit < self.minimum_ram_allocation:
-            mem_limit = self.minimum_ram_allocation
-        return mem_limit
-
-    def _gen_mem_limits(self):
-        main_version = self._extract_version_number().split(".")[0]
-        if not main_version in ["1", "2"]:
-            raise ValueError(f"There is no main version number '{str(main_version)}' of the ayfie Inspector")
-        self.minimum_ram_allocation = 1
-        freed_up_ram = 0
-        for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
-            if variable == "SUGGEST_MEM_LIMIT" and self.config.no_suggest_index:
-                freed_up_ram += self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host)
-                freed_up_ram -= self.minimum_ram_allocation
-            if variable == "ELASTICSEARCH_MEM_LIMIT":
-                mem_limit = self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host)
-                if mem_limit > ELASTICSEARCH_MAX_MEM_LIMIT:
-                    freed_up_ram += mem_limit - ELASTICSEARCH_MAX_MEM_LIMIT
-            
-             
-        mem_limits = []
-        for variable, limit_64_ram, limit_128_ram in MEM_LIMITS_64_AND_128_GB_RAM[main_version]:
-            if self.config.no_suggest_index and "SUGGEST" in variable:
-                mem_limit = self.minimum_ram_allocation
-            else:
-                mem_limit = self._get_mem_limit(limit_64_ram, limit_128_ram, self.config.ram_on_host + freed_up_ram)
-                if variable == "ELASTICSEARCH_MEM_LIMIT" and mem_limit > ELASTICSEARCH_MAX_MEM_LIMIT:
-                    mem_limit = ELASTICSEARCH_MAX_MEM_LIMIT
-                if variable == "ELASTICSEARCH_MX_HEAP" and mem_limit > ELASTICSEARCH_MAX_MX_HEAP:
-                    mem_limit = ELASTICSEARCH_MAX_MX_HEAP
-            mem_limits.append(f"{variable}={mem_limit}G")
-        return "\n".join(mem_limits)
-        
-    def _retrieve_mem_limits_from_config(self, config_file_path):
-        settings = []
-        for line in open(config_file_path, "r").read().split('\n'):
-            m = match("^.*- (.+)=\$\{.+:-(.+G)|^.*mem_limit: \$\{(.+):-(.+G)\}", line)
-            if m:
-                settings.append('='.join([x for x in m.groups() if x]))
-        return list(set(settings))
-                
-    def _extract_version_number(self):
-        if self.config.version:
-            return self.config.version
-        err_msg = "Version number not provided"
-        if self.config.installer:
-            m = match("^.*([1-2]\.[0-9]+.[0-9]+).*$", self.config.installer)
-            if m:
-                return m.group(1)
-            err_msg += " and unable to extract the version from the installer url."
-        else:
-            err_msg += " and also no installer url to extract the version info from."
-        raise ValueError(err_msg)
-  
-    def _get_concluded_os(self):
-        if not self.config.os in SUPPORTED_OS:
-            raise ValueError("f{self.config.os} is not a supported OS")
-        if self.config.os:
-            if self.config.os == OS_AUTO:
-                if self.config.installer:
-                    m = match(f"^.*ayfie-({OS_WINDOWS}|)(|-)installer.*.zip$", self.config.installer)
-                    if m:
-                        if m.group(1) == "":
-                            return OS_LINUX
-                        return m.group(1)
-                elif self.host_os in [OS_WINDOWS, OS_LINUX]:
-                    return self.host_os
-                else:
-                    raise OSError(f"'{self.host_os}' is not a supported OS'")
-            else:
-                return self.config.os
-        raise AutoDetectionError("Unable to obtain OS")
-        
-    def _get_zip_file_os_string(self):
-        concluded_os = self._get_concluded_os()
-        if concluded_os == OS_LINUX:
-            return ""
-        return concluded_os
-        
-    def _get_installer_zip_file(self):
-        if self.config.installer:
-            return self.config.installer
-        os_string = self._get_zip_file_os_string()
-        if os_string:
-           os_string += "-"
-        version = self._extract_version_number()
-        self.config.installer = f"http://docs.ayfie.com/ayfie-platform/release/ayfie-{os_string}installer-{version}.zip"
-        return self.config.installer
-        
-    def _get_lets_encrypt_certificate_dot_env_settings(self):
-        content = ""
-        if self.lets_encrypt_certificate: 
-            for key in self.lets_encrypt_certificate:
-                value = self.lets_encrypt_certificate[key]
-                if type(value) is list:
-                    value = ",".join(value)
-                content += f"{key.upper()}={value}\n"
-        return content
-        
-    def _get_self_sign_certificate_dot_env_settings(self):
-        content = ""
-        if self.self_sign_certificate:
-            if "domain" in self.self_sign_certificate:
-                value = self.self_sign_certificate["domain"]
-                content += f"DOMAIN={value}\n"
-        return content
-        
-    def order_yml_file_list(self, unordered_yml_file_list):
-        ordered_list = []
-        tail_items = []
-        unordered_yml_file_list = list(set(unordered_yml_file_list))
-        for item in unordered_yml_file_list:
-            if "security.yml" in item:
-                tail_items = [item] + tail_items
-            elif "signed.yml" in item:
-                tail_items = tail_items + [item]
-            else:
-                ordered_list.append(item)
-        return ordered_list + tail_items
-        
-    def _administrate_env_file(self):
-        if self.config.dot_env_input_path:
-            return self.config.dot_env_input_path
-        else:
-            if self.config.security:
-                dot_env_file_content = f"AYFIE_PORT=80\nAYFIE_HTTPS_PORT=443\n"
-            else:
-                dot_env_file_content = f"AYFIE_PORT={self.config.port}\n"
-            if self._get_zip_file_os_string() == "windows":
-                delimiter = ';'
-            else:
-                delimiter = ':'
-            if self.docker_compose_custom_files:
-                dot_env_file_content += "COMPOSE_FILE=" 
-                dot_env_file_content += delimiter.join(self.order_yml_file_list(self.docker_compose_custom_files))                
-                dot_env_file_content += "\n"
-            dot_env_file_content += self._gen_mem_limits()
-            dot_env_file_content += "\n"
-            dot_env_file_content += self._get_lets_encrypt_certificate_dot_env_settings()
-            dot_env_file_content += self._get_self_sign_certificate_dot_env_settings()
-            if self.config.dot_env_output_path:
-                with open(self.config.dot_env_output_path, "w") as f:
-                    f.write(dot_env_file_content)
-                return self.config.dot_env_output_path
-            return None
-                
-    def do_pre_operations(self):
-        self._do_operations(self.config.pre_operations)
-        
-    def do_post_operations(self):
-        self._do_operations(self.config.post_operations)
-          
-    def wait_until_engine_ready(self, timeout=None):
-        waited_so_far = 0
-        pull_interval = 1
-        while not self.engine.engine_is_healthy():
-            if timeout and waited_so_far > timeout:
-                raise TimeoutError("Giving up waiting for engine to become ready")
-            sleep(pull_interval)
-            waited_so_far += pull_interval
-            
-    def _merge_yaml_dict_structures(self, existing, addition, path=None):
-        if path is None: 
-            path = []
-        for key in addition:
-            if key in existing:
-                if isinstance(existing[key], dict) and isinstance(addition[key], dict):
-                    self._merge_yaml_dict_structures(existing[key], addition[key], path + [str(key)])
-                elif existing[key] == addition[key]:
-                    pass
-                else:
-                    raise Exception('Conflict at %s' % '.'.join(path + [str(key)]))
-            else:
-                existing[key] = addition[key]
-        return existing
-        
-    def _get_docker_compose_format_version(self):
-        inspector_version = self._extract_version_number()
-        os = self._get_concluded_os()
-        if os == OS_LINUX:
-            version_that_format_version_changed = "2.8.1"
-        elif os == OS_WINDOWS:
-            version_that_format_version_changed = "2.8.0"
-        else:
-            raise ValueError(f"'{os}' is not a supported OS")
-        if is_earlier_version(inspector_version, version_that_format_version_changed):
-            return "2.1"
-        else:
-            return "2.4"
-            
-    def _write_yml_to_file(self, content_as_json, filename):
-        with change_dir(self.install_dir):
-            dir_path = dirname(filename)
-            if dir_path and not exists(dir_path):
-                makedirs(dir_path)
-            with open(filename, "wb") as f:
-                import yaml
-                docker_compose_file_version = self._get_docker_compose_format_version()
-                f.write((f"version: '{docker_compose_file_version}'\n" + yaml.dump(content_as_json, default_flow_style=False)).encode("utf-8")) 
-                
-    def _gen_application_custom_file(self, new_yml_content_as_json):
-        with open(DOCKER_COMPOSE_CUSTOM_FILE, "w") as f:
-            os = self._get_concluded_os()
-            if os == OS_LINUX:
-                application_custom_file_path = APPLICATION_CUSTOM_FILE
-                mapping = f"./{APPLICATION_CUSTOM_FILE}:/home/dev/restapp/application-custom.yml"
-            elif os == OS_WINDOWS:
-                application_custom_file_path = f"{DOCKER_WINDOW_CONFIG_DIR}/{APPLICATION_CUSTOM_FILE}"
-                mapping = f"./{DOCKER_WINDOW_CONFIG_DIR}:c:\\ayfie\\config"
-            else:
-                raise ValueError(f"'{os}' is not a supported OS")
-            docker_compose_file_version = self._get_docker_compose_format_version()
-            f.write(f"version: '{docker_compose_file_version}'\nservices:\n  api:\n    volumes:\n      - {mapping}")
-        self.docker_compose_custom_files.append(DOCKER_COMPOSE_CUSTOM_FILE)
-        self.yml_content_as_json = self._merge_yaml_dict_structures(self.yml_content_as_json, new_yml_content_as_json)
-        self._write_yml_to_file(self.yml_content_as_json, application_custom_file_path)
-
-    def _configure_skip_extractors(self, skipExtractors):
-        return {
-            "digestion": {
-                "processing": {
-                    "entityExtraction": {
-                        "skipExtractors": skipExtractors
-                    }
-                }
-            }
+    def get_resource_utilization(self, numbers_with_units=True, space_between=True):
+        install_python_modules('psutil')
+        import psutil
+        statistics = {
+            "total_virtual_memory":     psutil.virtual_memory().total,
+            "available_virtual_memory": psutil.virtual_memory().available, 
+            "used_virtual_memory":      psutil.virtual_memory().used,
+            "total_swap_memory":        psutil.swap_memory().total,
+            "available_swap_memory":    psutil.swap_memory().free, 
+            "used_swap_memory":         psutil.swap_memory().used,            
+            "total_disk":               psutil.disk_usage('/').total,
+            "used_disk":                psutil.disk_usage('/').used,
+            "free_disk":                psutil.disk_usage('/').free,
         }
+        space = ""
+        if space_between:
+            space = " "
+        if numbers_with_units:
+            for item in statistics:
+                number, unit = get_unit_adapted_byte_figure(statistics[item])
+                statistics[item] = f"{number}{space}{unit}"
+        return statistics
         
-    def _configure_email_treading(self, skipCloneEvaluation, skipMailEvaluation, mailTreadEvaluation):
-        return {
-            "digestion": {
-                "processing": {
-                    "cloneEvaluation": {
-                        "skip": skipCloneEvaluation
-                    },
-                    "mailEvaluation": {
-                        "skip": skipMailEvaluation
-                    },
-                    "mailThreadEvaluation": {
-                        "skip": mailTreadEvaluation
-                    }
-                }
-            }
-        }
+    def get_disk_utilizations(self):
+        install_python_modules('psutil')
+        import psutil     
+        return psutil.disk_partitions(all=True)
         
-    def _enable_gdpr(self): 
-        if self.gdpr_enabled:
-            return
-        version = self._extract_version_number()
-        yaml_as_json = {}
-        with change_dir(self.install_dir):
-            if not is_earlier_version(version, "2.1.0"):
-                with open(APPL_PII_TEMPLATE_FILE, "rb") as f:
-                    import yaml
-                    yaml_as_json = yaml.safe_load(f.read().decode("utf-8"))
-        self._gen_application_custom_file(yaml_as_json)          
-        self._gen_application_custom_file(self._configure_skip_extractors([]))      
-        self.gdpr_enabled = True
-        
-    def _enable_email_treading(self):
-        if self.email_treading_enabled:
-            return
-        self._gen_application_custom_file(self._configure_email_treading(False, False, False))
-        self.email_treading_enabled = True
-        
-    def _double_report(self, message):
-        log.info(message)
-        print(message)
-   
-    def _do_operations(self, operations):  
-        app_down = False
-        for operation in operations:
-            if not operation in OPERATIONS:
-                raise ValueError(f'Operation "{operation}" is an unknown operation')
-        for operation in operations:
-            if operation == OP_DISABLE_DEFENDER:
-                if self.host_os == OS_WINDOWS:
-                    if not self.config.defender_exclude_paths:
-                        msg = "Disabled Windows Defender realtime scanning"
-                        if self.config.simulation:
-                            msg = f"Simulating: {msg}"
-                        else:
-                            execute(f'powershell -Command Set-MpPreference -DisableRealtimeMonitoring $true')
-                        print(msg)
-                    for path in self.config.defender_exclude_paths:
-                        msg = f"Disabled Windows Defender realtime scanning for directory '{path}'"
-                        if self.config.simulation:
-                            msg = f"Simulating: {msg}"
-                        else:
-                            execute(f'powershell -Command Add-MpPreference -ExclusionPath "{path}"')
-                        print(msg)
-            if operation == OP_FILE_TRANSFER:
-                self._file_transfer(self.config.file_transfer)
-            elif operation == OP_INSTALL:
-                if self.config.engine == INSPECTOR:
-                    dot_env_file_path = self._administrate_env_file()
-                    if self.host_os == OS_LINUX:
-                        os_specific_installer = LinuxInspectorInstaller
-                    elif self.host_os == OS_WINDOWS:
-                        os_specific_installer = WindowsInspectorInstaller
-                    installer = os_specific_installer(self._get_installer_zip_file(), ".", self.install_dir, 
-                                                      self.config.docker_registry, self.docker_compose_custom_files, 
-                                                      self.config.copy_to_install_dir, dot_env_file_path, self.config.simulation, 
-                                                      self.self_sign_certificate, self._extract_version_number())
-                    installer.prerequisites(["docker"])
-                    installer.install()
-                    if OP_ENABLE_GDPR in operations:
-                        self._enable_gdpr()
-                    if operation == OP_ENABLE_ET:
-                        self._enable_email_treading()
-                    self._administrate_env_file()
-                    installer.customize()
-                    installer.post_install_operations()
-                    app_down = True
-                else:
-                    raise NotImplementedError("Only the Inspector is supported at this time")
-            elif operation == OP_ENABLE_GDPR:
-                self._enable_gdpr()
-            elif operation == OP_ENABLE_ET:
-                self._enable_email_treading()
-            elif operation == OP_START:
-                if self.config.engine == INSPECTOR:
-                    self._double_report("Starting the Inspector - downloading any required Docker images not already downloaded. This could take many minutes...")
-                    self.start_inspector()
-                    self._double_report("Docker image download (if any) completed. Now waiting for Elasticsearch to come up...")
-                    is_ready = True
-                    if OP_INSTALL in operations:
-                        if self.config.security:
-                            self._double_report("Manual Keyecloak operations are now required")
-                            is_ready = False
-                    if is_ready:
-                        self.wait_until_engine_ready()
-                        self._double_report("The ayfie Inspector is now up and ready")
-                        app_down = False
-                    else:
-                        app_down = True
-                else:
-                    raise NotImplementedError("Only the Inspector is supported at this time")
-            elif operation == OP_STOP:
-                if self.config.engine == INSPECTOR:
-                    self.stop_inspector()
-                    app_down = True
-                else:
-                    raise NotImplementedError("Only the Inspector is supported at this time")
-            elif operation == OP_UNINSTALL:
-                if self.config.engine == INSPECTOR:
-                    self.uninstall_inspector()
-                    app_down = True
-                else:
-                    raise NotImplementedError("Only the Inspector is supported at this time")
-            elif operation == OP_PRUNE_SYSTEM:
-                if self.config.engine == INSPECTOR:
-                    self.prune_system()
-                else:
-                    raise NotImplementedError("Only the Inspector is supported at this time")
-            elif operation == OP_GEN_DOT_ENV:
-                if self.config.engine == INSPECTOR:
-                    if self.config.dot_env_output_path and self.config.dot_env_input_path:
-                        raise ValueError("Either the '.env' file is provided or it is generated, it cannot be both")
-                    self._administrate_env_file()
-            elif operation == OP_DEL_ALL_COL:
-                if self.config.engine == INSPECTOR:
-                    self.engine.delete_all_collections_and_wait()
-                else:
-                    raise NotImplementedError("Only the Inspector is supported at this time")
-        if self.gdpr_enabled or self.email_treading_enabled:
-            self._administrate_env_file()
-        if app_down == True:
-            raise EngineDown
-        
-        
+    def get_docker_info(self):  
+        try:
+            docker_info = execute("docker info --format '{{json .}}'", return_response=True)
+            
+            print(docker_info)
+            print(type(docker_info))
+            struct = loads(docker_info)
+            print(struct)
+        except CommandLineError as e: 
+            if "docker" in str(e) and "not recognized" in str(e):
+                return "Docker does not seem to be installed on this host"
+            raise
+        return docker_info
+
+ 
 class SchemaManager(EngineConnector):
 
     def add_field_if_absent(self, schema_changes=None):
@@ -3219,11 +4199,11 @@ class DocumentRetriever(EngineConnector):
                 for old_field in self.config.doc_retrieval_field_merging[new_field]:
                     self.csv_output_columns.remove(old_field)
         
-    def _get_batch_size(self, batch_size, exlude_fields): 
+    def _get_batch_size(self, batch_size, exclude_fields): 
         if batch_size == "auto":
             batch_size = 1000
             if self.search_operation:
-                if "content" in exlude_fields:
+                if "content" in exclude_fields:
                     batch_size = MAX_PAGE_SIZE
         else:
             try:
@@ -3247,27 +4227,39 @@ class DocumentRetriever(EngineConnector):
         return row
         
     def retrieve_documents(self):
-        self._init_class_global_variables()
+        self._init_class_global_variables()  
         with open(self.config.doc_retrieval_output_file, mode='w', newline='', encoding="utf-8") as f:
             csv_writer = csv.DictWriter(f, fieldnames=self.csv_output_columns, dialect=self.config.doc_retrieval_csv_dialect)
             if self.config.doc_retrieval_csv_header_row:
                 csv_writer.writeheader()
             doc_count = 0
-            doc_skip_count = 0
-            skip_message = " "
+            empty_doc_count = 0
+            empty_field_count = 0
+            field_content_count = 0
+            skip_message = "."
             for doc_batch in self._get_documents(self.config.doc_retrieval_query, self.config.doc_retrieval_filters):
                 for document in doc_batch:
                     if self.config.doc_retrieval_max_docs:
                         if doc_count >= self.config.doc_retrieval_max_docs:
-                            self._print(f"Aborting after having extracted {doc_count} documents as specified by parameter 'max_docs' {skip_message}")
+                            self._print(f"Aborting after having extracted {doc_count} documents as specified by parameter 'max_docs'{skip_message}")
                             return
                     row = {}
                     doc_is_empty = True
+                    doc_has_empty_field = False
+                    doc_has_field_content = False
                     for field in self.requested_fields:
                         if self.search_operation:
                             value = document["document"].get(field, '')
                         else:
                             value = document.get(field, '')
+                        if type(value) is int:
+                            value = str(value)
+                        if field in self.config.doc_retrieval_skip_if_field_empty:
+                            if value == '':
+                                doc_has_empty_field = True
+                        if field in self.config.doc_retrieval_skip_if_field_content:
+                            if value != '':
+                                doc_has_field_content = True
                         if type(value) is list:
                             value = self.config.doc_retrieval_separator.join(value)
                         if type(value) is str:
@@ -3277,21 +4269,24 @@ class DocumentRetriever(EngineConnector):
                                 doc_is_empty = False
                         row[field] = value
                     row = self.merge_columns(row)
-                    if doc_is_empty:
-                        if self.config.doc_retrieval_skip_empty_documents:
-                            doc_skip_count += 1
-                            if doc_skip_count:
-                                skip_message = f"(of which {doc_skip_count} documents were skipped due to only empty fields)"
-                        else:
-                            csv_writer.writerow(row)
+                    if doc_is_empty and self.config.doc_retrieval_skip_empty_documents:
+                        empty_doc_count += 1
+                    elif doc_has_empty_field and self.config.doc_retrieval_skip_if_field_empty:
+                        empty_field_count += 1
+                    elif doc_has_field_content and self.config.doc_retrieval_skip_if_field_content:
+                        field_content_count += 1
                     else:
                         csv_writer.writerow(row)
+                    skip_count = empty_doc_count + empty_field_count + field_content_count
+                    if skip_count:
+                        skip_message = f" of which {skip_count} documents were skipped for these reasons: empty ({empty_doc_count}), "
+                        skip_message += f"missing required fields ({empty_field_count}), having unwanted fields ({field_content_count})."
                     if doc_count & (doc_count % self.config.doc_retrieval_report_frequency == 0):
                         self._print(f"So far {doc_count} documents have been extracted{skip_message}")
                     doc_count += 1
-        self._print(f"Done after extracting {doc_count} documents {skip_message}")
+        self._print(f"Done after having extracted {doc_count} documents{skip_message}")
                      
-    def _get_documents(self, query="", filters=[], exlude_fields=[]):
+    def _get_documents(self, query="", filters=[], exclude_fields=[]):
         if self.search_operation:
             result_page = self.engine.search_collection(self.col_id, query, self.batch_size, 0, filters,
                                                         self.exclude_fields, scroll=True, meta_data=True)
@@ -3313,6 +4308,9 @@ class DocumentRetriever(EngineConnector):
  
     def _get_fields_to_extract(self):
         fields = self.config.doc_retrieval_fields
+        if len(fields) == 1:
+            if ',' in fields[0]:
+                fields = fields[0].split(',')
         if not fields:
             fields = self.schema_fields
         if self.config.doc_retrieval_drop_underscore_fields:
@@ -3333,10 +4331,12 @@ class DocumentRetriever(EngineConnector):
 class Feeder(EngineConnector):
 
     def collection_exists(self):
-        if self.engine.exists_collection_with_name(self.config.col_name):
-            return True
-        else:
-            return False
+        if self.config.col_name:
+            if self.engine.exists_collection_with_name(self.config.col_name):
+                return True
+            else:
+                return False
+        return False
 
     def delete_collection_if_exists(self):
         if self.engine.exists_collection_with_name(self.config.col_name):
@@ -3356,26 +4356,43 @@ class Feeder(EngineConnector):
             col_id = self.config.col_name
             self.engine.create_collection_and_wait(self.config.col_name, col_id)
 
-    def __send_batch(self):
+    def _send_batch(self):
         if self.config.ayfie_json_dump_file:
             with open(self.config.ayfie_json_dump_file, "wb") as f:
                 try:
-                    f.write(dumps({'documents': self.batch}, indent=4).encode('utf-8'))
+                    f.write(pretty_formated({'documents': self.batch}).encode('utf-8')) 
                 except Exception as e:
                     log.warning(f'Writing copy of batch to be sent to disk failed with the message: {str(e)}')    
         col_id = self.engine.get_collection_id(self.config.col_name)
         log.info(f'About to feed batch of {len(self.batch)} documents')
         return self.engine.feed_collection_documents(col_id, self.batch)
+        
+    def _add_fuzzy_noise(self):
+        for document in self.batch:
+            spread_type = randint(0,4)
+            if spread_type == 0:
+                max = 0x1F
+            elif spread_type == 1:
+                max = 0x7F
+            elif spread_type == 2:
+                max = 0xFF
+            elif spread_type == 3:
+                max = 0xFFFF
+            else:
+                max = 0x10FFFF   
+            content = list(document['fields']['content'])
+            for _ in range(randint(1, self.config.max_fuzzy_chars_per_doc)):
+                content[randint(0, len(content) - 1)] = chr(randint(0, max)) 
+            document['fields']['content'] = "".join(content) 
 
     def process_batch(self, is_last_batch=False):
         if self.config.file_copy_destination: 
-            if not exists(self.config.file_copy_destination):
-                makedirs(self.config.file_copy_destination) 
+            Os.make_dir(self.config.file_copy_destination) 
             for from_file_path in self.data_source.pop_file_paths():
                 if self.config.file_copy_destination:
                     copy(from_file_path, self.config.file_copy_destination)
                 elif False:  # Salted version of the line above
-                    dummy, filename = path_split(from_file_path)
+                    _, filename = path_split(from_file_path)
                     to_file_path = join(self.config.file_copy_destination, str(int(random() * 10000000)) + '_' + filename)
                     copy(from_file_path, to_file_path) 
         self.files_to_copy = []
@@ -3387,16 +4404,29 @@ class Feeder(EngineConnector):
             doc_ids_msg = ""
             if self.config.report_doc_ids:
                 doc_ids_msg = f" The batch contained these doc ids: {', '.join([doc['id'] for doc in self.batch])}"
+            if self.config.max_fuzzy_chars_per_doc:
+                self._add_fuzzy_noise()
             try:
-                response = self.__send_batch()
+                response = self._send_batch()
                 if self.config.report_doc_error:
-                    self._print(dumps(response, indent=4))
+                    if 'error' in response and response['error']:
+                        self._print(pretty_formated(response))
             except MemoryError:
                 batch_failed = True
                 err_message = "Out of memory"
+            except HTTPError as e: 
+                batch_failed = True
+                err_message = str(e)
+                http_code = err_message.split('"')[1].split()[0]
+                batch_sequence_number, batch = self.engine.get_last_batch()
+                error_code_dir = join(CRASHED_BATCHES_DIR, http_code)
+                crash_dir = FileTools.get_random_path(error_code_dir, f"batch_{batch_sequence_number}")
+                Os.make_dir(crash_dir)
+                Os.write_to_file_as_non_root_user(join(crash_dir, "crashed_batch.json"), batch)
             except Exception as e:
                 batch_failed = True
                 err_message = str(e)
+                
             if batch_failed:
                 sentence_start = "A"
                 if is_last_batch:
@@ -3462,11 +4492,19 @@ class Feeder(EngineConnector):
          
     def process(self):
         report_time = False
-        if type(self.config.processing) is dict and 'report_time' in self.config.processing and self.config.processing['report_time']:
-            report_time = True
-            del self.config.processing['report_time']
+        more_params = {}
+        if type(self.config.processing) is dict:
+            if 'report_time' in self.config.processing and self.config.processing['report_time']:
+                report_time = True
+                del self.config.processing['report_time']
+            if 'filters' in self.config.processing:
+                more_params['filters'] = self.config.processing['filters']
+                del self.config.processing['filters']
         if self.config.progress_bar:
-            processing_time = JobsHandler(self.config).job_processesing("PROCESSING", self.config.processing)
+            settings = {}
+            if self.config.processing:
+                settings = {"processing": self.config.processing}
+            job_id, processing_time = JobsHandler(self.config).job_processesing("PROCESSING", settings, more_params)
         else:
             col_id = self.engine.get_collection_id(self.config.col_name)
             processing_time = self.engine.process_collection_and_wait(col_id, self.config.processing)
@@ -3531,7 +4569,8 @@ class Classifier(EngineConnector):
             "outputField" : classification['output_field']
         }
         if self.config.progress_bar:
-            return JobsHandler(self.config).job_processesing("CLASSIFICATION", settings, more_params)
+            job_id, processing_time = JobsHandler(self.config).job_processesing("CLASSIFICATION", settings, more_params)
+            return processing_time
         else:
             self.engine.classify_and_wait(col_id)  
             
@@ -3783,16 +4822,19 @@ class Classifier(EngineConnector):
                 self.recall[known_category] += recall
         table += "</tr></table><br>" 
         return table
-
+ 
  
 class Sampler(EngineConnector):
 
     def create_sampling_job_and_wait(self):
         if self.config.sampling:
-            col_id = self.engine.get_collection_id(self.config.col_name)
-            job_id = self.engine.start_sampling(col_id, self.config.sampling)
-            sampling_time = JobsHandler(self.config).track_job(job_id, "SAMPLING")
-            job_report = self.engine.get_job(job_id)
+            if self.config.progress_bar:
+                job_id, sampling_time = JobsHandler(self.config).job_processesing("SAMPLING", self.config.sampling)
+                job_report = self.engine.get_job(job_id)
+            else:
+                col_id = self.engine.get_collection_id(self.config.col_name)
+                job_id = self.engine.start_sampling_and_wait(col_id, self.config.processing)
+                job_report = self.engine.get_job(job_id)
             if not "sample" in job_report:
                 raise DataFormatError('No "sample" item in job output')
             if self.config.sampling_report_time:
@@ -3801,7 +4843,7 @@ class Sampler(EngineConnector):
         else:
             log.info('No sampling job')
  
- 
+
 class Clusterer(EngineConnector):
 
     def create_clustering_job_and_wait(self):
@@ -3818,7 +4860,7 @@ class Clusterer(EngineConnector):
             if self.config.clustering:
                 config["settings"] = {"clustering": self.config.clustering}
             if self.config.progress_bar:
-                clustering_time = JobsHandler(self.config).job_processesing("CLUSTERING", config)
+                job_id, clustering_time = JobsHandler(self.config).job_processesing("CLUSTERING", config)
             else:
                 clustering_time = self.engine.process_collection_and_wait(col_id, config)
             self._report_time("clustering", clustering_time)     
@@ -3894,8 +4936,8 @@ class Reporter(EngineConnector):
             raise ValueError("Reporting options 'logs_source' and 'retrieve_logs' cannot both be set")
         if self.config.report_logs_source:
             if self.config.report_logs_source.startswith('http'):
-                FileHandlingTools().recreate_directory(DOWNLOAD_DIR)
-                log_file_path = WebContent().download(self.config.report_logs_source, DOWNLOAD_DIR)
+                Os.recreate_dir(DOWNLOAD_DIR)
+                log_file_path = WebContent.download(self.config.report_logs_source, DOWNLOAD_DIR)
             else:
                 log_file_path = self.config.report_logs_source
         elif self.config.report_retrieve_logs:
@@ -3974,8 +5016,7 @@ class LogAnalyzer():
         if not exists(self.log_file):
             raise ConfigError(f"There is no {self.log_file}")
         if self.config.report_log_splitting:
-            if not exists(self.config.report_log_splitting_dir):
-                makedirs(self.config.report_log_splitting_dir)
+            Os.make_dir(self.config.report_log_splitting_dir)
         self.filtered_patterns = [
             "^.*RestControllerRequestLoggingAspect: triggering JobController.getJob\(\.\.\) with args:.*$",
             "^.*Performing partial update on document.*$"
@@ -4142,7 +5183,7 @@ class LogAnalyzer():
             },           
             {
                 "pattern" : r"^.*all nodes failed.*$",
-                "indication": "we have come across what before used to be referred to as 'slow disk' errors, but that we now know are more nuanced than that (will be updated)"
+                "indication": "more data is passed from Spark to Elasticsearch then what the disk is able to handle due to a combination of 4 things 1) the speed of the disk, 2) the amount of data passed per transfer operation, 3) the timeout limit set for that transfer operation, and 4) the number of CPUs (more CPU's, more data ElasticSearach will be receiving."
             },
             {
                 "pattern" : r"^.*no other nodes left.*$",
@@ -4266,7 +5307,11 @@ class LogAnalyzer():
             {
                 "pattern" : r"^.*max virtual memory areas vm.max_map_count \[[0-9]+\] is too low, increase to at least \[[0-9]+\].*$",   
                 "indication": "one has not set the variable vm.max_map_count as instructed in the Linux installation guide.",
-            }
+            },
+            {
+                "pattern" : r"^.*Failed to establish a valid connection to elasticsearch.*$",   
+                "indication": "the elasticsearch container is not responding.",
+            },             
         ]
         for regex in self.config.report_custom_regexs:
             self.symptoms.append({
@@ -4294,22 +5339,6 @@ class LogAnalyzer():
         for query_pattern in self.query_patterns:
             query_pattern["compiled_pattern"] = compile(query_pattern["pattern"])
         self.compiled_date_pattern = compile("^.*\[0m (20[0-2][0-9]-[0-1][0-9]-[0-3][0-9])T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9]{9,9}Z .*$")
-            
-    def get_resource_utilization(self, numbers_with_units=True):
-        install_python_modules('psutil') 
-        import psutil
-        statistics = {
-            "total_virtual_memory":     psutil.virtual_memory().total,
-            "available_virtual_memory": psutil.virtual_memory().available, 
-            "used_virtual_memory":      psutil.virtual_memory().used,
-            "total_disk":               psutil.disk_usage('/').total,
-            "used_disk":                psutil.disk_usage('/').used,
-            "free_disk":                psutil.disk_usage('/').free,
-        }
-        if numbers_with_units:
-            for item in statistics:
-                statistics[item] = get_unit_adapted_byte_figure(statistics[item])
-        return statistics
   
     def _clear_counters(self):
         for symptom in self.symptoms:
@@ -4321,13 +5350,12 @@ class LogAnalyzer():
         self.errors_detected = False
         
     def _prepare_temp_log_directory(self, log_file, log_dir):
-        fht = FileHandlingTools()
-        file_type, detected_encoding = fht.get_file_type(log_file)
-        if fht.unzip(log_file, self.unzip_dir, file_type): 
-            fht.delete_directory(log_dir)
+        file_type, detected_encoding = FileTools.get_file_type(log_file)
+        if FileTools.unzip(log_file, self.unzip_dir, file_type): 
+            Os.del_dir(log_dir)
             copy_dir_tree(self.unzip_dir, log_dir)
         else:
-            fht.recreate_directory(log_dir)
+            Os.recreate_dir(log_dir)
             copy(log_file, log_dir)
             
     def _line_filtering(self, line):
@@ -4344,7 +5372,7 @@ class LogAnalyzer():
             raise ValueError(f"Path '{log_file}' does not exists")
         if isdir(log_file):
             raise ValueError(f"'{log_file}' is not a file, but a directory")
-        file_type, detected_encoding = FileHandlingTools().get_file_type(log_file) 
+        file_type, detected_encoding = FileTools.get_file_type(log_file) 
         encodings = ["utf-8", "iso-8859-1"]
         if detected_encoding:
             if detected_encoding == "utf_16_le":
@@ -4488,26 +5516,6 @@ class LogAnalyzer():
                 m = variable["compiled_pattern"].match(line)
                 if m:
                     variable["variable"] = m.group(1)
-                    
-    def _remove_non_applicaple_sympthoms(self): 
-        print("got here 0")
-        for symptom in self.symptoms:
-            print("got here 1")
-            if self.inspector_version:
-                print("got here 2")
-                if symptom["before_version"]:
-                    print("got here 3")
-                    if not is_earlier_version(self.inspector_version, symptom["before_version"]):
-                        print("got here 4")
-                        continue
-                if symptom["after_version"]:
-                    print("got here 5")
-                    if not is_earlier_version(symptom["after_version"], self.inspector_version):
-                        print("got here 6")
-                        continue
-                print("got here 7")
-            print("got here 8")
-        print("got here 9")
                   
     def _process_encoded_log_file(self, log_file, encoding):
         if self.config.report_query_statistic_per_file:
@@ -4520,17 +5528,15 @@ class LogAnalyzer():
             if self.config.report_noise_filtering:
                 output_file = log_file + ".filtered"
             else:
-                output_file = "dummy.txt"
+                Os.make_dir(DUMMY_DIR)
+                output_file = join(DUMMY_DIR, "dummy.txt")
+            Os.write_to_file_as_non_root_user(output_file, "".encode("utf-8"))
             with open(output_file, "w") as self.filtered_file:
                 pass
-            non_applicaple_sympthoms_removed = False
             with open(output_file, "ab") as self.filtered_file:
                 self.line_count = 0
                 self.info_pieces = {}
                 for line in f:
-                    if self.inspector_version and not non_applicaple_sympthoms_removed:
-                        self._remove_non_applicaple_sympthoms()
-                        non_applicaple_sympthoms_removed = True
                     self._log_file_verification(log_file, self.line_count, line) 
                     self.line_count += 1
                     self._log_file_filtering_and_splitting(line)
@@ -4579,7 +5585,7 @@ class LogAnalyzer():
                         data_dict[date] = self._filter_out_substrings(data_dict[date])
                 else:
                     data_dict = self._filter_out_substrings(data_dict)
-                output += dumps(data_dict, indent=3)
+                output += pretty_formated(data_dict)
             else:
                 raise ValueError("'{format}' is an unknown format")
             output += "\n"
@@ -4630,9 +5636,8 @@ class LogAnalyzer():
             elif output_type == QUERY_SUGGEST_LOGS: 
                 filename += ".suggest"
             else:
-                filename += ".txt" 
-            with open(filename, 'wb') as f:
-                f.write(output.encode('utf-8'))
+                filename += ".txt"
+            Os.write_to_file_as_non_root_user(filename, output.encode('utf-8'))                
          
     def analyze(self):
         if isfile(self.log_file):
@@ -4642,7 +5647,7 @@ class LogAnalyzer():
         else:
             ValueError(f"'{self.log_file}' is neither a file nor a directory")
         analyses_output = ""
-        for log_file in FileHandlingTools().get_next_file(self.log_unpacking_dir):
+        for log_file in FileTools.get_next_file(self.log_unpacking_dir):
             self._clear_counters()
             is_log_file = True
             is_empty_file = False
@@ -4728,7 +5733,7 @@ class Monitoring(EngineConnector):
             return True
         
     def _get_page(self, monitoring):
-        return WebContent().download(monitoring["endpoint"])
+        return WebContent.download(monitoring["endpoint"])
         
     def _page_is_ok(self, result, monitoring):
         m = match(monitoring["regex"], result.decode(monitoring["encoding"]), DOTALL)
@@ -4894,17 +5899,31 @@ class Monitoring(EngineConnector):
             
 
 class JobsHandler(EngineConnector):
+
+    def _pre_init(self):
+        if self.config.job_server:
+            self.config.server = self.config.job_server
+        if self.config.job_port:
+            self.config.server = self.config.job_port
     
-    def __start_job(self, job_type, settings, more_params={}):
-        config = {
-            "collectionId" : self.engine.get_collection_id(self.config.col_name),
-            "type" : job_type
-        }
-        if settings:
-            config["settings"] = settings
-        for key, value in more_params.items():
-            config[key] = value
-        return self.engine.create_job(config)
+    def _start_job(self, job_type, settings, more_params={}):
+        col_id = self.engine.get_collection_id(self.config.col_name)
+        if job_type == "SAMPLING":  
+            if not "filters" in settings:
+                # Workaround required for the versions leading up to ayfie Inspector 2.11.0
+                settings["filters"] = []
+            job_id = self.engine.start_sampling(col_id, settings)
+        else:
+            config = {
+                "collectionId" : col_id,
+                "type" : job_type
+            }
+            if settings:
+                config["settings"] = settings
+            for key, value in more_params.items():
+                config[key] = value
+            job_id = self.engine.create_job(config)
+        return job_id
         
     def track_job(self, job_id, job_type):
         elapsed_time = -1
@@ -4941,8 +5960,8 @@ class JobsHandler(EngineConnector):
         return elapsed_time
 
     def job_processesing(self, job_type, settings, more_params={}):
-        job_id = self.__start_job(job_type, settings, more_params)
-        return self.track_job(job_id, job_type)
+        job_id = self._start_job(job_type, settings, more_params)
+        return job_id, self.track_job(job_id, job_type)
         
     def __job_reporting_output_line(self, job, prefix, end="\n", tick=None):
         self._print(f' {prefix.rjust(8)}: {job["state"].ljust(10)} {job["id"].ljust(10)} {job["type"].ljust(22)}', end)
@@ -5068,12 +6087,12 @@ class JobsHandler(EngineConnector):
         
     def __print_job_and_sub_jobs(self, job_info, verbose=False):
         if verbose:
-            print(dumps(self.engine.get_job(job_info["id"]), indent=3))
+            pretty_print(self.engine.get_job(job_info["id"]))
         else:
             print(f'   -job: {job_info["state"]} {job_info["id"]} {job_info["type"]} {job_info["time_stamp"].replace("T", " ").split(".")[0]}')
         for sub_job_id in job_info['sub_jobs']:
             if verbose:
-                print(dumps(self.engine.get_job(sub_job_id), indent=3))
+                print(pretty_formated(self.engine.get_job(sub_job_id)))
             else:
                 sub_job_info = self.__get_job(sub_job_id)
                 print(f'       -sub-job: {sub_job_info["state"].ljust(10)} {sub_job_id.ljust(10)} {sub_job_info["type"].ljust(22)}  {sub_job_info["clock_time"].ljust(8)}')
@@ -5112,95 +6131,132 @@ class JobsHandler(EngineConnector):
                     self.__print_job_and_sub_jobs(job_info, verbose)
             if latest_job_only:
                 self.__print_job_and_sub_jobs(self.__get_job(latest_job_id), verbose)
+
                 
 class Config():
 
+    NON_ACTION_CONFIG = ["server", 'port', 'col_name', 'config_source', 'silent_mode', "flags", "cmdline"]
+    OFFLINE_ACTIONS   = ["installer", "uninstaller", "operational", "reporting"]
+
     def __init__(self, config):
         self.config_keys = list(config.keys())
-        self.engine           = self.__get_item(config, 'engine', INSPECTOR)
-        self.user             = self.__get_item(config, 'user', None)
-        self.password         = self.__get_item(config, 'password', None) 
-        self.silent_mode      = self.__get_item(config, 'silent_mode', True)
-        self.config_source    = self.__get_item(config, 'config_source', None)
-        self.server           = self.__get_item(config, 'server', '127.0.0.1')
-        self.port             = self.__get_item(config, 'port', '80')
-        self.api_version      = self.__get_item(config, 'api_version', 'v1')
-        self.col_name         = self.__get_item(config, 'col_name', None)
-        self.client_secret    = self.__get_item(config, 'client_secret', None)
-        self.csv_mappings     = self.__get_item(config, 'csv_mappings', None)
-        self.progress_bar     = self.__get_item(config, 'progress_bar', True)
-        self.document_update  = self.__get_item(config, 'document_update', False)
-        self.doc_retrieval    = self.__get_item(config, 'document_retrieval', False)
-        self.__init_doc_retrieval(self.doc_retrieval)
-        self.operational      = self.__get_item(config, 'operational', None)
-        self.__init_operational(self.operational)
-        self.processing       = self.__get_item(config, 'processing', False)
-        self.__init_processing(self.processing)
-        self.sampling         = self.__get_item(config, 'sampling', False)        
-        self.__init_sampling(self.sampling)
-        self.schema           = self.__get_item(config, 'schema', None)
-        self.__init_schema(self.schema)
-        self.feeding          = self.__get_item(config, 'feeding', False)
-        self.__init_feeder(self.feeding)
-        self.clustering       = self.__get_item(config, 'clustering', False)
-        self.__init_clustering(self.clustering)
-        self.classifications  = self.__get_item(config, 'classification', False)
-        self.__init_classification(self.classifications)
-        self.documents_updates= self.__get_item(config, 'documents_update', False)
-        self.__init_documents_updates(self.documents_updates)
-        self.searches         = self.__get_item(config, 'search', False)
-        self.__init_search(self.searches)
-        self.reporting        = self.__get_item(config, 'reporting', False)
-        self.__init_report(self.reporting)
-        self.monitoring       = self.__get_item(config, 'monitoring', False)
-        self.__init_monitoring(self.monitoring)
-        self.regression_testing = self.__get_item(config, 'regression_testing', False)
-        self.__init_regression_testing(self.regression_testing)
-        self.__inputDataValidation()
+        self.flags            = self._get_item(config, 'flags', [])
+        self.engine           = self._get_item(config, 'engine', INSPECTOR)
+        self.user             = self._get_item(config, 'user', None)
+        self.password         = self._get_item(config, 'password', None) 
+        self.silent_mode      = self._get_item(config, 'silent_mode', True)
+        self.config_source    = self._get_item(config, 'config_source', None)
+        self.server           = self._get_item(config, 'server', '127.0.0.1')
+        self.job_server       = self._get_item(config, 'job_server', None)
+        self.port             = self._get_item(config, 'port', '80')
+        self.job_port         = self._get_item(config, 'job_port', None)
+        self.api_version      = self._get_item(config, 'api_version', 'v1')
+        self.col_name         = self._get_item(config, 'col_name', None)
+        self.client_secret    = self._get_item(config, 'client_secret', None)
+        self.csv_mappings     = self._get_item(config, 'csv_mappings', None)
+        self.progress_bar     = self._get_item(config, 'progress_bar', True)
+        self.infinite_loop    = self._get_item(config, 'infinite_loop', False) 
+        self.document_update  = self._get_item(config, 'document_update', False)
+        self.doc_retrieval    = self._get_item(config, 'document_retrieval', False)
+        self._init_doc_retrieval(self.doc_retrieval)
+        self.installer        = self._get_item(config, 'installer', None) 
+        self._init_installer(self.installer)
+        self.uninstaller      = self._get_item(config, 'uninstaller', None) 
+        self._init_uninstaller(self.uninstaller)
+        self.operational      = self._get_item(config, 'operational', None)
+        self._init_operational(self.operational)
+        self.processing       = self._get_item(config, 'processing', False)
+        self._init_processing(self.processing)
+        self.sampling         = self._get_item(config, 'sampling', False)        
+        self._init_sampling(self.sampling)
+        self.schema           = self._get_item(config, 'schema', None)
+        self._init_schema(self.schema)
+        self.feeding          = self._get_item(config, 'feeding', False)
+        self._init_feeder(self.feeding)
+        self.clustering       = self._get_item(config, 'clustering', False)
+        self._init_clustering(self.clustering)
+        self.classifications  = self._get_item(config, 'classification', False)
+        self._init_classification(self.classifications)
+        self.documents_updates= self._get_item(config, 'documents_update', False)
+        self._init_documents_updates(self.documents_updates)
+        self.searches         = self._get_item(config, 'search', False)
+        self._init_search(self.searches)
+        self.reporting        = self._get_item(config, 'reporting', False)
+        self._init_report(self.reporting)
+        self.monitoring       = self._get_item(config, 'monitoring', False)
+        self._init_monitoring(self.monitoring)
+        self.regression_testing = self._get_item(config, 'regression_testing', False)
+        self._init_regression_testing(self.regression_testing)
+        self._inputDataValidation()
 
     def __str__(self):
         varDict = vars(self)
         if varDict:
-            return dumps(vars(self), indent=4)
+            return pretty_formated(vars(self))
         else:
-            return None
+            return {}
 
-    def __get_item(self, config, item, default):
+    def _get_item(self, config, item, default):
+        if hasattr(self, item) and getattr(self, item) != None:
+            return getattr(self, item)
         if config:
             if item in config and (config[item] or type(config[item]) in [bool, int, float]):
+                if default in [None, False, [], {}] and config[item] == "null":
+                    return default
+                if type(default) is int:
+                    return int(config[item])
                 return config[item]
         return default
 
     def get_operation_specific_col_name(self, operation, col_name):
-        op_specific_col_name = self.__get_item(operation, 'col_name', None)
+        op_specific_col_name = self._get_item(operation, 'col_name', None)
         if not op_specific_col_name:
             op_specific_col_name = col_name
         if not op_specific_col_name:
             raise ValueError("The feeding collection has to be set at some level in the config file")
         return op_specific_col_name
-
-    def __init_operational(self, operational):
-        self.installer                = self.__get_item(operational, 'installer', None)
-        self.simulation               = self.__get_item(operational, 'simulation', False)
-        self.version                  = self.__get_item(operational, 'version', None)       
-        self.os                       = self.__get_item(operational, 'os', "auto")      
-        self.pre_operations           = self.__get_item(operational, 'pre_operations', None)
-        self.post_operations          = self.__get_item(operational, 'post_operations', None)
-        self.docker_compose_yml_files = self.__get_item(operational, 'docker_compose_yml_files', [DOCKER_COMPOSE_FILE])
-        self.data_dir_path            = self.__get_item(operational, 'data_dir_path', None)
-        self.dot_env_input_path       = self.__get_item(operational, 'dot_env_input_path', None)
-        self.dot_env_output_path      = self.__get_item(operational, 'dot_env_output_path', ".env")        
-        self.enable_frontend          = self.__get_item(operational, 'enable_frontend', True)
-        self.security                 = self.__get_item(operational, 'security', {})    
-        self.ram_on_host              = int(self.__get_item(operational, 'ram_on_host', 64))
-        self.no_suggest_index         = self.__get_item(operational, 'no_suggest_index', False)
-        self.install_dir              = self.__get_item(operational, 'install_dir', None)
-        self.copy_to_install_dir      = self.__get_item(operational, 'copy_to_install_dir', [])
-        self.file_transfer            = listify(self.__get_item(operational, 'file_transfer', []))
-        self.defender_exclude_paths   = listify(self.__get_item(operational, 'defender_exclude_paths', None))
-        self.docker_registry          = listify(self.__get_item(operational, 'docker_registry', None))
         
-    def __init_schema(self, schema_changes):
+    def _init_installer(self, installer):
+        self.docker_data_dir          = self._get_item(installer, 'docker_data_dir', None)
+        self.gen_dot_env_file_only    = self._get_item(installer, 'gen_dot_env_file_only', False)
+        self.start                    = self._get_item(installer, 'start', False)
+        self.install                  = self._get_item(installer, 'install', False)
+        self.installer_zip_file       = self._get_item(installer, 'installer_zip_file', None)
+        self.processor_node           = self._get_item(installer, 'processor_node', False)
+        self.primary_node             = self._get_item(installer, 'primary_node', False)
+        self.primary_node_IP_or_FQDN  = self._get_item(installer, 'primary_node_IP_or_FQDN', None)
+        self.simulation               = self._get_item(installer, 'simulation', False)
+        self.version                  = self._get_item(installer, 'version', None)       
+        self.os                       = self._get_item(installer, 'os', "auto")      
+        self.docker_compose_yml_files = self._get_item(installer, 'docker_compose_yml_files', [DOCKER_COMPOSE_FILE])   
+        self.enable_frontend          = self._get_item(installer, 'enable_frontend', True)
+        self.external_network         = self._get_item(installer, 'external_network', False)
+        self.enable_grafana           = self._get_item(installer, 'enable_grafana', False)
+        self.enable_feeder            = self._get_item(installer, 'enable_feeder', False)
+        self.disable_defender         = self._get_item(installer, 'disable_defender', True) 
+        self.enable_gdpr              = self._get_item(installer, 'enable_gdpr', True) 
+        self.enable_admin_page        = self._get_item(installer, 'enable_admin_page', False)
+        self.enable_alt_threading     = self._get_item(installer, 'enable_alt_threading', False) 
+        self.start_post_install       = self._get_item(installer, 'start_post_install', False)        
+        self.security                 = self._get_item(installer, 'security', {})    
+        self.ram_on_host              = self._get_item(installer, 'ram_on_host', 64)
+        self.no_suggest_index         = self._get_item(installer, 'no_suggest_index', False)
+        self.install_dir              = self._get_item(installer, 'install_dir', None)
+        self.defender_exclude_paths   = listify(self._get_item(installer, 'defender_exclude_paths', None))
+        self.docker_registry          = listify(self._get_item(installer, 'docker_registry', None))
+        
+    def _init_uninstaller(self, uninstaller):    
+        self.stop                     = self._get_item(uninstaller, 'stop', False)
+        self.uninstall                = self._get_item(uninstaller, 'uninstall', False)
+        self.prune_system             = self._get_item(uninstaller, 'prune_system', False)
+        self.nuke_everything          = self._get_item(uninstaller, 'nuke_everything', False)      
+        self.install_dir              = self._get_item(uninstaller, 'install_dir', None) 
+        self.version                  = self._get_item(uninstaller, 'version', None)
+        
+    def _init_operational(self, operational):
+        self.file_transfer            = listify(self._get_item(operational, 'file_transfer', [])) 
+        
+    def _init_schema(self, schema_changes):
         if not schema_changes:
             self.schema_changes = None
             return 
@@ -5208,59 +6264,63 @@ class Config():
         self.schema_changes = []
         for schema_change in schema_changes:
             self.schema_changes.append({
-                "name"       : self.__get_item(schema_change, 'name', None),
-                "type"       : self.__get_item(schema_change, 'type', "TEXT"),
-                "list"       : self.__get_item(schema_change, 'list', False),
-                "roles"      : self.__get_item(schema_change, 'roles', []),
-                "properties" : self.__get_item(schema_change, 'properties', []),
+                "name"       : self._get_item(schema_change, 'name', None),
+                "type"       : self._get_item(schema_change, 'type', "TEXT"),
+                "list"       : self._get_item(schema_change, 'list', False),
+                "roles"      : self._get_item(schema_change, 'roles', []),
+                "properties" : self._get_item(schema_change, 'properties', []),
             })
         if len([1 for change in self.schema_changes if not "name" in change]):
             raise ConfigError('Schema configuration requires a field name to be set')
             
-    def __init_feeder(self, feeding):
-        self.data_source              = self.__get_item(feeding, 'data_source', None)
-        self.data_source              = FileHandlingTools().get_absolute_path(self.data_source, self.config_source)
-        self.csv_mappings             = self.__get_item(feeding, 'csv_mappings', self.csv_mappings)
-        self.include_headers_in_data  = self.__get_item(feeding, 'include_headers_in_data', False)
-        self.data_type                = self.__get_item(feeding, 'data_type', AUTO)
-        self.fallback_data_type       = self.__get_item(feeding, 'fallback_data_type', None)
-        self.prefeeding_action        = self.__get_item(feeding, 'prefeeding_action', NO_ACTION)
-        self.format                   = self.__get_item(feeding, 'format', {})
-        self.encoding                 = self.__get_item(feeding, 'encoding', AUTO)
-        self.batch_size               = self.__get_item(feeding, 'batch_size', BATCH_SIZE)
-        self.document_type            = self.__get_item(feeding, 'document_type', None)
-        self.preprocess               = self.__get_item(feeding, 'preprocess', None)
-        self.ayfie_json_dump_file     = self.__get_item(feeding, 'ayfie_json_dump_file', None)
-        self.report_doc_ids           = self.__get_item(feeding, 'report_doc_ids', False)
-        self.second_content_field     = self.__get_item(feeding, 'second_content_field', None)
-        self.file_picking_list        = self.__get_item(feeding, 'file_picking_list', None)
-        self.id_picking_list          = self.__get_item(feeding, 'id_picking_list', [])
-        self.file_copy_destination    = self.__get_item(feeding, 'file_copy_destination', None)
-        self.feeding_disabled         = self.__get_item(feeding, 'feeding_disabled', False)
-        self.report_fed_doc_size      = self.__get_item(feeding, 'report_fed_doc_size', False)       
-        self.max_doc_characters       = self.__get_item(feeding, 'max_doc_characters', 0)
-        self.min_doc_characters       = self.__get_item(feeding, 'min_doc_characters', 0)       
-        self.max_doc_size             = self.__get_item(feeding, 'max_doc_size', 0)
-        self.min_doc_size             = self.__get_item(feeding, 'min_doc_size', 0)
-        self.file_type_filter         = self.__get_item(feeding, 'file_type_filter', None)
-        self.file_extension_filter    = self.__get_item(feeding, 'file_extension_filter', None)
-        self.feeding_report_time      = self.__get_item(feeding, 'report_time', False)
-        self.report_doc_error         = self.__get_item(feeding, 'report_doc_error', False)
-        self.no_processing            = self.__get_item(feeding, 'no_processing', False)
-        self.email_address_separator  = self.__get_item(feeding, 'email_address_separator', None)
-        self.ignore_pdfs              = self.__get_item(feeding, 'ignore_pdfs', True)
-        self.treat_csv_as_text        = self.__get_item(feeding, 'treat_csv_as_text', False)
-        self.max_docs_to_feed         = self.__get_item(feeding, 'max_docs_to_feed', None)
-        self.doc_fragmentation        = self.__get_item(feeding, 'doc_fragmentation', False)
-        self.doc_fragment_length      = self.__get_item(feeding, 'doc_fragment_length', 100)   
-        self.max_doc_fragments        = self.__get_item(feeding, 'max_doc_fragments', 10000) 
-        self.fragmented_doc_dir       = self.__get_item(feeding, 'fragmented_doc_dir', None) 
-        self.convert_multipart_msg    = self.__get_item(feeding, 'convert_multipart_msg', False) 
-        self.flag_multipart_msg       = self.__get_item(feeding, 'flag_multipart_msg', False)         
-        id_conv_table_file            = self.__get_item(feeding, 'id_conversion_table_file', None)
-        id_conv_table_delimiter       = self.__get_item(feeding, 'id_conversion_table_delimiter', ",")
-        id_conv_table_id_column       = self.__get_item(feeding, 'id_conv_table_id_column', None)
-        id_conv_table_filename_column = self.__get_item(feeding, 'id_conv_table_filename_column', None)         
+    def _init_feeder(self, feeding):
+        self.data_source              = self._get_item(feeding, 'data_source', None)
+        self.data_source              = FileTools.get_absolute_path(self.data_source, self.config_source)
+        self.csv_mappings             = self._get_item(feeding, 'csv_mappings', self.csv_mappings)
+        self.csv_list_value_delimiter = self._get_item(feeding, 'csv_list_value_delimiter', ";")
+        self.include_headers_in_data  = self._get_item(feeding, 'include_headers_in_data', False)
+        self.data_type                = self._get_item(feeding, 'data_type', AUTO)
+        self.fallback_data_type       = self._get_item(feeding, 'fallback_data_type', None)
+        self.prefeeding_action        = self._get_item(feeding, 'prefeeding_action', NO_ACTION)
+        self.format                   = self._get_item(feeding, 'format', {})
+        self.encoding                 = self._get_item(feeding, 'encoding', AUTO)
+        self.batch_size               = self._get_item(feeding, 'batch_size', BATCH_SIZE)
+        self.document_type            = self._get_item(feeding, 'document_type', None)
+        self.preprocess               = self._get_item(feeding, 'preprocess', None)
+        self.ayfie_json_dump_file     = self._get_item(feeding, 'ayfie_json_dump_file', None)
+        self.report_doc_ids           = self._get_item(feeding, 'report_doc_ids', False)
+        self.second_content_field     = self._get_item(feeding, 'second_content_field', None)
+        self.file_picking_list        = self._get_item(feeding, 'file_picking_list', None)
+        self.id_picking_list          = self._get_item(feeding, 'id_picking_list', [])
+        self.file_copy_destination    = self._get_item(feeding, 'file_copy_destination', None)
+        self.feeding_disabled         = self._get_item(feeding, 'feeding_disabled', False)
+        self.report_fed_doc_size      = self._get_item(feeding, 'report_fed_doc_size', False)       
+        self.max_doc_characters       = self._get_item(feeding, 'max_doc_characters', 0)
+        self.min_doc_characters       = self._get_item(feeding, 'min_doc_characters', 0)       
+        self.max_doc_size             = self._get_item(feeding, 'max_doc_size', 0)
+        self.min_doc_size             = self._get_item(feeding, 'min_doc_size', 0)
+        self.file_type_filter         = self._get_item(feeding, 'file_type_filter', None)
+        self.file_extension_filter    = self._get_item(feeding, 'file_extension_filter', None)
+        self.feeding_report_time      = self._get_item(feeding, 'report_time', False)
+        self.report_doc_error         = self._get_item(feeding, 'report_doc_error', False)
+        self.no_processing            = self._get_item(feeding, 'no_processing', False)
+        self.email_address_separator  = self._get_item(feeding, 'email_address_separator', None)
+        self.ignore_pdfs              = self._get_item(feeding, 'ignore_pdfs', True)
+        self.convert_html_files       = self._get_item(feeding, 'convert_html_files', False)
+        self.ignore_csv               = self._get_item(feeding, 'ignore_csv', False)
+        self.treat_csv_as_text        = self._get_item(feeding, 'treat_csv_as_text', False)
+        self.max_docs_to_feed         = self._get_item(feeding, 'max_docs_to_feed', None)
+        self.doc_fragmentation        = self._get_item(feeding, 'doc_fragmentation', False)
+        self.doc_fragment_length      = self._get_item(feeding, 'doc_fragment_length', 100)   
+        self.max_doc_fragments        = self._get_item(feeding, 'max_doc_fragments', 10000) 
+        self.fragmented_doc_dir       = self._get_item(feeding, 'fragmented_doc_dir', None) 
+        self.convert_multipart_msg    = self._get_item(feeding, 'convert_multipart_msg', False) 
+        self.flag_multipart_msg       = self._get_item(feeding, 'flag_multipart_msg', False)
+        self.max_fuzzy_chars_per_doc  = self._get_item(feeding, 'max_fuzzy_chars_per_doc', 0)
+        id_conv_table_file            = self._get_item(feeding, 'id_conversion_table_file', None)
+        id_conv_table_delimiter       = self._get_item(feeding, 'id_conversion_table_delimiter', ",")
+        id_conv_table_id_column       = self._get_item(feeding, 'id_conv_table_id_column', None)
+        id_conv_table_filename_column = self._get_item(feeding, 'id_conv_table_filename_column', None)         
         self.id_mappings = {}
         if id_conv_table_file:
             minimum_columns = max(id_conv_table_id_column, id_conv_table_filename_column) + 1 
@@ -5279,73 +6339,73 @@ class Config():
             except FileNotFoundError:
                 raise ValueError(f"File '{filename}' with doc id list does not exists")
         
-    def __init_processing(self, processing): 
-        self.thread_min_chunks_overlap= self.__get_item(processing, 'thread_min_chunks_overlap', None)
-        self.near_duplicate_evaluation= self.__get_item(processing, 'near_duplicate_evaluation', None)
-        self.processing_report_time   = self.__get_item(processing, 'report_time', False)
+    def _init_processing(self, processing): 
+        self.thread_min_chunks_overlap= self._get_item(processing, 'thread_min_chunks_overlap', None)
+        self.near_duplicate_evaluation= self._get_item(processing, 'near_duplicate_evaluation', None)
+        self.processing_report_time   = self._get_item(processing, 'report_time', False)
         
-    def __init_sampling(self, sampling):
+    def _init_sampling(self, sampling):
         if sampling:
             self.sampling = {
-                "method"                    : self.__get_item(sampling, 'method', "SMART"),
-                "size"                      : self.__get_item(sampling, 'size', 100),
-                "smart_specificity"         : self.__get_item(sampling, 'smartSpecificity', 0.3),
-                "smart_dimensions"          : self.__get_item(sampling, 'smartDimensions', 100),
-                "smart_min_df"              : self.__get_item(sampling, 'smartMinDf', 0.0005),
-                "smart_presampling"         : self.__get_item(sampling, 'smartPresampling', 100),
-                "filters"                   : self.__get_item(sampling, 'filters', []), 
+                "method"                    : self._get_item(sampling, 'method', "SMART"),
+                "size"                      : self._get_item(sampling, 'size', 100),
+                "smart_specificity"         : self._get_item(sampling, 'smartSpecificity', 0.3),
+                "smart_dimensions"          : self._get_item(sampling, 'smartDimensions', 100),
+                "smart_min_df"              : self._get_item(sampling, 'smartMinDf', 0.0005),
+                "smart_presampling"         : self._get_item(sampling, 'smartPresampling', 100),
+                "filters"                   : self._get_item(sampling, 'filters', []), 
             }
-            self.sampling_report_time       = self.__get_item(sampling, 'report_time', False)
+            self.sampling_report_time       = self._get_item(sampling, 'report_time', False)
 
-    def __init_clustering(self, clustering):
+    def _init_clustering(self, clustering):
         if not clustering:
             return
         c = {}
         c['dummy']                    = True
-        c['clustersPerLevel']         = self.__get_item(clustering, 'clustersPerLevel', None)
-        c['documentsPerCluster']      = self.__get_item(clustering, 'documentsPerCluster', None)
-        c['maxRecursionDepth']        = self.__get_item(clustering, 'maxRecursionDepth', None)
-        c['minDf']                    = self.__get_item(clustering, 'minDf', None)
-        c['maxDfFraction']            = self.__get_item(clustering, 'maxDfFraction', None)
+        c['clustersPerLevel']         = self._get_item(clustering, 'clustersPerLevel', None)
+        c['documentsPerCluster']      = self._get_item(clustering, 'documentsPerCluster', None)
+        c['maxRecursionDepth']        = self._get_item(clustering, 'maxRecursionDepth', None)
+        c['minDf']                    = self._get_item(clustering, 'minDf', None)
+        c['maxDfFraction']            = self._get_item(clustering, 'maxDfFraction', None)
         c = {key: c[key] for key in c if c[key] != None}
         self.clustering               = c
-        self.clustering_filters       = self.__get_item(clustering, 'filters', [])
-        self.clustering_output_field  = self.__get_item(clustering, 'outputField', '_cluster')
-        self.clustering_report_time   = self.__get_item(clustering, 'report_time', False)
+        self.clustering_filters       = self._get_item(clustering, 'filters', [])
+        self.clustering_output_field  = self._get_item(clustering, 'outputField', '_cluster')
+        self.clustering_report_time   = self._get_item(clustering, 'report_time', False)
         
-    def __init_classification(self, classifications):
+    def _init_classification(self, classifications):
         if not classifications:
             return 
         self.classifications = []
         classifications = listify(classifications)
         for classification in classifications:
             self.classifications.append({
-                "name"              : self.__get_item(classification, 'name', None),
-                "training_field"    : self.__get_item(classification, 'trainingClassesField', 'trainingClass'),
-                "min_score"         : self.__get_item(classification, 'minScore', 0.6),
-                "num_results"       : self.__get_item(classification, 'numResults', 1),
-                "use_entities"      : self.__get_item(classification, 'useEntities', True),
-                "use_tokens"        : self.__get_item(classification, 'useTokens', False),
-                "training_filters"  : self.__get_item(classification, 'training_filters', []),
-                "execution_filters" : self.__get_item(classification, 'execution_filters', []),
-                "output_field"      : self.__get_item(classification, 'outputField', 'pathclassification'),
-                "k-fold"            : self.__get_item(classification, 'k-fold', None),
-                "test_output_file"  : self.__get_item(classification, 'test_output_file', "test_output_file.html")
+                "name"              : self._get_item(classification, 'name', None),
+                "training_field"    : self._get_item(classification, 'trainingClassesField', 'trainingClass'),
+                "min_score"         : self._get_item(classification, 'minScore', 0.6),
+                "num_results"       : self._get_item(classification, 'numResults', 1),
+                "use_entities"      : self._get_item(classification, 'useEntities', True),
+                "use_tokens"        : self._get_item(classification, 'useTokens', False),
+                "training_filters"  : self._get_item(classification, 'training_filters', []),
+                "execution_filters" : self._get_item(classification, 'execution_filters', []),
+                "output_field"      : self._get_item(classification, 'outputField', 'pathclassification'),
+                "k-fold"            : self._get_item(classification, 'k-fold', None),
+                "test_output_file"  : self._get_item(classification, 'test_output_file', join(AYFIE_EXPRESS_CFG_DIR, "test_output_file.html"))
             })
 
-    def __init_documents_updates(self, documents_updates):
+    def _init_documents_updates(self, documents_updates):
         self.docs_updates = []
         documents_updates = listify(documents_updates)
         for documents_update in documents_updates:
             self.docs_updates.append({
-                "query"                  : self.__get_item(documents_update, 'query', "*"),
-                "action"                 : self.__get_item(documents_update, 'action', ADD_VALUES),
-                "field"                  : self.__get_item(documents_update, 'field', 'trainingClass'),
-                "values"                 : self.__get_item(documents_update, 'values', []),
-                "filters"                : self.__get_item(documents_update, 'filters', []),
-                "id_extraction_query"    : self.__get_item(documents_update, 'id_extraction_query', "*"),
-                "numb_of_docs_to_update" : self.__get_item(documents_update, 'numb_of_docs', "ALL"),
-                "report_time"            : self.__get_item(documents_update, 'report_time', False)
+                "query"                  : self._get_item(documents_update, 'query', "*"),
+                "action"                 : self._get_item(documents_update, 'action', ADD_VALUES),
+                "field"                  : self._get_item(documents_update, 'field', 'trainingClass'),
+                "values"                 : self._get_item(documents_update, 'values', []),
+                "filters"                : self._get_item(documents_update, 'filters', []),
+                "id_extraction_query"    : self._get_item(documents_update, 'id_extraction_query', "*"),
+                "numb_of_docs_to_update" : self._get_item(documents_update, 'numb_of_docs', "ALL"),
+                "report_time"            : self._get_item(documents_update, 'report_time', False)
             })
         for docs_update in self.docs_updates:
             if docs_update['filters'] != "DOC_IDS":
@@ -5359,23 +6419,29 @@ class Config():
                         except FileNotFoundError:
                             raise ValueError(f"File '{filename}' with doc id list does not exists")
                             
-    def __init_doc_retrieval(self, doc_retrieval):
-        self.doc_retrieval_always_use_search      = self.__get_item(doc_retrieval, 'always_use_search', True)
-        self.doc_retrieval_skip_empty_documents   = self.__get_item(doc_retrieval, 'skip_empty_documents', False)
-        self.doc_retrieval_output_file            = self.__get_item(doc_retrieval, 'output_file', "output.csv")
-        self.doc_retrieval_fields                 = self.__get_item(doc_retrieval, 'fields', [])
-        self.doc_retrieval_batch_size             = self.__get_item(doc_retrieval, 'batch_size', "auto")
-        self.doc_retrieval_csv_dialect            = self.__get_item(doc_retrieval, 'csv_dialect', None)
-        self.doc_retrieval_separator              = self.__get_item(doc_retrieval, 'csv_separator', "|")
-        self.doc_retrieval_query                  = self.__get_item(doc_retrieval, 'query', "")
-        self.doc_retrieval_filters                = self.__get_item(doc_retrieval, 'filters', [])
-        self.doc_retrieval_exclude                = self.__get_item(doc_retrieval, 'exclude', [])
-        self.doc_retrieval_max_docs               = self.__get_item(doc_retrieval, 'max_docs', None)
-        self.doc_retrieval_csv_header_row         = self.__get_item(doc_retrieval, 'csv_header_row', True) 
-        self.doc_retrieval_report_frequency       = self.__get_item(doc_retrieval, 'report_frequency', 1000)  
-        self.doc_retrieval_drop_underscore_fields = self.__get_item(doc_retrieval, 'drop_underscore_fields', True) 
-        self.doc_retrieval_field_merging          = self.__get_item(doc_retrieval, 'field_merging', {}) 
+    def _init_doc_retrieval(self, doc_retrieval):
+        self.doc_retrieval_always_use_search      = self._get_item(doc_retrieval, 'always_use_search', True)
+        self.doc_retrieval_skip_empty_documents   = self._get_item(doc_retrieval, 'skip_empty_documents', False)
+        self.doc_retrieval_output_file            = self._get_item(doc_retrieval, 'output_file', "output.csv")
+        self.doc_retrieval_fields                 = self._get_item(doc_retrieval, 'fields', [])
+        self.doc_retrieval_skip_if_field_empty    = self._get_item(doc_retrieval, 'skip_if_field_empty', [])
+        self.doc_retrieval_skip_if_field_content  = self._get_item(doc_retrieval, 'skip_if_field_content', [])
+        self.doc_retrieval_batch_size             = self._get_item(doc_retrieval, 'batch_size', "auto")
+        self.doc_retrieval_csv_dialect            = self._get_item(doc_retrieval, 'csv_dialect', None)
+        self.doc_retrieval_separator              = self._get_item(doc_retrieval, 'csv_separator', "|")
+        self.doc_retrieval_query                  = self._get_item(doc_retrieval, 'query', "")
+        self.doc_retrieval_filters                = self._get_item(doc_retrieval, 'filters', [])
+        self.doc_retrieval_exclude                = self._get_item(doc_retrieval, 'exclude', [])
+        self.doc_retrieval_max_docs               = self._get_item(doc_retrieval, 'max_docs', None)
+        self.doc_retrieval_csv_header_row         = self._get_item(doc_retrieval, 'csv_header_row', True) 
+        self.doc_retrieval_report_frequency       = self._get_item(doc_retrieval, 'report_frequency', 1000)  
+        self.doc_retrieval_drop_underscore_fields = self._get_item(doc_retrieval, 'drop_underscore_fields', True) 
+        self.doc_retrieval_field_merging          = self._get_item(doc_retrieval, 'field_merging', {}) 
         
+        common_fields = list(set(self.doc_retrieval_skip_if_field_empty) & set(self.doc_retrieval_skip_if_field_content))
+        if common_fields:
+            common_fields = "', '".join(common_fields)
+            raise ValueError(f"'skip_if_field_empty' and 'skip_if_field_content' cannot contain the same field name(s): '{common_fields}'")
         if self.doc_retrieval_csv_dialect:
             if not self.doc_retrieval_csv_dialect in csv.list_dialects():
                 raise ValueError(f"'{self.doc_retrieval_}' is not csv dialect")
@@ -5383,16 +6449,16 @@ class Config():
             self.doc_retrieval_csv_dialect = 'custom_config'
             csv.register_dialect(
                 self.doc_retrieval_csv_dialect, 
-                delimiter        = self.__get_item(doc_retrieval, 'csv_delimiter', ','),
-                doublequote      = self.__get_item(doc_retrieval, 'csv_double_quote', True), 
-                quotechar        = self.__get_item(doc_retrieval, 'csv_quote_char', '"'), 
-                lineterminator   = self.__get_item(doc_retrieval, 'csv_line_terminator', '\r\n'), 
-                escapechar       = self.__get_item(doc_retrieval, 'csv_escape_char', None),
-                quoting          = eval("csv." + self.__get_item(doc_retrieval, 'csv_quoting', "QUOTE_MINIMAL")),
-                skipinitialspace = self.__get_item(doc_retrieval, 'csv_skip_initial_space', False)
+                delimiter        = self._get_item(doc_retrieval, 'csv_delimiter', ','),
+                doublequote      = self._get_item(doc_retrieval, 'csv_double_quote', True), 
+                quotechar        = self._get_item(doc_retrieval, 'csv_quote_char', '"'), 
+                lineterminator   = self._get_item(doc_retrieval, 'csv_line_terminator', '\r\n'), 
+                escapechar       = self._get_item(doc_retrieval, 'csv_escape_char', None),
+                quoting          = eval("csv." + self._get_item(doc_retrieval, 'csv_quoting', "QUOTE_MINIMAL")),
+                skipinitialspace = self._get_item(doc_retrieval, 'csv_skip_initial_space', False)
             )
 
-    def __init_search(self, searches):
+    def _init_search(self, searches):
         if not searches:
             self.searches = []
             return  
@@ -5400,78 +6466,78 @@ class Config():
         searches = listify(searches)
         for search in searches:
             self.searches.append({
-                "query_file"         : self.__get_item(search, 'query_file', None),
-                "result"             : self.__get_item(search, 'result', "normal"),
-                "result_destination" : self.__get_item(search, 'result_destination', "display"),
-                "classifier_field"   : self.__get_item(search, 'classifier_field', None),
-                "highlight"          : self.__get_item(search, 'highlight', True),
-                "sort_criterion"     : self.__get_item(search, 'sort_criterion', "_score"),
-                "sort_order"         : self.__get_item(search, 'sort_order', "desc"),
-                "minScore"           : self.__get_item(search, 'minScore', 0.0),
-                "exclude"            : self.__get_item(search, 'exclude', []),
-                "aggregations"       : self.__get_item(search, 'aggregations', []),
-                "filters"            : self.__get_item(search, 'filters', []),
-                "query"              : self.__get_item(search, 'query', ""),
-                "scroll"             : self.__get_item(search, 'scroll', False),
-                "size"               : self.__get_item(search, 'size', 20),
-                "offset"             : self.__get_item(search, 'offset', 0),
-                "suggest_only"       : self.__get_item(search, 'suggest_only', False), 
-                "suggest_offset"     : self.__get_item(search, 'suggest_offset', None), 
-                "suggest_limit"      : self.__get_item(search, 'suggest_limit', None), 
-                "suggest_filter"     : self.__get_item(search, 'suggest_filter', None)                
+                "query_file"         : self._get_item(search, 'query_file', None),
+                "result"             : self._get_item(search, 'result', "normal"),
+                "result_destination" : self._get_item(search, 'result_destination', "display"),
+                "classifier_field"   : self._get_item(search, 'classifier_field', None),
+                "highlight"          : self._get_item(search, 'highlight', True),
+                "sort_criterion"     : self._get_item(search, 'sort_criterion', "_score"),
+                "sort_order"         : self._get_item(search, 'sort_order', "desc"),
+                "minScore"           : self._get_item(search, 'minScore', 0.0),
+                "exclude"            : self._get_item(search, 'exclude', []),
+                "aggregations"       : self._get_item(search, 'aggregations', []),
+                "filters"            : self._get_item(search, 'filters', []),
+                "query"              : self._get_item(search, 'query', ""),
+                "scroll"             : self._get_item(search, 'scroll', False),
+                "size"               : self._get_item(search, 'size', 20),
+                "offset"             : self._get_item(search, 'offset', 0),
+                "suggest_only"       : self._get_item(search, 'suggest_only', False), 
+                "suggest_offset"     : self._get_item(search, 'suggest_offset', None), 
+                "suggest_limit"      : self._get_item(search, 'suggest_limit', None), 
+                "suggest_filter"     : self._get_item(search, 'suggest_filter', None)                
             })
 
-    def __init_report(self, report):
-        self.report_logs_source       = self.__get_item(report, 'logs_source', False)
-        self.report_skip_format_test  = self.__get_item(report, 'skip_format_test', False)
-        self.report_logs_source       = FileHandlingTools().get_absolute_path(self.report_logs_source, self.config_source)
-        self.report_output_destination= self.__get_item(report, 'output_destination', TERMINAL_OUTPUT)
-        self.report_verbose           = self.__get_item(report, 'verbose', False)
-        self.report_jobs              = self.__get_item(report, 'jobs', False)
-        self.report_noise_filtering   = self.__get_item(report, 'noise_filtering', False)
-        self.report_retrieve_logs     = self.__get_item(report, 'retrieve_logs', False)
-        self.report_dump_all_lines    = self.__get_item(report, 'dump_all_lines', False)
-        self.report_dump_custom_lines = self.__get_item(report, 'dump_custom_lines', False)
-        self.report_jobs_overview     = self.__get_item(report, 'jobs_overview', False)
-        self.report_show_all_job_ids  = self.__get_item(report, 'show_all_job_ids', False)
-        self.report_custom_regexs     = listify(self.__get_item(report, 'custom_regexs', []))
-        self.report_max_log_lines     = self.__get_item(report, 'max_log_lines', None)
-        self.report_resource_usage    = self.__get_item(report, 'resource_usage', 0)  
-        self.report_queries           = self.__get_item(report, 'report_queries', False)
-        self.report_queries_by_date   = self.__get_item(report, 'queries_by_date', False)
-        self.report_remove_query_part = listify(self.__get_item(report, 'remove_query_part', None))          
-        self.report_log_splitting     = self.__get_item(report, 'log_splitting', False)
-        self.report_log_splitting_dir = listify(self.__get_item(report, 'log_splitting_dir', "split_log_files"))
-        self.report_log_split_date_filter = self.__get_item(report, 'log_split_date_filter', None) 
-        self.report_query_statistic_format = self.__get_item(report, 'query_statistic_format', CSV) 
-        self.report_query_statistic_per_file = self.__get_item(report, 'query_statistic_per_file', True)          
+    def _init_report(self, report):
+        self.report_logs_source       = self._get_item(report, 'logs_source', False)
+        self.report_skip_format_test  = self._get_item(report, 'skip_format_test', False)
+        self.report_logs_source       = FileTools.get_absolute_path(self.report_logs_source, self.config_source)
+        self.report_output_destination= self._get_item(report, 'output_destination', TERMINAL_OUTPUT)
+        self.report_verbose           = self._get_item(report, 'verbose', False)
+        self.report_jobs              = self._get_item(report, 'jobs', False)
+        self.report_noise_filtering   = self._get_item(report, 'noise_filtering', False)
+        self.report_retrieve_logs     = self._get_item(report, 'retrieve_logs', False)
+        self.report_dump_all_lines    = self._get_item(report, 'dump_all_lines', False)
+        self.report_dump_custom_lines = self._get_item(report, 'dump_custom_lines', False)
+        self.report_jobs_overview     = self._get_item(report, 'jobs_overview', False)
+        self.report_show_all_job_ids  = self._get_item(report, 'show_all_job_ids', False)
+        self.report_custom_regexs     = listify(self._get_item(report, 'custom_regexs', []))
+        self.report_max_log_lines     = self._get_item(report, 'max_log_lines', None)
+        self.report_resource_usage    = self._get_item(report, 'resource_usage', 0)  
+        self.report_queries           = self._get_item(report, 'report_queries', False)
+        self.report_queries_by_date   = self._get_item(report, 'queries_by_date', False)
+        self.report_remove_query_part = listify(self._get_item(report, 'remove_query_part', None))          
+        self.report_log_splitting     = self._get_item(report, 'log_splitting', False)
+        self.report_log_splitting_dir = listify(self._get_item(report, 'log_splitting_dir', "split_log_files"))
+        self.report_log_split_date_filter = self._get_item(report, 'log_split_date_filter', None) 
+        self.report_query_statistic_format = self._get_item(report, 'query_statistic_format', CSV) 
+        self.report_query_statistic_per_file = self._get_item(report, 'query_statistic_per_file', True)          
         if self.report_log_split_date_filter:
             yesterday = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
             self.report_log_split_date_filter = [yesterday if date == YESTERDAY else date for date in self.report_log_split_date_filter]
             
-    def __init_monitoring(self, monitorings):
+    def _init_monitoring(self, monitorings):
         if not monitorings:
             self.monitorings = []
             return  
         self.monitorings = [] 
         for monitoring in listify(monitorings):
             self.monitorings.append({  
-                "endpoint"           : self.__get_item(monitoring, 'endpoint', None),
-                "encoding"           : self.__get_item(monitoring, 'encoding', "utf-8"),
-                "regex"              : self.__get_item(monitoring, 'regex', "^.*$"),
-                "query"              : self.__get_item(monitoring, 'query', None),
-                "suggest"            : self.__get_item(monitoring, 'suggest', None),
-                "col_id"             : self.__get_item(monitoring, 'col_id', None),
-                "server"             : self.__get_item(monitoring, 'server', None),
-                "port"               : self.__get_item(monitoring, 'port', None),  
-                "user"               : self.__get_item(monitoring, 'user', None),
-                "password"           : self.__get_item(monitoring, 'password', None),                 
-                "min_docs"           : self.__get_item(monitoring, 'min_docs', 0),
-                "queue_length"       : self.__get_item(monitoring, 'queue_length', 10),
-                "alerts"             : self.__get_item(monitoring, 'alerts', {}),
-                "min_score"          : self.__get_item(monitoring, 'min_score', 50),
-                "heartbeats"         : self.__get_item(monitoring, 'heartbeats', {}),
-                "heartbeat_interval" : self.__get_item(monitoring, 'heartbeat_interval', 86400)
+                "endpoint"           : self._get_item(monitoring, 'endpoint', None),
+                "encoding"           : self._get_item(monitoring, 'encoding', "utf-8"),
+                "regex"              : self._get_item(monitoring, 'regex', "^.*$"),
+                "query"              : self._get_item(monitoring, 'query', None),
+                "suggest"            : self._get_item(monitoring, 'suggest', None),
+                "col_id"             : self._get_item(monitoring, 'col_id', None),
+                "server"             : self._get_item(monitoring, 'server', None),
+                "port"               : self._get_item(monitoring, 'port', None),  
+                "user"               : self._get_item(monitoring, 'user', None),
+                "password"           : self._get_item(monitoring, 'password', None),                 
+                "min_docs"           : self._get_item(monitoring, 'min_docs', 0),
+                "queue_length"       : self._get_item(monitoring, 'queue_length', 10),
+                "alerts"             : self._get_item(monitoring, 'alerts', {}),
+                "min_score"          : self._get_item(monitoring, 'min_score', 50),
+                "heartbeats"         : self._get_item(monitoring, 'heartbeats', {}),
+                "heartbeat_interval" : self._get_item(monitoring, 'heartbeat_interval', 86400)
             })
             for monitoring in self.monitorings:
                 for notification_type in NOTIFICATION_TYPES:
@@ -5484,25 +6550,25 @@ class Config():
                         if type(monitoring[notification_type][message_type]) is str:
                             monitoring[notification_type][message_type] = [monitoring[notification_type][message_type]]
         
-    def __init_regression_testing(self, regression_testing):
-        self.upload_config_dir        = self.__get_item(regression_testing, 'upload_config_dir', None)
-        self.query_config_dir         = self.__get_item(regression_testing, 'query_config_dir', None)
-        self.server_settings          = self.__get_item(regression_testing, 'server_settings', "override_config")
+    def _init_regression_testing(self, regression_testing):
+        self.upload_config_dir        = self._get_item(regression_testing, 'upload_config_dir', None)
+        self.tests_root_dir           = self._get_item(regression_testing, 'tests_root_dir', None)
+        self.use_master_settings      = self._get_item(regression_testing, 'use_master_settings', True)
 
-    def __inputDataValidation(self):
+    def _inputDataValidation(self):
         if self.report_logs_source and self.report_retrieve_logs: 
             raise ConfigError('Either analyze existing file or produce new ones, both is not possible')  
         if self.progress_bar and self.engine != INSPECTOR:
             self.progress_bar = False
 
     def get_config_keys(self):
-        return [key for key in self.config_keys if not (key in NON_ACTION_CONFIG or key.lower().startswith("x"))]
+        return [key for key in self.config_keys if not (key in self.NON_ACTION_CONFIG or key.lower().startswith("x"))]
         
     def get_offline_config_keys(self):
-        return [key for key in self.get_config_keys() if key in OFFLINE_ACTIONS]
+        return [key for key in self.get_config_keys() if key in self.OFFLINE_ACTIONS]
 
     def get_online_config_keys(self):
-        return [key for key in self.get_config_keys() if key not in OFFLINE_ACTIONS]
+        return [key for key in self.get_config_keys() if key not in self.OFFLINE_ACTIONS]
 
         
 class TestExecutor():
@@ -5511,7 +6577,7 @@ class TestExecutor():
         self.config = config
         self.use_master_config_settings = use_master_config_settings
         
-    def __execute_config(self, config_file_path):
+    def _execute_config(self, config_file_path):
         if getsize(config_file_path) > 99999:
             return
         with open(config_file_path, 'rb') as f:
@@ -5525,45 +6591,46 @@ class TestExecutor():
             config['server'] = self.config.server
         if 'port' not in config or self.use_master_config_settings:
             config['port'] = self.config.port
-
+        if "operational" in config:
+            if self.config.version and self.use_master_config_settings:
+                config["operational"]['version'] = self.config.version
         if "search" in config:
             if "search_query_file" in config["search"]:
-                config["search"]['search_query_file'] = self.__get_file_path(
-                        config_file_path, config["search"]['search_query_file'])
-                        
+                config["search"]['search_query_file'] = self._get_file_path(
+                        config_file_path, config["search"]['search_query_file'])             
         if "reporting" in config:
             if "logs_source" in config["reporting"]:
-                config["reporting"]['logs_source'] = self.__get_file_path(config_file_path, config["reporting"]['logs_source'])
-
-        temp_config_file = 'tmp.cfg'
-        with open(temp_config_file, 'wb') as f:
-            f.write(dumps(config).encode('utf-8'))
+                config["reporting"]['logs_source'] = self._get_file_path(config_file_path, config["reporting"]['logs_source']) 
+        temp_config_file = join(AYFIE_EXPRESS_CFG_DIR, 'tmp.cfg')
+        Os.make_dir(AYFIE_EXPRESS_CFG_DIR) 
+        Os.write_to_file_as_non_root_user(temp_config_file, dumps(config).encode('utf-8'))
         try:
-            run_cmd_line(['ayfieExpress.py', temp_config_file])
+            sys.argv = ['ayfieExpress.py', temp_config_file]
+            Admin(Config(CommandLine().get_config(False))).run_config()
         except Exception as e:
             print(f'TEST ERROR: "{config_file_path}": {str(e)}')
             raise
         
-    def __retrieve_configs_and_execute(self, root_dir):
-        for config_file_path in FileHandlingTools().get_next_file(root_dir, ["data", "query", "disabled", "logs"]):
-            self.__execute_config(config_file_path)
+    def _retrieve_configs_and_execute(self, root_dir):
+        for config_file_path in FileTools.get_next_file(root_dir, ["data", "query", "disabled", "logs"]):
+            self._execute_config(config_file_path)
 
-    def __get_file_path(self, root_path, leaf_path):
+    def _get_file_path(self, root_path, leaf_path):
         if isabs(leaf_path):
             return leaf_path
         return join(path_split(root_path)[0], leaf_path)
 
     def run_tests(self):
         if self.config.upload_config_dir:
-            config_dir = self.__get_file_path(self.config.config_source, self.upload_config_dir)
-            self.__retrieve_configs_and_execute(config_dir)
-        if self.config.query_config_dir:
-            config_dir = self.__get_file_path(self.config.config_source, self.config.query_config_dir)
-            self.__retrieve_configs_and_execute(config_dir)
+            self._retrieve_configs_and_execute(config_dir)
+            config_dir = self._get_file_path(self.config.config_source, self.upload_config_dir)
+        if self.config.tests_root_dir:
+            config_dir = self._get_file_path(self.config.config_source, self.config.tests_root_dir)
+            self._retrieve_configs_and_execute(config_dir)
 
     def process_test_result(self, search, result):
         if not self.config.config_source:
-            self.config.config_source = "The test"
+            self.config.config_source = f'The test'
         if type(search["result"]) is bool:
             if search["result"]:
                 print(f'CORRECT: {self.config.config_source} is hardcoded to be correct')
@@ -5572,10 +6639,11 @@ class TestExecutor():
         elif type(search["result"]) is int:
             expected_results = int(search["result"])
             actual_results = int(result['meta']['totalDocuments'])
+            query = search["query"]
             if actual_results == expected_results:
-                print(f'CORRECT: {self.config.config_source} returns {actual_results} results')
+                print(f'CORRECT: The query "{query}" returns {actual_results} result(s)')
             else:
-                print(f'FAILURE: {self.config.config_source} should return {expected_results} results, not {actual_results}')
+                print(f'FAILURE: The query "{query}" should return {expected_results} result(s), not {actual_results}')
 
 
 class Admin():
@@ -5590,6 +6658,7 @@ class Admin():
             elif self.config.engine == SOLR:
                 data_source = SolrDataSource(self.config)
         self.operational = Operational(self.config)
+        self.installer = Installer(self.config)
         self.schema_manager = SchemaManager(self.config)
         self.feeder = Feeder(self.config, data_source)
         self.querier = Querier(self.config)
@@ -5600,20 +6669,12 @@ class Admin():
         self.doc_retriever = DocumentRetriever(self.config)
         self.sampler = Sampler(self.config)
         self.monitoring = Monitoring(self.config)
-        
-    def run_post_operations(self):
-        if self.config.reporting:
-            self.reporter.do_reporting()
-        if self.config.operational and self.config.post_operations:
-            try:
-                self.operational.do_post_operations()
-            except EngineDown:
-                pass
+        self.uninstaller = Uninstaller(self.config)
 
-    def search_result_processing(self, search, result):
+    def _search_result_processing(self, search, result):
         result_type = type(search["result"])
         if result_type is bool or result_type is int:
-            testExecutor = TestExecutor(self.config, self.config.server_settings)
+            testExecutor = TestExecutor(self.config, self.config.use_master_settings)
             testExecutor.process_test_result(search, result) 
             return
         elif not search["result"] in RESULT_TYPES:
@@ -5644,125 +6705,766 @@ class Admin():
             print(output)
         else:
             try:
-                with open(search["result_destination"], 'wb') as f:
-                    f.write(output.encode('utf-8'))
+                Os.write_to_file_as_non_root_user(search["result_destination"], output.encode('utf-8'))
             except:
                 msg = f'Parameter "result_destination" must be {", ".join(RESULT_DESTINATIONS)} or a output file path'
                 raise ValueError(msg)
         
     def run_config(self):
-        if self.config.regression_testing:
-            if self.config.server_settings == OVERRIDE_CONFIG:
-                use_master_settings = True
-            elif self.config.server_settings == RESPECT_CONFIG:
-                use_master_settings = False
-            else:
-                raise ValueError(f"'{self.config.server_settings}' is not a valid value for regression-testing.server_settings")
-            testExecutor = TestExecutor(self.config, use_master_settings)
-            testExecutor.run_tests()
-            return
-            
-        if self.config.operational and self.config.pre_operations:
-            try:
-                self.operational.do_pre_operations()
-            except EngineDown:
-                online_config_keys = self.config.get_online_config_keys()
-                if self.config.get_online_config_keys:
-                    log.info(f'"{self.config.engine}" is down, unable to execute {online_config_keys}')
-                    return
-                    
-        if self.config.server != OFF_LINE:
-            if self.config.data_source:
-                if self.config.prefeeding_action not in PRE_FEEDING_ACTIONS:
-                    actions = '", "'.join(PRE_FEEDING_ACTIONS)
-                    msg = f'"prefeeding_action" must be one of these: "{actions}"'
-                    raise ConfigError(msg)
-                if self.config.prefeeding_action == DEL_ALL_COL:
-                    self.feeder.delete_all_collections()
-                elif self.config.prefeeding_action == DEL_COL:
-                    self.feeder.delete_collection_if_exists()
-                elif self.config.prefeeding_action == RECREATE_COL:
-                    self.feeder.delete_collection_if_exists()
-                    self.feeder.create_collection_if_not_exists()
-                elif self.config.prefeeding_action == CREATE_MISSING_COL:
-                    self.feeder.create_collection_if_not_exists()
-                if self.feeder.collection_exists():
-                    if self.config.schema_changes:
-                        self.schema_manager.add_field_if_absent()
-                    if self.config.no_processing:
-                        self.feeder.feed_documents_and_commit()
-                    else:
-                        self.feeder.feed_documents_commit_and_process()
-                else:
-                    raise ConfigError(f'Cannot feed to non-existing collection "{self.config.col_name}"')
-            elif not self.feeder.collection_exists():
-                if self.config.get_offline_config_keys():
-                    return self.run_post_operations()
-                else:
-                    raise ConfigError(f'There is no collection "{self.config.col_name}"')
-
-            if self.config.processing:
-                self.feeder.process()
-            if self.config.schema_changes:
-                self.schema_manager.add_field_if_absent()
-            if self.config.documents_updates:
-                self.document_updater.do_updates()
-            if self.config.clustering:
-                self.clusterer.create_clustering_job_and_wait()
-            if self.config.classifications:
-                self.classifier.do_classifications()
-            if self.config.doc_retrieval:
-                self.doc_retriever.retrieve_documents()
-            if self.config.sampling:
-                pretty_print(self.sampler.create_sampling_job_and_wait())
-            for search in self.config.searches:
+        while True:
+            if self.config.regression_testing:
+                TestExecutor(self.config, self.config.use_master_settings).run_tests()
+                return
+                
+            if self.config.installer:
                 try:
-                    result = self.querier.search(search)
-                    self.search_result_processing(search, result)
-                except FileNotFoundError as e:
-                    print(f'ERROR: {str(e)}')
-                    return
-        self.run_post_operations()
-        if self.config.monitorings:
-            self.monitoring.monitor()
- 
+                    self.installer.operate()
+                except EngineDown:
+                    online_config_keys = self.config.get_online_config_keys()
+                    if self.config.get_online_config_keys:
+                        log.info(f'"{self.config.engine}" is down, unable to execute {online_config_keys}')
+                        return
 
-def run_cmd_line(cmd_line_args): 
-    script_name = basename(cmd_line_args[0])
-    if not exists(LOG_DIR):
-        makedirs(LOG_DIR)
-    if len(cmd_line_args) != 2:
-        print(f'The script "{script_name}" takes exactly 1 parameter:\n')
-        print(f'Usage:   {sys.executable} {script_name} <config-file-path>')
-        return
-    file_path = cmd_line_args[1]
-    if not isfile(file_path):
-        print(f'"{file_path}" is not a file:\n')
-        print(f'Usage:   {sys.executable} {script_name} <config-file-path>')
-        return
+            if self.config.server != OFF_LINE:
+                if self.config.data_source:
+                    if self.config.prefeeding_action not in PRE_FEEDING_ACTIONS:
+                        actions = '", "'.join(PRE_FEEDING_ACTIONS)
+                        msg = f'"prefeeding_action" must be one of these: "{actions}"'
+                        raise ConfigError(msg)
+                    if self.config.prefeeding_action == DEL_ALL_COL:
+                        self.feeder.delete_all_collections()
+                    elif self.config.prefeeding_action == DEL_COL:
+                        self.feeder.delete_collection_if_exists()
+                    elif self.config.prefeeding_action == RECREATE_COL:
+                        self.feeder.delete_collection_if_exists()
+                        self.feeder.create_collection_if_not_exists()
+                    elif self.config.prefeeding_action == CREATE_MISSING_COL:
+                        self.feeder.create_collection_if_not_exists()
+                    if self.feeder.collection_exists():
+                        if self.config.schema_changes:
+                            self.schema_manager.add_field_if_absent()
+                        if self.config.no_processing:
+                            self.feeder.feed_documents_and_commit()
+                        else:
+                            self.feeder.feed_documents_commit_and_process()
+                    else:
+                        raise ConfigError(f'Cannot feed to non-existing collection "{self.config.col_name}"')
+                elif not self.feeder.collection_exists():
+                    if self.config.get_online_config_keys():
+                        if self.config.col_name:
+                            raise ConfigError(f'There is no collection "{self.config.col_name}"')
+                        else:
+                            actions = '", "'.join(self.config.get_online_config_keys())
+                            raise ConfigError(f'The configured action(s) "{actions}" require(s) the collection to be set') 
+                    
+                if self.config.processing:
+                    self.feeder.process()
+                if self.config.schema_changes:
+                    self.schema_manager.add_field_if_absent()
+                if self.config.documents_updates:
+                    self.document_updater.do_updates()
+                if self.config.clustering:
+                    self.clusterer.create_clustering_job_and_wait()
+                if self.config.classifications:
+                    self.classifier.do_classifications()
+                if self.config.sampling:
+                    pretty_print(self.sampler.create_sampling_job_and_wait())
+                if self.config.doc_retrieval:
+                    self.doc_retriever.retrieve_documents()
+                for search in self.config.searches:
+                    try:
+                        result = self.querier.search(search)
+                        self._search_result_processing(search, result)
+                    except FileNotFoundError as e:
+                        print(f'ERROR: {str(e)}')
+                        return
+                 
+            if self.config.reporting:
+                self.reporter.do_reporting()                 
+            if self.config.uninstaller:
+                self.uninstaller.operate()
+            if self.config.monitorings:
+                self.monitoring.monitor()
+            if not self.config.infinite_loop:
+                break
 
-    config_file_path = cmd_line_args[1]
-    with open(config_file_path, 'rb') as f:
-        try:
-            config = loads(f.read().decode('utf-8'))
-            if 'config_source' not in config:
-                config['config_source'] = config_file_path
-            if 'silent_mode' not in config:
-                if run_from_cmd_line:
-                    config['silent_mode'] = False
-                else:
-                    config['silent_mode'] = True
-        except JSONDecodeError as e:
-            print(f'Config file "{config_file_path}" contains bad json: {e}')
-            return
 
-        admin = Admin(Config(config))
-        return admin.run_config()
+class CommandLine:
+
+    def __init__(self, argv=None):
+        if argv:
+            sys.argv = argv
+        self.argv = sys.argv
+        pre_parser = ArgumentParser(add_help=False)
+        self.parser = ArgumentParser(description='IMPORTANT: Positional arguments must come before optional arguments in spite of what usage above shows to the contarary.')
         
-run_from_cmd_line = False
-if __name__ == '__main__':
-    run_from_cmd_line = True
-    run_cmd_line(sys.argv)
+        generic_help = "'builtin', 'test' or path to config file"
+        version_help = f"The {basename(sys.argv[0])} version"
+        version_string = f"{pre_parser.prog}: {AYFIE_EXPRESS_VERSION}"
+        
+        pre_parser.add_argument( 'config', help=generic_help)
+        self.parser.add_argument('config', help=generic_help)
+        pre_parser.add_argument( '-V', '--Version', action='version', version=version_string, help=version_help)
+        self.parser.add_argument('-V', '--Version', action='version', version=version_string, help=version_help)
+        self.config_file_path = pre_parser.parse_known_args()[0].config
+        self.file_version_count = 0
+        self.conditional_count = 0
+        
+    def _dump_config(self, config):
+        Os.make_dir(AYFIE_EXPRESS_CFG_DIR)
+        path = join(AYFIE_EXPRESS_CFG_DIR, f"config_{self.file_version_count}.json")
+        Os.write_to_file_as_non_root_user(path, pretty_formated(config).encode("utf-8"))
+        self.file_version_count += 1
+        
+    def get_default_config(self):
+        return """{
+            "cmd_line": {
+                "positional_variables": [],
+                "optional_variables": {
+                    "host": "localhost", 
+                    "port": "80",
+                    "inst_dir": "none",
+                    "docker_dir": "none",
+                    "docker_user": "none",
+                    "docker_pwd": "none",                     
+                    "version": "none",
+                    "node": "single",
+                    "ram": "64",
+                    "primary": "", 
+                    "processor": "",  
+                    "secret": "none",
+                    "grafana": "no",
+                    "frontend": "yes",
+                    "admin_page": "no",
+                    "feeder": "yes",
+                    "install": "no",
+                    "start": "no",
+                    "collection": "none",
+                    "recreate": "no",
+                    "data_set": "none", 
+                    "data_path": "none",
+                    "fuzzy": "0",
+                    "loop": "no",
+                    "preprocess": "none",
+                    "processing": "no",
+                    "clustering": "no",
+                    "sampling": "no",           
+                    "retrieve": "none",
+                    "search":"none",
+                    "size": "1",
+                    "reporting": "no", 
+                    "stop": "no",
+                    "uninstall": "no",
+                    "nuke": "no",
+                    "simulate": "no"
+                },
+                "help_text": {
+                    "host": "The ayfie Inspector API server, default: '{default}'",
+                    "port": "The ayfie Inspector API port, default: '{default}'",
+                    "inst_dir": "The ayfie Inspector install dir, default: the version",
+                    "docker_dir": "The Docker data dir, 'none' results in default",
+                    "docker_user": "The Docker registry user name",
+                    "docker_pwd": "The Docker registry user password", 
+                    "version": "The ayfie Inspector version number, default: '{default}'",
+                    "node": "{allowed_values}, default: '{default}'",
+                    "ram": "Amount of host RAM, default: '{default}'",
+                    "primary": "Primary node IP/FQDN, default: '{default}'",
+                    "processor": "Processor node IP/FQDN, default: '{default}'",
+                    "secret": "Security client secret, default: '{default}' (no security)",
+                    "grafana": "Install Grafana: {allowed_values}, default: '{default}'",
+                    "frontend": "Install frontend: {allowed_values}, default: '{default}'",
+                    "admin_page": "Frontend admin page: {allowed_values}, default: '{default}'",
+                    "feeder": "Install feeder (Enrichor): {allowed_values}, default: '{default}'",
+                    "install": "{allowed_values}, default: '{default}'",
+                    "start": "Start ayfie Inspector: {allowed_values}, default: '{default}'",          
+                    "collection": "The collection id/name, default: '{default}'",  
+                    "recreate": "(Re)create collection: {allowed_values}, default: '{default}'",            
+                    "data_set": "{allowed_values}",
+                    "data_path": "Path to data file or directory, default: '{default}'",
+                    "fuzzy": "Maximum random character replacments, default: '{default}'",
+                    "loop": "{allowed_values}, default: '{default}'",
+                    "preprocess": "ET1 only: {allowed_values}, default: '{default}'",
+                    "processing": "{allowed_values}, default: '{default}'",
+                    "clustering": "{allowed_values}, default: '{default}'",
+                    "sampling": "{allowed_values}, default: '{default}'",
+                    "retrieve": "List of fields to dump to output.csv, default: '{default}'",
+                    "search": "A search query",
+                    "size": "Number of returned search results, default: '{default}'",
+                    "reporting": "'yes' requires version number set, default: '{default}'",
+                    "stop": "Stop ayfie Inspector: {allowed_values}, default: '{default}'",
+                    "uninstall": "{allowed_values}, default: '{default}'",
+                    "nuke": "{allowed_values}, default: '{default}'",
+                    "simulate": "Install simulation: {allowed_values}, default: '{default}'"
+                },
+                "allowed_values": {
+                    "host": "^[0-9a-z\\\\.]+$",
+                    "port": "^[0-9]{2,6}$",
+                    "install": ["yes","no"],
+                    "start": ["yes","no"],
+                    "stop": ["yes","no"],           
+                    "uninstall": ["yes","no"],
+                    "version": "^(none)|([0-9\\\\.]+)$",
+                    "node": ["single", "primary", "processor"],
+                    "ram": "^[0-9]+$",
+                    "data_set": ["single_email","smoke","smoke_fragment","none"],
+                    "grafana": ["yes","no"],
+                    "frontend": ["yes","no"], 
+                    "admin_page": ["yes","no"],
+                    "feeder": ["yes","no"],
+                    "preprocess": ["IPRO","NUIX","none"],                  
+                    "processing": ["yes","no"],
+                    "clustering": ["yes","no"],
+                    "sampling": ["yes","no"],
+                    "retrieve": "^[a-zA-Z0-9,_]+$",
+                    "size": "^[0-9]+$",
+                    "recreate": ["yes","no"],
+                    "start": ["yes","no"],
+                    "stop": ["yes","no"],
+                    "fuzzy": "^[0-9]+$",
+                    "loop": ["yes","no"],
+                    "nuke": ["yes","no"],
+                    "simulate": ["yes","no"]
+                }
+            },
+            "server": "_host_",  
+            "port": "_port_",
+            "job_server: _node_ != 'single' ": "_processor_",
+            "col_name": "_collection_",
+            "infinite_loop: _loop_ == 'yes' ": true,
+            "client_secret: _secret_ != 'none' ": "_secret_",
+            "installer: _install_ == 'yes' or _start_ == 'yes' ": {
+                "docker_data_dir": "_docker_dir_",
+                "simulation: _simulate_ == 'yes' ": true,
+                "version": "_version_",
+                "install_dir": "_inst_dir_",
+                "enable_frontend: _node_ == 'processor' or _frontend_ == 'no' ": false,       
+                "enable_grafana: _node_ != 'processor' and _grafana_ == 'yes' ": true,
+                "enable_feeder: _node_ != 'processor' and _feeder_ == 'yes' ": true,
+                "processor_node: _node_ == 'processor' ": true,
+                "primary_node: _node_ == 'primary' ": true,
+                "primary_node_IP_or_FQDN: _node_ == 'processor' ": "_primary_",
+                "disable_defender": true,
+                "enable_admin_page: _admin_page_ == 'yes'": true,
+                "enable_gdpr": true,
+                "generate_dot_env_file_only": false,
+                "install: _install_ == 'yes' ": true,
+                "start: _start_ == 'yes' ": true,
+                "ram_on_host": "_ram_",
+                "security:  _secret_ != 'none' ": {
+                    "type": "self_signed",                                                   
+                    "domain": "54.93.241.152",
+                    "country":"DE",
+                    "state":"Bayern",
+                    "city":"Munich",
+                    "company":"Ayfie"
+                },
+                "docker_registry": {
+                    "user": "_docker_user_",
+                    "password": "_docker_pwd_"
+                }
+            },
+            "reporting: _reporting_ == 'yes' ": {
+                "retrieve_logs": "_version_/"
+            },
+            "conditional: _node_ != 'processor' ": {
+                "feeding: _data_set_ != 'none' or _data_path_ != 'none' ": {
+                    "data_source: _data_set_ == 'smoke' ": "http://suplin1.ayfie.cloud:8000/testdata/11d.zip",
+                    "data_source: _data_set_ == 'smoke_fragment' ": "http://suplin1.ayfie.cloud:8000/testdata/file0.zip",  
+                    "data_source: _data_set_ == 'single_email' ": "http://suplin1.ayfie.cloud:8000/testdata/email.txt",
+                    "data_source: _data_path_ != 'none' ": "_data_path_",
+                    "prefeeding_action: _recreate_ == 'yes' ": "recreate_collection",
+                    "no_processing": true,
+                    "report_time": true,
+                    "preprocess: _preprocess_ != 'none' ": "_preprocess_",
+                    "ignore_csv": true,
+                    "max_fuzzy_chars_per_doc": "_fuzzy_"
+                },
+                "processing: _processing_ == 'yes' ": {                           
+                    "report_time": true
+                },
+                "clustering: _clustering_ == 'yes' ": {
+                    "report_time": true
+                },
+                "sampling: _sampling_ == 'yes' ": {      
+                    "method": "SMART",
+                    "size": 3,
+                    "smartSpecificity" : 0.3,
+                    "smartDimensions" : 100,
+                    "smartMinDf" : 5.0E-4,
+                    "smartPresampling" : 1.0,
+                    "report_time": true
+                },
+                "document_retrieval: _retrieve_ != 'none' " : {
+                    "query": "",    
+                    "fields": ["_retrieve_"],           
+                    "skip_empty_documents": true,
+                    "drop_underscore_fields": false
+                }, 
+                "search: _data_set_ == 'smoke' ": [
+                    {
+                        "query": "",
+                        "result": 993576
+                    },
+                    {
+                        "query": "_exists_:_et2ThreadGroupId",
+                        "result": 582412
+                    },
+                    {
+                        "query": "_duplicate:false",
+                        "result": 149822
+                    }
+                ],
+                "search: _data_set_ == 'single_email' ": [
+                    {
+                        "query": "*",
+                        "result": 1
+                    },
+                    {
+                        "query": "_exists_:_et2ThreadGroupId",
+                        "result": 1
+                    }
+                ],
+                "search: _search_ != 'none' ": {
+                    "query": "_search_",
+                    "size": "_size_"
+                }
+            },
+            "uninstaller: _uninstall_ == 'yes' or _stop_ == 'yes' or _nuke_ == 'yes' ": {
+                "simulation": false,
+                "version": "_version_",
+                "stop: _stop_ == 'yes' ": true,
+                "uninstall: _uninstall_ == 'yes' ": true,
+                "nuke_everything: _nuke_ == 'yes' ": true
+            }
+        }
+        """ 
+        
+    def _read_config(self, config_file_path):
+        if isfile(config_file_path):
+            with open(config_file_path, 'rb') as f:
+                try:
+                    config = loads(f.read().decode('utf-8'))
+                except JSONDecodeError as e:
+                    self.parser.error(f'Config file "{config_file_path}" contains bad json: {e}')
+                except Exception as e:
+                    self.parser.error(f'Loading config file "{config_file_path}" failed: {e}')
+        elif config_file_path == "builtin":
+            config = loads(self.get_default_config())
+        else:
+            self.parser.error(f'"{config_file_path}" is not a valid value')
+        return config
+           
+    def _get_help_text(self, command_line, variable):
+        if "help_text" in command_line and variable in command_line["help_text"]:
+            help_text = command_line["help_text"][variable]
+            if "{allowed_values}" in command_line["help_text"][variable]:
+                if variable in command_line["allowed_values"]:
+                    values = "', '".join(command_line["allowed_values"][variable])
+                    help_text = help_text.replace("{allowed_values}", f"'{values}'")
+            if "{default}" in command_line["help_text"][variable]:
+                help_text = help_text.replace("{default}", command_line["optional_variables"][variable])
+            return help_text
+        return "config file defined argument"
+       
+    def get_config(self, is_run_from_cmd_line): 
+        config = self._read_config(self.config_file_path) 
+        self._dump_config(config)
+        if "include" in config:
+            config_to_include = self._read_config(config['include'])
+            del config["include"]
+            config = {**config, **config_to_include}
+        if "cmd_line" in config:
+            command_line = config["cmd_line"]
+            del config["cmd_line"]
+            self.parser.add_argument('-s', '--show', help="No execution, just shows settings (including defaults)", action='store_true') 
+            if "positional_variables" in command_line:
+                for variable in command_line["positional_variables"]:
+                    self.parser.add_argument(f'{variable}', help=self._get_help_text(command_line, variable), action='store')
+            if "optional_variables" in command_line:
+                for variable in command_line["optional_variables"]:
+                    self.parser.add_argument(f'--{variable}', help=self._get_help_text(command_line, variable), action='store', 
+                                             nargs="?", default=command_line["optional_variables"][variable], metavar="value")
+            if "allowed_values" in command_line:
+                args = self.parser.parse_args()
+                for arg in command_line["allowed_values"]:
+                    if arg in vars(args):
+                        value = getattr(args, arg)
+                        allowed_values = command_line["allowed_values"][arg]
+                        if not value:
+                            self.parser.error(f"Parameter '{arg}' has not been given a value.")
+                        err_msg = f"Value error, '{value}' is not a valid value for '{arg}'."
+                        if type(allowed_values) is list:
+                            if not value in command_line["allowed_values"][arg]:
+                                valid_values = "', '".join(command_line["allowed_values"][arg])
+                                err_msg += f" Valid values are: '{valid_values}'"
+                                self.parser.error(err_msg)
+                        else:
+                            if not match(allowed_values, value):
+                                err_msg += f" Value have to match regex: '{allowed_values}'"
+                                self.parser.error(err_msg)
+        args = vars(self.parser.parse_args())
+        if "show" in args:
+            if args["show"]:
+                print("Parameter values (including default values):")
+                pretty_print(args)
+                exit()
+            del args["show"]
+        config = self._process_conditional_keys(config, args)
+        self._dump_config(config)
+        config = self._right_shift_remaining_conditional_parameters(config) 
+        self._dump_config(config)        
+        config = self._replace_variables(config, args)
+        if 'config_source' not in config:
+            config['config_source'] = self.config_file_path
+        if not 'silent_mode' in config:
+            if is_run_from_cmd_line:
+                config['silent_mode'] = False
+            else:
+                config['silent_mode'] = True
+        config = loads(dumps(config).replace('"none"', 'null'))
+        config["cmdline"] = ' '.join(self.argv)
+        self._dump_config(config)
+        return config
+        
+    def _process_key(self, struct, args, key):
+        keyparts = key.split(":")
+        if len(keyparts) == 2:
+            boolean_expression = keyparts[1]
+            for arg in args:
+                boolean_expression = boolean_expression.replace(f"_{arg}_", f"'{args[arg]}'")
+            try:
+                if eval(boolean_expression):
+                    new_key = keyparts[0]
+                    if new_key == CONDITIONAL_KEY:
+                        new_key = f"{new_key}_{str(self.conditional_count)}"
+                        self.conditional_count += 1
+                    struct[new_key] = struct[key]
+            except NameError as e:
+                self.parser.error(f"Error in conditional expression ({keyparts[1]}): {str(e)}")
+            del struct[key]
+        return struct
+        
+    def _process_conditional_keys(self, struct, args):
+        if type(struct) is dict:
+            for key in list(struct.keys()):
+                struct = self._process_key(struct, args, key)
+            for key in list(struct.keys()):
+                struct[key] = self._process_conditional_keys(struct[key], args)
+        elif type(struct) is list:
+            for i, item in enumerate(struct):
+                struct[i] = self._process_conditional_keys(item, args)
+        return struct
+        
+    def _right_shift_remaining_conditional_parameters(self, struct):
+        if type(struct) is dict:
+            for key in list(struct.keys()):
+                if key.startswith(CONDITIONAL_KEY): 
+                    for sub_key in struct[key]:
+                        struct[sub_key] = struct[key][sub_key]
+                    del struct[key]
+                else:
+                    struct[key] = self._right_shift_remaining_conditional_parameters(struct[key])
+        elif type(struct) is list:
+            for i, item in enumerate(struct):
+                struct[i] = self._right_shift_remaining_conditional_parameters(item)
+        return struct
+        
+    def _replace_variables(self, struct, variables):
+        if not variables:
+            return struct
+        if type(struct) is dict:
+            for key in struct.keys():
+                struct[key] = self._replace_variables(struct[key], variables)
+        elif type(struct) is list:
+            for i in range(len(struct)):
+                struct[i] = self._replace_variables(struct[i], variables)
+        elif type(struct) is str:
+            for key in variables.keys():
+                struct = struct.replace(f"_{key}_", variables[key])
+        return struct
 
+ 
+class AyfieExpressRegressionTest:
+
+    def __init__(self):
+        self.versions = [
+                "2.1.0", "2.2.0", "2.3.0", "2.4.1", "2.4.2", "2.5.0", "2.5.1", "2.6.0", "2.6.1", "2.7.0", 
+                "2.8.0", "2.8.1", "2.8.2", "2.9.0", "2.9.1", "2.10.0", "2.11.0", "2.12.0", "2.12.1"
+             ]
+        self.current_customer_versions = ["2.5.0", "2.6.1", "2.9.1"]
+        self.system_test_targets = ['default', 'all', 'historical', 'customer', 'security', 'memory', 'fuzzy',  'mini_smoke', 'latest']
+        self.unit_test_targets = ['default', 'all']
+        
+    def get_test_targets(self, test_type):
+        if test_type == 'unit':
+            return self.unit_test_targets
+        elif test_type == 'system':
+            return self.system_test_targets
+        raise ValueError(f"There is no test type '{test_type}'")
+        
+    def run_tests(self, test_type, test_target, docker_user=None, docker_password=None, client_secret=None):
+        if test_type == 'system':
+            self.run_end_to_end_tests(test_target, docker_user, docker_password, client_secret)
+        elif test_type == 'unit':
+            self.run_unit_tests(test_target)
+
+    def _print_test_heading(self, test_target, version):
+        print( f"\n##### Version {version} tested end to end for test target '{version}' #####")
+        
+    def _get_command_line(self, version, data_set, docker_user, docker_password, run_processing=True, 
+                          enable_all_features=False, fuzzy_testing=False, secret=None, ram=64):
+        cmdline = f"ayfieExpress.py builtin --install yes --start yes --port 20000 --version {version} --data_set {data_set}"
+        cmdline += " --collection regression --recreate yes --uninstall yes --preprocess IPRO"
+        cmdline += f" --docker_user {docker_user} --docker_pwd {docker_password}"
+        if HOST_OS == OS_LINUX:
+            cmdline += f" --docker_dir /home/docker "
+        if run_processing:
+            cmdline += f" --processing yes"
+        if enable_all_features:
+            cmdline += " --clustering yes --sampling yes --grafana yes --feeder yes"
+            cmdline += " --reporting yes --retrieve creditcard,iban --admin_page yes"  
+        if fuzzy_testing:
+            cmdline += " --fuzzy yes --loop yes"
+        if secret:
+            cmdline += f" --secret {secret}"
+        if ram != 64:
+            cmdline += f" --ram {ram}"
+        return cmdline
+        
+    def _display_command_line(self, cmdline):
+        python = "python"
+        if HOST_OS == OS_LINUX:
+            python = "python3"
+        print(f"{python} {cmdline}")
+        
+    def _execute_test(self, test_target, version, data_set, docker_user, docker_password, run_processing=True, 
+                      enable_all_features=False, fuzzy_testing=False, secret=None, ram=64):
+        self._print_test_heading(test_target, version)
+        cmdline = self._get_command_line(version, data_set, docker_user, docker_password, run_processing, 
+                                         enable_all_features, fuzzy_testing, secret, ram)
+        self._display_command_line(cmdline)
+        Admin(Config(CommandLine(cmdline.split()).get_config(True))).run_config() 
     
+    def run_end_to_end_tests(self, test_target, docker_user=None, docker_password=None, client_secret=None):
+        if test_target in ['historical', 'all']:
+            for version in self.versions: 
+                self._execute_test('historical', version, "single_email", docker_user, docker_password, enable_all_features=False)
+        if test_target in ['customer', 'all']:
+            for version in self.current_customer_versions:
+                self._execute_test('customer', version, "smoke_fragment", docker_user, docker_password, enable_all_features=True) 
+        if test_target in ['default', 'latest', 'all']:
+            self._execute_test('latest', self.versions[-1], "smoke", docker_user, docker_password, enable_all_features=True)
+        if test_target in ['mini_smoke']:
+            self._execute_test('latest', self.versions[-1], "single_email", docker_user, docker_password, enable_all_features=True)
+        if test_target in ['memory', 'all']:
+            for memory in ['32']:
+                self._execute_test('memory', self.versions[-1], "smoke", docker_user, docker_password, enable_all_features=True, ram=memory)             
+        if test_target in ['fuzzy', 'all']:
+            self._execute_test('fuzzy', self.versions[-1], "smoke", docker_user, docker_password, 
+                               run_processing=False, enable_all_features=True, fuzzy_testing=True)
+        # 'security' is not included in 'all' as it involves manual steps               
+        if test_target in ['security']:
+            self._execute_test('security', self.versions[-1], "single_email", docker_user, docker_password, 
+                                enable_all_features=True, security_testing=True)  
+
+    def run_unit_tests(self, test_type=None, simulate=True):
+        self.test_Os_class()
+        self.test_Docker_class(simulate)
+
+    def test_Os_class(self):
+        DIRECTORY    = "test_xyz"
+        USER         = "test_user_xyz"
+        PASSWORD     = "password_xyz"
+        GROUP        = "test_group_xyz"
+        MODE         = "u+x"
+        SCRIPT_NAME  = f"script_xyz.{Os.get_script_extension()}"
+        WINDOWS_CODE = f"dir {SCRIPT_NAME}"
+        LINUX_CODE   = f"#!/bin/bash\nls -al {SCRIPT_NAME}"
+
+        if HOST_OS == OS_LINUX:
+            SCRIPT_CODE = LINUX_CODE
+        elif HOST_OS == OS_WINDOWS:
+            SCRIPT_CODE = WINDOWS_CODE
+        
+        linux_distro, version = Os.get_linux_distro_and_version()
+        assert(HOST_OS == OS_WINDOWS or linux_distro in LINUX_DISTROS), f"'{linux_distro}' is an unsupported Linux distro"
+        assert(HOST_OS == OS_WINDOWS or version != None), "Version should  not be None for a Linux distro"
+        assert (Os.get_actual_user() in Os.get_users()), f"The actual user is not among existing users."
+        if Os.user_exists(USER):
+            Os.delete_user(USER)
+        assert (not USER in Os.get_users()), f"User '{USER}' should not be a user."
+        try:
+            Os.create_user(USER, PASSWORD)
+            assert (HOST_OS == OS_WINDOWS or (HOST_OS == OS_LINUX and Os.user_exists(USER))), f"Failed to crete user '{USER}'"
+        except PermissionError as e:
+            if HOST_OS == OS_WINDOWS or (HOST_OS == OS_LINUX and Os.is_root_or_elevated_mode()):
+               raise
+        try:
+            if Os.group_exists(GROUP):
+                Os.delete_group(GROUP)
+            assert (not GROUP in Os.get_groups()), f"Group '{GROUP}' should not be a group."
+        except NotImplementedError as e:
+            assert (HOST_OS == OS_WINDOWS), f"Failed in regard to group '{GROUP}'"
+        try:
+            Os.create_group(GROUP)
+            assert (HOST_OS == OS_WINDOWS or (HOST_OS == OS_LINUX and Os.group_exists(GROUP))), f"Failed to crete group '{GROUP}'"
+            Os.add_user_to_groups(USER, GROUP)
+        except PermissionError as e:
+            if HOST_OS == OS_WINDOWS or (HOST_OS == OS_LINUX and Os.is_root_or_elevated_mode()):
+               raise
+        Os.make_dir(DIRECTORY)
+        with change_dir(DIRECTORY):
+            Os.write_to_file_as_non_root_user(SCRIPT_NAME, SCRIPT_CODE.encode("utf-8"))
+            Os.change_mode(SCRIPT_NAME, MODE)
+            if Os.is_root_or_elevated_mode():
+                Os.change_owner(SCRIPT_NAME, USER)
+            output = execute(join(".", SCRIPT_NAME), return_response=True)
+            assert (SCRIPT_NAME in output), "Unexpected script output"
+        try:
+            Os.delete_group(GROUP) 
+            assert (not Os.group_exists(GROUP)), f"Failed to delete group '{GROUP}'" 
+        except NotImplementedError as e:
+            assert (HOST_OS == OS_WINDOWS), f"Failed to delete or check for existence of group '{GROUP}'"    
+        if Os.is_root_or_elevated_mode():
+            Os.delete_user(USER)
+        try:
+            assert (not Os.user_exists(GROUP)), f"Failed to delete group '{GROUP}'"
+        except NotImplementedError as e:
+            assert (HOST_OS == OS_WINDOWS), f"Failed to delete or check for existence of group '{GROUP}'"    
+        Os.recreate_dir(DIRECTORY) 
+        with change_dir(DIRECTORY):
+            assert (len(listdir()) == 0), f"Failed to recreate directory {DIRECTORY}" 
+        assert (DIRECTORY in listdir()), f"Expected to find directory {DIRECTORY}" 
+        Os.del_dir(DIRECTORY)
+        assert (not DIRECTORY in listdir()), f"Did not expect to find directory {DIRECTORY} in existence" 
+        print("SUCCESSFUL testing of Class Os")
+        
+    def _test_Docker_class(self, simulate):
+        simulation = {}
+        if simulate:
+            simulation = {
+            'installed': False, 
+            'running': False, 
+            'os': OS_WINDOWS,
+            'linux_distro': None
+        }
+        docker = Docker(simulate, simulation)  
+        docker.install()
+        docker.start()
+        dockerCompose = DockerCompose(simulate, simulation)
+        docker.stop()
+        docker.uninstall()
+        docker.nuke_everything()
+        print("SUCCESSFUL testing of Class Docker")
+        
+    def test_Docker_class(self, simulate=True):
+        if simulate:
+            os_flavors = [(OS_WINDOWS, None)]
+            for distro in DOCKER_LINUX_DISTROS:
+                os_flavors.append((OS_LINUX, distro))
+            for os_flavor in os_flavors:
+                simulation = {}
+                if simulate:
+                    simulation = Docker.gen_simulation_config()
+                    simulation['os'] = os_flavor[0]
+                    simulation['linux_distro'] = os_flavor[1]
+                    simulation["installed"] = True
+                    simulation["running"] = True
+                print(f"\n\n------ Testing {os_flavor} with simualation ON ------\n")
+                self._test_Docker_class(simulation)
+        else:
+            print(f"\n------ Testing with simualation OFF ------\n") 
+            self._test_Docker_class()   
+
+def test_help(prog_name, test_type, test_target, test_targets):
+    if not test_type:
+        print(f"usage: {prog_name} test <type> <target> [<user>] [<password>] [<secret>]")
+    elif test_type == 'unit':
+        print(f"usage: {prog_name} test {test_type} <target>")
+    else:
+        target = "<target>"
+        if test_target:
+            target = test_target
+        if test_type == 'system':
+            cmdline = f"usage: {prog_name} test {test_type} {target} <user> <password>"
+            if test_target == 'security':
+                print(f"{cmdline} <secret>")
+            else:
+                print(f"{cmdline} [<secret>]")
+        else:
+            print(f"{prog_name}: error: '{test_type}' is not a valid test type")
+            print(f"usage: {prog_name} test <type> {target} [<user>] [<password>] [<secret>]")
+    print("\npositional arguments:")
+    if test_targets:
+        print("  target     '" + "','".join(test_targets) + "'")
+    else:
+        print("  type       'unit' or 'system'")                
+        print("  target     Run 'ayfieExpress.py test <type> -h'")
+    if test_type != 'unit':
+        print("  user       Docker registry user name")                
+        print("  password   Docker registry user password")
+        print("  secret     Keycloak client secret")
+        
+def tool_help(prog_name):
+    print(f"usage: {prog_name} <mode> [-h]")
+    print("\npositional arguments:")
+    print("  mode            'builtin', 'test' or a config file path")
+    print("\noptional arguments:")
+    print("  -h, --help      Help details in regard to the selected mode") 
   
+  
+def main():
+    numb_of_args = len(sys.argv)
+    prog_name = sys.argv[0]
+    help_options = ['-h', '--help']
+    if numb_of_args == 1 or (numb_of_args == 2 and sys.argv[1] in help_options):
+        tool_help(prog_name)      
+    elif numb_of_args >= 2: 
+        if sys.argv[1] == 'test':
+            test_type = test_target = user = password = client_secret = None 
+            if numb_of_args >= 3:
+                test_type = sys.argv[2]
+                if test_type in help_options:
+                    test_help(prog_name, None, None, None)
+                    return
+            if numb_of_args >= 4:
+                test_target = sys.argv[3]
+            if numb_of_args >= 5:
+                user = sys.argv[4]
+            if numb_of_args >= 6:
+                password = sys.argv[5]
+            if numb_of_args >= 7:
+                client_secret = sys.argv[6]
+            if not test_type:
+                test_help(prog_name, None, None, None)
+            elif not test_type in ['unit','system']:
+                test_help(prog_name, test_type, None, None)
+            elif test_target:
+                test_targets = AyfieExpressRegressionTest().get_test_targets(test_type)
+                if not test_target in test_targets:
+                    print(f"{prog_name}: error: '{test_target}' is not a valid {test_type} test target")
+                    test_help(prog_name, test_type, None, test_targets)
+                elif test_target == 'security' and user and password and not client_secret:
+                    print(f"{prog_name}: error: 'security' requires client secret to be set")
+                    test_help(prog_name, test_type, test_target, test_targets)
+                else:
+                    if test_type == 'system':
+                        if user and password:
+                            AyfieExpressRegressionTest().run_tests(test_type, test_target, user, password, client_secret)
+                        else:
+                            print(f"{prog_name}: error: Docker registry user and password not set")
+                            test_help(prog_name, test_type, test_target, test_targets)
+                    if test_type == 'unit':
+                        AyfieExpressRegressionTest().run_tests(test_type, test_target)
+            else:
+                test_targets = AyfieExpressRegressionTest().get_test_targets(test_type)
+                test_help(prog_name, test_type, test_target, test_targets)
+        else:
+            Admin(Config(CommandLine().get_config(True))).run_config() 
+                   
+if __name__ == '__main__':
+    main()
+
+          
+# The next line is required by the powershell script on the first few lines{secret}
+#>
