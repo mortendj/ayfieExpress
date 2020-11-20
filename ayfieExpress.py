@@ -23,7 +23,7 @@ Exit
 <#
 """
 
-AYFIE_EXPRESS_VERSION = "0.0.99 (not uploaded)"
+AYFIE_EXPRESS_VERSION = "1.0.0"
 
 from json import loads, dumps
 from json.decoder import JSONDecodeError
