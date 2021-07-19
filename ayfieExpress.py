@@ -4043,7 +4043,7 @@ class Installer(Installation):
         else:
             zip_file_name += f"oem-{concluded_os}-"
         zip_file_name += f"installer-{self.version}.zip"
-        return f"http://docs.ayfie.com/ayfie-platform/release/{zip_file_name}"
+        return f"https://docs.ayfie.dev/ayfie-platform/release/{zip_file_name}"
         
     def _get_docker_compose_format_version(self):
         os = self._get_concluded_os()
